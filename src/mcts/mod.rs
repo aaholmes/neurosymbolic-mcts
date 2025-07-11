@@ -107,7 +107,6 @@ fn backpropagate(node: Rc<RefCell<MctsNode>>, value: f64) {
             };
             current_node.total_value += reward_to_add;
             current_node.total_value_squared += reward_to_add.powi(2); // Accumulate squared reward
-            current_node.total_value_squared += reward_to_add.powi(2); // Accumulate squared reward
         } // End borrow scope
 
         // Move to parent
@@ -184,6 +183,22 @@ pub fn mcts_pesto_search(
     // Handle case where root node is already terminal
     if root_node_rc.borrow().is_terminal {
         return None; // No moves possible
+    }
+
+    // Evaluate and categorize the root node immediately to enable expansion
+    {
+        let mut root_node = root_node_rc.borrow_mut();
+        if root_node.nn_value.is_none() && root_node.terminal_or_mate_value.is_none() {
+            let score_cp = pesto_eval.eval(&root_node.state, move_gen);
+            let value_current_player = 1.0 / (1.0 + (-score_cp as f64 / 400.0).exp());
+            let value_white_pov = if root_node.state.w_to_move {
+                value_current_player
+            } else {
+                1.0 - value_current_player
+            };
+            root_node.nn_value = Some(value_white_pov);
+            root_node.categorize_and_store_moves(move_gen);
+        }
     }
 
     let mut iteration_count = 0;
@@ -290,11 +305,11 @@ pub fn mcts_pesto_search(
                                 next_state,
                                 move_gen,
                             );
-                            leaf_node.children.push(new_child_rc); // Add child
+                            leaf_node.children.push(new_child_rc.clone()); // Add child
 
-                            // Backpropagate the *parent's* stored NN value when expanding (AlphaZero style)
+                            // Backpropagate from the newly created child so it gets a visit
                             value_to_propagate = leaf_node.nn_value.unwrap();
-                            node_to_propagate_from = leaf_node_rc.clone(); // Start backprop from parent of new child
+                            node_to_propagate_from = new_child_rc; // Start backprop from the new child
                         } else {
                             // Node evaluated but fully explored. This can happen.
                             // Backpropagate the known value again to reinforce parent nodes.
@@ -435,15 +450,15 @@ mod tests {
 
 #[test]
     fn test_mcts_pesto_favors_better_eval() {
-        // Position: White to move. Can capture black queen (Qxb7) or black pawn (Qxh7).
+        // Position: White to move. White queen on d4 can capture black queen on b6 or black pawn on f6.
         // Capturing the queen is much better according to Pesto.
-        let board = Board::new_from_fen("r1b1kbnr/pq1ppppp/n7/1p6/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let board = Board::new_from_fen("rnbk2nr/pppp1ppp/1q3p2/8/3Q4/8/PPPPPPPP/RNB1KBNR w KQ - 0 1");
         let move_gen = MoveGen::new();
         let pesto_eval = PestoEval::new();
 
-        // Moves available: Qxb7, Qxh7, and others.
-        let queen_capture_move = Move::from_uci( "d1b7").unwrap(); // Capture queen
-        let pawn_capture_move = Move::from_uci( "d1h7").unwrap(); // Capture pawn (less good)
+        // Moves available: Qxb6 (capture queen), Qxf6 (capture pawn), and others.
+        let queen_capture_move = Move::from_uci("d4b6").unwrap(); // Capture queen
+        let pawn_capture_move = Move::from_uci("d4f6").unwrap(); // Capture pawn (less good)
 
         // Run for enough iterations to distinguish
         let best_move = mcts_pesto_search(
@@ -451,7 +466,7 @@ mod tests {
             &move_gen,
             &pesto_eval,
             0, // Disable mate search
-            Some(500), // More iterations to allow evaluation difference to propagate
+            Some(2000), // More iterations to allow evaluation difference to propagate
             None,
         );
 
@@ -461,16 +476,17 @@ mod tests {
         assert_eq!(
             best_move.unwrap(),
             queen_capture_move,
-            "MCTS with Pesto should prefer capturing the queen (Qxb7) over the pawn (Qxh7)"
+            "MCTS with Pesto should prefer capturing the queen (Qxb6) over the pawn (Qxf6)"
         );
 
-        // Optional: Verify the pawn capture is also legal, just less preferred
+        // Optional: Verify both moves are actually legal
         let mut legal_moves = Vec::new();
         let (captures, non_captures) = move_gen.gen_pseudo_legal_moves(&board);
         legal_moves.extend(captures);
         legal_moves.extend(non_captures);
         legal_moves.retain(|&mv| board.apply_move_to_board(mv).is_legal(&move_gen));
-        assert!(legal_moves.contains(&pawn_capture_move), "Pawn capture (Qxh7) should be legal");
+        assert!(legal_moves.contains(&queen_capture_move), "Queen capture (Qxb6) should be legal");
+        assert!(legal_moves.contains(&pawn_capture_move), "Pawn capture (Qxf6) should be legal");
     }
      #[test]
      #[should_panic]

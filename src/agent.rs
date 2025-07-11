@@ -10,6 +10,18 @@ use crate::transposition::TranspositionTable;
 use crate::board::Board; // For piece count check
 use crate::egtb::{EgtbInfo, EgtbProber}; // For EGTB integration
 
+// Test tracking flags (only compiled in test mode)
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static MATE_SEARCH_CALLED: RefCell<bool> = RefCell::new(false);
+    static MCTS_SEARCH_CALLED: RefCell<bool> = RefCell::new(false);
+    static MATE_SEARCH_RETURN_VALUE: RefCell<(i32, Move, u64)> = RefCell::new((0, Move::null(), 0));
+    static MCTS_SEARCH_RETURN_VALUE: RefCell<Option<Move>> = RefCell::new(None);
+}
+
 /// Trait defining the interface for chess agents.
 pub trait Agent {
     /// Get the best move for the current board position.
@@ -132,13 +144,15 @@ impl Agent for HumanlikeAgent<'_> {
         }
 
         // 2. Mate Search
-        #[cfg(not(test))] // Use real mate_search in non-test builds
+        #[cfg(test)]
+        MATE_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = true);
+        
+        #[cfg(test)]
+        let (eval, m, nodes) = MATE_SEARCH_RETURN_VALUE.with(|cell| cell.borrow().clone());
+        
+        #[cfg(not(test))]
         let (eval, m, nodes) =
             mate_search(board, self.move_gen, self.mate_search_depth, false); // verbose set to false for now
-
-        #[cfg(test)] // Use mock_mate_search in test builds
-        let (eval, m, nodes) =
-            mate_search(board, self.move_gen, self.mate_search_depth, false);
 
 
         if eval >= 1000000 { // Check for mate score
@@ -149,17 +163,13 @@ impl Agent for HumanlikeAgent<'_> {
         // 3. MCTS Call
         println!("No EGTB move or mate found, falling back to MCTS search.");
 
-        #[cfg(not(test))] // Use real mcts_pesto_search in non-test builds
-        let mcts_move = mcts_pesto_search(
-            board.current_state().clone(),
-            self.move_gen,
-            self.pesto,
-            0, // Mate search already performed above
-            Some(self.mcts_iterations),
-            Some(std::time::Duration::from_millis(self.mcts_time_limit_ms)),
-        );
-
-        #[cfg(test)] // Use mcts_pesto_search in test builds
+        #[cfg(test)]
+        MCTS_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = true);
+        
+        #[cfg(test)]
+        let mcts_move = MCTS_SEARCH_RETURN_VALUE.with(|cell| cell.borrow().clone());
+        
+        #[cfg(not(test))]
         let mcts_move = mcts_pesto_search(
             board.current_state().clone(),
             self.move_gen,
@@ -240,18 +250,11 @@ mod tests {
         }
     }
 
-    // Flags to track if mock functions were called
-    thread_local! {
-        static MATE_SEARCH_CALLED: RefCell<bool> = RefCell::new(false);
-        static MCTS_SEARCH_CALLED: RefCell<bool> = RefCell::new(false);
-        static MATE_SEARCH_RETURN_VALUE: RefCell<(i32, Move, u64)> = RefCell::new((0, Move::null(), 0));
-        static MCTS_SEARCH_RETURN_VALUE: RefCell<Option<Move>> = RefCell::new(None);
-    }
 
     // Mock mate_search function
     fn mock_mate_search(_board: &mut BoardStack, _move_gen: &MoveGen, _depth: i32, _verbose: bool) -> (i32, Move, u64) {
-        MATE_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = true);
-        MATE_SEARCH_RETURN_VALUE.with(|cell| cell.borrow().clone())
+        super::MATE_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = true);
+        super::MATE_SEARCH_RETURN_VALUE.with(|cell| cell.borrow().clone())
     }
 
     // Mock mcts_pesto_search function
@@ -263,16 +266,16 @@ mod tests {
         _iterations: Option<u32>,
         _time_limit: Option<std::time::Duration>,
     ) -> Option<Move> {
-        MCTS_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = true);
-        MCTS_SEARCH_RETURN_VALUE.with(|cell| cell.borrow().clone())
+        super::MCTS_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = true);
+        super::MCTS_SEARCH_RETURN_VALUE.with(|cell| cell.borrow().clone())
     }
 
     // Helper to reset mock flags
     fn reset_mocks() {
-        MATE_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = false);
-        MCTS_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = false);
-        MATE_SEARCH_RETURN_VALUE.with(|cell| *cell.borrow_mut() = (0, Move::null(), 0));
-        MCTS_SEARCH_RETURN_VALUE.with(|cell| *cell.borrow_mut() = None);
+        super::MATE_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = false);
+        super::MCTS_SEARCH_CALLED.with(|cell| *cell.borrow_mut() = false);
+        super::MATE_SEARCH_RETURN_VALUE.with(|cell| *cell.borrow_mut() = (0, Move::null(), 0));
+        super::MCTS_SEARCH_RETURN_VALUE.with(|cell| *cell.borrow_mut() = None);
     }
 
     // Helper to create a HumanlikeAgent with mocks
@@ -301,8 +304,8 @@ mod tests {
             pesto: pesto_eval_ref,
             egtb_prober: egtb_prober.map(|m| EgtbProber { max_pieces: m.max_pieces }), // Create a dummy EgtbProber with the mock's max_pieces
             mate_search_depth: 5,
-            mcts_iterations: 100,
-            mcts_time_limit_ms: 1000,
+            mcts_iterations: 1000, // Increased for more reliable test results
+            mcts_time_limit_ms: 5000, // Increased timeout for tests
             placeholder_ab_depth: 0, // Not used in this test flow
             placeholder_q_depth: 0, // Not used in this test flow
         }

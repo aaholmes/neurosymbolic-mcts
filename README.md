@@ -3,6 +3,8 @@
 
 Caissawary is a chess engine that combines the strategic guidance of a modern Monte Carlo Tree Search (MCTS) with the ruthless tactical precision of classical search. Its unique, state-dependent search algorithm prioritizes forcing moves and minimizes expensive neural network computations to create a brutally efficient and tactically sharp engine.
 
+![Caissawary Logo](Caissawary.png)
+
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange)](https://rustup.rs/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 

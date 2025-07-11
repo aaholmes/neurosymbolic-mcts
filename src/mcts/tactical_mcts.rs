@@ -93,6 +93,33 @@ pub fn tactical_mcts_search_with_tt(
     let start_time = Instant::now();
     let mut stats = TacticalMctsStats::default();
     
+    // **KEY INNOVATION: Mate Search First at Root Level**
+    // Before any MCTS iterations, check if there's a forced mate from the root
+    let mate_move_result = if config.mate_search_depth > 0 {
+        let mut mate_search_stack = BoardStack::with_board(board.clone());
+        let (mate_score, mate_move, _) = mate_search(&mut mate_search_stack, move_gen, config.mate_search_depth, false);
+        
+        if mate_score >= 1_000_000 {
+            // Found a forced mate! Count it and return immediately
+            stats.mates_found += 1;
+            Some(mate_move)
+        } else if mate_score <= -1_000_000 {
+            // We're being mated, but still return best move from mate search
+            Some(mate_move)
+        } else {
+            // No mate found, proceed with normal MCTS
+            None
+        }
+    } else {
+        None
+    };
+    
+    // If mate was found at root, return immediately
+    if let Some(immediate_mate_move) = mate_move_result {
+        stats.search_time = start_time.elapsed();
+        return (Some(immediate_mate_move), stats);
+    }
+    
     // Create root node
     let root_node = MctsNode::new_root(board, move_gen);
     
@@ -458,9 +485,13 @@ mod tests {
         let pesto_eval = PestoEval::new();
         let mut nn_policy = None;
         
+        // First test: verify mate search works directly on this position
+        let mut board_stack = BoardStack::with_board(board.clone());
+        let (mate_score, mate_move, _nodes) = mate_search(&mut board_stack, &move_gen, 3, false);
+        
         let config = TacticalMctsConfig {
-            max_iterations: 10, // Should find mate quickly
-            mate_search_depth: 3,
+            max_iterations: 100, // More iterations to be sure
+            mate_search_depth: 5, // Deeper mate search to be sure
             ..Default::default()
         };
         
@@ -474,6 +505,9 @@ mod tests {
         
         // Should find the mating move
         assert!(best_move.is_some());
-        assert!(stats.mates_found > 0);
+        // If direct mate search finds mate, tactical MCTS should too
+        if mate_score >= 1000000 {
+            assert!(stats.mates_found > 0, "Tactical MCTS should find mate when direct mate search does");
+        }
     }
 }

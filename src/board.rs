@@ -399,9 +399,81 @@ impl Board {
 
     /// Convert board to FEN notation
     pub fn to_fen(&self) -> Option<String> {
-        // This is a simplified implementation - a full FEN would need more details
-        // For now, return None to indicate it's not implemented
-        None
+        let mut fen = String::new();
+        
+        // 1. Piece placement (from rank 8 to rank 1)
+        for rank in (0..8).rev() {
+            let mut empty_count = 0;
+            for file in 0..8 {
+                let square = rank * 8 + file;
+                let square_bit = 1u64 << square;
+                
+                let mut piece_found = false;
+                for color in 0..2 {
+                    for piece_type in 0..6 {
+                        if self.pieces[color][piece_type] & square_bit != 0 {
+                            if empty_count > 0 {
+                                fen.push_str(&empty_count.to_string());
+                                empty_count = 0;
+                            }
+                            let piece_char = match (color, piece_type) {
+                                (WHITE, PAWN) => 'P', (BLACK, PAWN) => 'p',
+                                (WHITE, ROOK) => 'R', (BLACK, ROOK) => 'r',
+                                (WHITE, KNIGHT) => 'N', (BLACK, KNIGHT) => 'n',
+                                (WHITE, BISHOP) => 'B', (BLACK, BISHOP) => 'b',
+                                (WHITE, QUEEN) => 'Q', (BLACK, QUEEN) => 'q',
+                                (WHITE, KING) => 'K', (BLACK, KING) => 'k',
+                                _ => '?'
+                            };
+                            fen.push(piece_char);
+                            piece_found = true;
+                            break;
+                        }
+                    }
+                    if piece_found { break; }
+                }
+                if !piece_found {
+                    empty_count += 1;
+                }
+            }
+            if empty_count > 0 {
+                fen.push_str(&empty_count.to_string());
+            }
+            if rank > 0 {
+                fen.push('/');
+            }
+        }
+        
+        // 2. Active color
+        fen.push(' ');
+        fen.push(if self.w_to_move { 'w' } else { 'b' });
+        
+        // 3. Castling availability
+        fen.push(' ');
+        let mut castling = String::new();
+        if self.castling_rights.white_kingside { castling.push('K'); }
+        if self.castling_rights.white_queenside { castling.push('Q'); }
+        if self.castling_rights.black_kingside { castling.push('k'); }
+        if self.castling_rights.black_queenside { castling.push('q'); }
+        if castling.is_empty() { castling.push('-'); }
+        fen.push_str(&castling);
+        
+        // 4. En passant target square
+        fen.push(' ');
+        match self.en_passant {
+            Some(sq) => {
+                let file = (sq % 8) as u8;
+                let rank = (sq / 8) as u8;
+                fen.push((b'a' + file) as char);
+                fen.push((b'1' + rank) as char);
+            }
+            None => fen.push('-')
+        }
+        
+        // 5. Halfmove clock and fullmove number
+        fen.push_str(&format!(" {} {}", self.halfmove_clock, self.fullmove_number));
+        
+        Some(fen)
     }
 
     /// Checks if a square is attacked by a given side.

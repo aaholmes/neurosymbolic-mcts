@@ -386,7 +386,7 @@ mod tests {
         let mut engine = UCIEngine::new();
         engine.handle_position(&["startpos", "moves", "e2e4", "e7e5"]);
         // Check if the board is in the correct state after moves
-        assert_eq!(engine.get_board().current_state().to_fen(), Some("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 2".to_string()));
+        assert_eq!(engine.get_board().current_state().to_fen(), Some("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2".to_string()));
     }
 
     #[test]

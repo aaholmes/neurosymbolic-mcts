@@ -503,10 +503,10 @@ mod tests {
         // Knight on e4 should attack 8 squares (if all are on board)
         assert_eq!(attacks.len(), 8);
         
-        // Check some specific squares
-        assert!(attacks.contains(&19)); // d6
-        assert!(attacks.contains(&21)); // f6
-        assert!(attacks.contains(&11)); // d2
+        // Check some specific squares (e4 = 28: file 4, rank 3)
+        assert!(attacks.contains(&43)); // d6 (file 3, rank 5 = 5*8+3 = 43)
+        assert!(attacks.contains(&45)); // f6 (file 5, rank 5 = 5*8+5 = 45)  
+        assert!(attacks.contains(&11)); // d2 (file 3, rank 1 = 1*8+3 = 11)
     }
     
     #[test]

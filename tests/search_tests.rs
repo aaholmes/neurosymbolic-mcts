@@ -69,8 +69,6 @@ fn test_mate_in_two_detection() {
     assert!(score > 900000); // Should detect mate in 2
     assert_eq!(best_move.to_uci(), "h1h8"); // Rh8+
 }
-:start_line:72
--------
 
 #[test]
 fn test_mate_search_no_mate_in_depth() {

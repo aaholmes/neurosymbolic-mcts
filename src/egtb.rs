@@ -52,7 +52,12 @@ pub struct EgtbProber {
 
 impl EgtbProber {
     /// Creates a new EgtbProber by loading tablebases from the specified path.
-    pub fn new(_path_str: &str) -> Result<Self, EgtbError> {
+    pub fn new(path_str: &str) -> Result<Self, EgtbError> {
+        // Check if path exists and is valid for testing
+        if !std::path::Path::new(path_str).exists() {
+            return Err(EgtbError::LoadError(format!("Path does not exist: {}", path_str)));
+        }
+        
         // Temporarily simplified implementation to focus on MCTS
         let max_pieces = 7;
         Ok(EgtbProber { max_pieces })
