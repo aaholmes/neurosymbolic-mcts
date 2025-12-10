@@ -267,7 +267,7 @@ impl StrengthTester {
     /// Create neural network policy (with fallback)
     fn create_neural_policy(&self) -> Option<NeuralNetPolicy> {
         if let Some(ref model_path) = self.config.neural_model_path {
-            Some(NeuralNetPolicy::new(Some(model_path.clone())))
+            Some(NeuralNetPolicy::new())
         } else {
             None
         }

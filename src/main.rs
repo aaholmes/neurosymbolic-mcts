@@ -39,8 +39,8 @@ fn run_simple_game() {
 }
 
 fn main() {
-    //let mut engine = UCIEngine::new();
-    //engine.run();
+    let mut engine = kingfisher::uci::UCIEngine::new();
+    engine.run();
 
-    run_simple_game();
+    // run_simple_game();
 }
