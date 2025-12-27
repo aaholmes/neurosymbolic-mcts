@@ -16,6 +16,7 @@ mod iterative_deepening;
 mod mate_search;
 mod quiescence;
 mod see;
+pub mod koth;
 
 pub use alpha_beta::alpha_beta_search;
 pub use history::{HistoryTable, MAX_PLY};
@@ -23,3 +24,4 @@ pub use iterative_deepening::{aspiration_window_ab_search, iterative_deepening_a
 pub use mate_search::mate_search;
 pub use quiescence::quiescence_search;
 pub use see::see;
+pub use koth::koth_center_in_3;

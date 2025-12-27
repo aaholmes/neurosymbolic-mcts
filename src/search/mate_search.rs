@@ -99,7 +99,7 @@ pub fn mate_search(
             );
         });
 
-        // Strategy B: "Flanker" (One Quiet Move) - Medium depth
+        /* Strategy B: "Flanker" (One Quiet Move) - Medium depth
         s.spawn(|_| {
             iterative_deepening_wrapper(
                 &context, 
@@ -120,6 +120,7 @@ pub fn mate_search(
                 MateStrategy::Exhaustive
             );
         });
+        */
     });
 
     // Retrieve result

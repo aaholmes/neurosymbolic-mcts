@@ -23,6 +23,8 @@ pub struct Board {
     pub game_phase: i32,
 }
 
+pub const KOTH_CENTER: u64 = 0x0000001818000000; // d4, e4, d5, e5
+
 impl Board {
     pub fn new() -> Board {
         let mut board = Board {
@@ -40,6 +42,13 @@ impl Board {
         board.init_position();
         board.zobrist_hash = board.compute_zobrist_hash();
         board
+    }
+
+    /// Checks if either king has reached the center (King of the Hill win condition)
+    pub fn is_koth_win(&self) -> (bool, bool) {
+        let white_win = (self.pieces[WHITE][KING] & KOTH_CENTER) != 0;
+        let black_win = (self.pieces[BLACK][KING] & KOTH_CENTER) != 0;
+        (white_win, black_win)
     }
 
     fn init_position(&mut self) {
