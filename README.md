@@ -52,6 +52,20 @@ The engine supports a **Neurosymbolic** mode using the LogosNet architecture.
 - **Dynamic K:** The network learns how much to trust material imbalance. At initialization ($K_{net} = 0$), $k$ is exactly $0.5$. During training, the network adjusts $k$ to prioritize material or strategic compensation.
 - **Inference:** Uses **tch-rs** (LibTorch) for high-performance inference. The forward pass accepts both the board features and the raw material scalar.
 
+### Final Layer Details
+The value head splits into two paths to predict the final evaluation:
+
+1.  **Deep Value Logit ($V_{net}$):** Represents the network's intuition about the position's value in logit space.
+2.  **Confidence Logit ($K_{net}$):** Represents the network's confidence in the material imbalance.
+
+These are combined using the **Dynamic Symbolic Residual Formula**:
+
+$$k = \frac{\text{Softplus}(K_{net})}{2 \ln 2}$$
+
+$$V_{final} = \tanh(V_{net} + k \cdot \Delta M)$$
+
+Where $\Delta M$ is the material imbalance. This architecture allows the network to learn a residual correction to the material advantage, effectively "pricing" the material in the current strategic context.
+
 > **Note:** Neural network support is optional. Compile with `cargo build --features neural` to enable it. You must have a compatible LibTorch installed or let `tch-rs` download one.
 
 ## Training Philosophy
