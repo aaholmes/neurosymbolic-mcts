@@ -1,39 +1,33 @@
 //! Self-Play Data Generation Binary
 //! 
 //! This binary plays games of the engine against itself to generate training data
-//! for the neural network. It outputs JSON files containing FENs, MCTS policies,
-//! and game outcomes.
+//! for the neural network. It outputs binary files compatible with the Python training script.
 
 use kingfisher::board::Board;
 use kingfisher::eval::PestoEval;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::mcts::{tactical_mcts_search_for_training, TacticalMctsConfig};
 use kingfisher::neural_net::NeuralNetPolicy;
-use serde::Serialize;
+use kingfisher::piece_types::{PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING, WHITE, BLACK};
 use std::fs::File;
+use std::io::Write;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rayon::prelude::*;
 
-#[derive(Serialize)]
+// Data structure for holding a single training sample in memory before serialization
 struct TrainingSample {
-    fen: String,
-    policy: Vec<(String, u32)>, // Move UCI -> Visit Count
-    value_target: f32,          // +1 (White Win), -1 (Black Win), 0 (Draw)
-    mcts_value: f64,            // Q-value from search (optional aux target)
-}
-
-#[derive(Serialize)]
-struct GameRecord {
-    samples: Vec<TrainingSample>,
-    result: String, // "1-0", "0-1", "1/2-1/2"
+    board: Board,
+    policy: Vec<(u16, f32)>, // (Move Index, Probability)
+    value_target: f32,       // +1 (Win), -1 (Loss), 0 (Draw)
+    material_scalar: f32,
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let num_games = if args.len() > 1 { args[1].parse().unwrap_or(1) } else { 1 };
     let simulations = if args.len() > 2 { args[2].parse().unwrap_or(800) } else { 800 };
-    let output_dir = if args.len() > 3 { &args[3] } else { "data" };
+    let output_dir = if args.len() > 3 { &args[3] } else { "data/training" };
 
     println!("🤖 Self-Play Generator Starting...");
     println!("   Games: {}", num_games);
@@ -46,28 +40,29 @@ fn main() {
 
     // Run games in parallel
     (0..num_games).into_par_iter().for_each(|i| {
-        let game_data = play_game(i, simulations);
+        let samples = play_game(i, simulations);
         
-        // Save game data
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let filename = format!("{}/game_{}_{}.json", output_dir, timestamp, i);
-        let file = File::create(&filename).unwrap();
-        serde_json::to_writer(file, &game_data).unwrap();
-        
-        let mut count = completed_games.lock().unwrap();
-        *count += 1;
-        println!("✅ Game {}/{} finished. Result: {}", *count, num_games, game_data.result);
+        if !samples.is_empty() {
+            // Save binary data
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let filename = format!("{}/game_{}_{}.bin", output_dir, timestamp, i);
+            if let Err(e) = save_binary_data(&filename, &samples) {
+                eprintln!("❌ Failed to save game data: {}", e);
+            } else {
+                let mut count = completed_games.lock().unwrap();
+                *count += 1;
+                println!("✅ Game {}/{} finished. Saved {} samples.", *count, num_games, samples.len());
+            }
+        }
     });
 }
 
-fn play_game(game_num: usize, simulations: u32) -> GameRecord {
+fn play_game(_game_num: usize, simulations: u32) -> Vec<TrainingSample> {
     let mut board = Board::new();
     let move_gen = MoveGen::new();
     let pesto_eval = PestoEval::new();
     
     // Each thread gets its own NN instance (if available)
-    // Note: If using CUDA, multiple threads might contend.
-    // Ideally, we'd use a shared Batching inference service, but simple separate instances work for now.
     let mut nn_policy = Some(NeuralNetPolicy::new_demo_enabled()); 
 
     let mut samples = Vec::new();
@@ -77,10 +72,10 @@ fn play_game(game_num: usize, simulations: u32) -> GameRecord {
         // 1. MCTS Search
         let config = TacticalMctsConfig {
             max_iterations: simulations,
-            time_limit: Duration::from_secs(60), // Time shouldn't be the limit, sims should
-            mate_search_depth: 1, // Reduced depth for speed during self-play
+            time_limit: Duration::from_secs(60), 
+            mate_search_depth: 1, 
             exploration_constant: 1.414,
-            use_neural_policy: true, // Use the NN we loaded
+            use_neural_policy: true, 
         };
 
         let result = tactical_mcts_search_for_training(
@@ -95,39 +90,39 @@ fn play_game(game_num: usize, simulations: u32) -> GameRecord {
             break; // Game Over
         }
 
-        // 2. Store Sample (Outcome unknown yet)
-        let fen = board.to_fen().unwrap_or_default();
-        let policy: Vec<(String, u32)> = result.root_policy.iter()
-            .map(|(m, visits)| (m.to_uci(), *visits))
-            .collect();
-        
+        // 2. Prepare Sample (Value unknown yet)
+        let total_visits: u32 = result.root_policy.iter().map(|(_, v)| *v).sum();
+        let mut policy_dist = Vec::new();
+        if total_visits > 0 {
+            for (mv, visits) in &result.root_policy {
+                let idx = (mv.from as u16) * 64 + (mv.to as u16);
+                let prob = *visits as f32 / total_visits as f32;
+                policy_dist.push((idx, prob));
+            }
+        }
+
+        // Calculate Material Scalar
+        let material_scalar = board.material_imbalance() as f32;
+
         samples.push(TrainingSample {
-            fen: fen.clone(),
-            policy,
+            board: board.clone(),
+            policy: policy_dist,
             value_target: 0.0, // Placeholder
-            mcts_value: result.root_value_prediction,
+            material_scalar,
         });
 
         // 3. Play Move
-        // Temperature logic: First 30 moves proportional to visits, then max visits.
-        // For simplicity in this v1, let's just pick best move (max visits).
-        // Or simple temperature:
         let selected_move = result.best_move.unwrap(); 
-        
-        // Print progress for this game instance
-        println!("  Game {}: Move {} - Playing {} from FEN: {}", 
-                 game_num, move_count + 1, selected_move.to_uci(), fen);
         
         // Apply move
         board = board.apply_move_to_board(selected_move);
         move_count += 1;
 
         // Check for draw/end
-        if move_count > 200 { // Draw by length
+        if move_count > 200 { 
             break; 
         }
         
-        // Is game over?
         let (mate, _stalemate) = board.is_checkmate_or_stalemate(&move_gen);
         if mate || _stalemate {
             break;
@@ -135,29 +130,20 @@ fn play_game(game_num: usize, simulations: u32) -> GameRecord {
     }
 
     // 4. Assign Outcomes
-    let (mate, stalemate) = board.is_checkmate_or_stalemate(&move_gen);
-    let result_str;
-    let final_score_white; // 1.0 (W win), -1.0 (B win), 0.0 (Draw)
-
-    if mate {
-        // Side to move lost.
+    let (mate, _stalemate) = board.is_checkmate_or_stalemate(&move_gen);
+    let final_score_white = if mate {
         if board.w_to_move {
-            final_score_white = -1.0; // Black wins
-            result_str = "0-1";
+            -1.0 // Black wins
         } else {
-            final_score_white = 1.0; // White wins
-            result_str = "1-0";
+            1.0 // White wins
         }
     } else {
-        // Stalemate or Draw
-        final_score_white = 0.0;
-        result_str = "1/2-1/2";
-    }
+        0.0 // Draw/Stalemate
+    };
 
-    // Backpropagate Z
+    // Backpropagate Z (Value Target)
     for (i, sample) in samples.iter_mut().enumerate() {
-        // Sample stored FEN. Who was to move?
-        // Game starts White. i=0 is White. i=1 is Black.
+        // i=0 is White's move. i=1 is Black's move.
         let white_to_move_at_sample = i % 2 == 0;
         
         if white_to_move_at_sample {
@@ -167,8 +153,52 @@ fn play_game(game_num: usize, simulations: u32) -> GameRecord {
         }
     }
 
-    GameRecord {
-        samples,
-        result: result_str.to_string(),
+    samples
+}
+
+fn save_binary_data(filename: &str, samples: &[TrainingSample]) -> std::io::Result<()> {
+    let mut file = File::create(filename)?;
+    let mut buffer = Vec::new();
+
+    for sample in samples {
+        // 1. Board Features [12, 8, 8] -> 768 floats
+        for color in [WHITE, BLACK] {
+            for piece_type in [PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING] {
+                let bb = sample.board.get_piece_bitboard(color, piece_type);
+                for i in 0..64 {
+                    let val = if (bb >> i) & 1 == 1 { 1.0f32 } else { 0.0f32 };
+                    // We need to map bit index `i` to rank/file correctly for the NN
+                    // Assuming NN expects [Plane, Rank, File]
+                    // Rank 0 is index 0-7? Let's check `src/neural_net.rs`.
+                    // It uses `tensor_row = 7 - rank`. So we should match that.
+                    // But simpler: just dump the bitboard bits linearly 0..63.
+                    // Python dataset needs to reshape [8, 8] correctly.
+                    // Let's assume standard linear dump: a1, b1... h8.
+                    buffer.extend_from_slice(&val.to_le_bytes());
+                }
+            }
+        }
+
+
+        // 2. Material Scalar [1 float]
+        buffer.extend_from_slice(&sample.material_scalar.to_le_bytes());
+
+        // 3. Value Target [1 float]
+        buffer.extend_from_slice(&sample.value_target.to_le_bytes());
+
+        // 4. Policy Target [4096 floats]
+        // Initialize zero vector
+        let mut policy_vec = vec![0.0f32; 4096];
+        for (idx, prob) in &sample.policy {
+            if (*idx as usize) < 4096 {
+                policy_vec[*idx as usize] = *prob;
+            }
+        }
+        for p in policy_vec {
+            buffer.extend_from_slice(&p.to_le_bytes());
+        }
     }
+
+    file.write_all(&buffer)?;
+    Ok(())
 }

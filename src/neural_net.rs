@@ -95,7 +95,15 @@ mod real {
             let model = self.model.as_ref()?;
             let input = self.board_to_tensor(board).unsqueeze(0);
             
-            let ivalue = model.method_is("forward", &[tch::IValue::Tensor(input)]).ok()?;
+            // Calculate material scalar [B, 1]
+            let mat_imb = board.material_imbalance() as f32;
+            let mat_tensor = Tensor::from_slice(&[mat_imb])
+                .to_device(self.device)
+                .to_kind(Kind::Float)
+                .unsqueeze(0);
+
+            // Forward pass with TWO inputs: [board_tensor, material_scalar]
+            let ivalue = model.method_is("forward", &[tch::IValue::Tensor(input), tch::IValue::Tensor(mat_tensor)]).ok()?;
             
             if let tch::IValue::Tuple(elements) = ivalue {
                 if elements.len() != 2 { return None; }

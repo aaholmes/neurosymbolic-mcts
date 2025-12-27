@@ -4,6 +4,7 @@ use crate::board_utils::{algebraic_to_sq_ind, bit_to_sq_ind, coords_to_sq_ind, s
 use crate::move_generation::MoveGen;
 use crate::move_types::CastlingRights;
 use crate::piece_types::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+use crate::bits::popcnt;
 
 /// Represents the chess board using bitboards.
 ///
@@ -49,6 +50,24 @@ impl Board {
         let white_win = (self.pieces[WHITE][KING] & KOTH_CENTER) != 0;
         let black_win = (self.pieces[BLACK][KING] & KOTH_CENTER) != 0;
         (white_win, black_win)
+    }
+
+    /// Calculates material imbalance from side to move's perspective
+    pub fn material_imbalance(&self) -> i32 {
+        let piece_values = [1, 3, 3, 5, 9, 0]; // P, N, B, R, Q, K
+        let mut white_mat = 0;
+        let mut black_mat = 0;
+
+        for piece_type in [PAWN, KNIGHT, BISHOP, ROOK, QUEEN] {
+            white_mat += popcnt(self.pieces[WHITE][piece_type]) as i32 * piece_values[piece_type];
+            black_mat += popcnt(self.pieces[BLACK][piece_type]) as i32 * piece_values[piece_type];
+        }
+
+        if self.w_to_move {
+            white_mat - black_mat
+        } else {
+            black_mat - white_mat
+        }
     }
 
     fn init_position(&mut self) {

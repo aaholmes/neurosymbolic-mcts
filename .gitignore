@@ -4,3 +4,4 @@ IMPLEMENTATION_PLAN.md
 models/
 python/__pycache__/
 target/
+test_tree.dot
