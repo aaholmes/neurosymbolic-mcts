@@ -20,7 +20,10 @@ use std::time::Duration;
 
 // Re-export common components
 pub use self::node::{MctsNode, MoveCategory};
-pub use self::tactical_mcts::{tactical_mcts_search, tactical_mcts_search_for_training, TacticalMctsConfig, TacticalMctsStats};
+pub use self::tactical_mcts::{
+    tactical_mcts_search, tactical_mcts_search_for_training, tactical_mcts_search_with_tt,
+    TacticalMctsConfig, TacticalMctsStats,
+};
 pub use self::neural_mcts::neural_mcts_search;
 
 /// Exploration constant for UCB (sqrt(2))

@@ -21,7 +21,7 @@ fn main() {
     println!("   Expected: {} (mate in {})", first_position.best_move_uci, first_position.mate_in);
     
     // Create agent
-    let agent = create_simple_agent();
+    let mut agent = create_simple_agent();
     println!("✅ Created AlphaBeta agent");
     
     // Test position

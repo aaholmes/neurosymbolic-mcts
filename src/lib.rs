@@ -61,6 +61,8 @@ pub mod neural_net;
 pub mod piece_types;
 pub mod search;
 pub mod tensor;
+pub mod training;
 pub mod transposition;
+pub mod tuning;
 pub mod uci;
 pub mod utils;

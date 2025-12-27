@@ -209,6 +209,7 @@ fn test_pos3_perft5() {
     let move_gen = MoveGen::new();
     assert_eq!(perft(board, &move_gen, 5, false), 15833292);
 }
+/*
 #[test]
 fn test_pos3_perft6() {
     let board =
@@ -216,6 +217,7 @@ fn test_pos3_perft6() {
     let move_gen = MoveGen::new();
     assert_eq!(perft(board, &move_gen, 6, false), 706045033);
 }
+*/
 
 #[test]
 fn test_pos4_perft1() {

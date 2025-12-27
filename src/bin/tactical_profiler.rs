@@ -31,7 +31,7 @@ fn profile_position(
     let mut nn_policy = None;
     
     let start_time = Instant::now();
-    let (_, stats) = tactical_mcts_search(
+    let (_, stats, _) = tactical_mcts_search(
         board,
         move_gen,
         pesto_eval,

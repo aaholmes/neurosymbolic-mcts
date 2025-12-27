@@ -26,7 +26,7 @@ fn main() {
     };
 
     let mut nn = None;
-    let (best_move, stats) = tactical_mcts_search(board, &move_gen, &pesto, &mut nn, config);
+    let (best_move, stats, _) = tactical_mcts_search(board, &move_gen, &pesto, &mut nn, config);
 
     println!("\nSearch Results:");
     println!("  Best Move: {}", best_move.map_or("None".to_string(), |m| m.to_uci()));

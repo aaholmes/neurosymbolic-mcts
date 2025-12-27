@@ -32,12 +32,12 @@ fn run_tactical_benchmark_cmd() {
     
     let time_limit = Duration::from_millis(2000);
     
-    // Test both engines
-    let simple_agent = create_simple_agent();
-    let humanlike_agent = create_humanlike_agent();
-    
-    let ab_results = run_tactical_benchmark(&simple_agent, "Traditional AlphaBeta", time_limit);
-    let mcts_results = run_tactical_benchmark(&humanlike_agent, "MateSearchFirst MCTS", time_limit);
+    // Run benchmarks
+    let mut simple_agent = create_simple_agent();
+    let mut humanlike_agent = create_humanlike_agent();
+
+    let ab_results = run_tactical_benchmark(&mut simple_agent, "Traditional AlphaBeta", time_limit);
+    let mcts_results = run_tactical_benchmark(&mut humanlike_agent, "MateSearchFirst MCTS", time_limit);
     
     // Print summaries
     use kingfisher::benchmarks::BenchmarkSummary;
