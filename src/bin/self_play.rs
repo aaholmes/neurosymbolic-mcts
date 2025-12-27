@@ -28,11 +28,13 @@ fn main() {
     let num_games = if args.len() > 1 { args[1].parse().unwrap_or(1) } else { 1 };
     let simulations = if args.len() > 2 { args[2].parse().unwrap_or(800) } else { 800 };
     let output_dir = if args.len() > 3 { &args[3] } else { "data/training" };
+    let model_path = if args.len() > 4 { Some(args[4].clone()) } else { None };
 
     println!("🤖 Self-Play Generator Starting...");
     println!("   Games: {}", num_games);
     println!("   Simulations/Move: {}", simulations);
     println!("   Output Dir: {}", output_dir);
+    println!("   Model Path: {:?}", model_path);
 
     std::fs::create_dir_all(output_dir).unwrap();
 
@@ -40,7 +42,7 @@ fn main() {
 
     // Run games in parallel
     (0..num_games).into_par_iter().for_each(|i| {
-        let samples = play_game(i, simulations);
+        let samples = play_game(i, simulations, model_path.clone());
         
         if !samples.is_empty() {
             // Save binary data
@@ -57,13 +59,23 @@ fn main() {
     });
 }
 
-fn play_game(_game_num: usize, simulations: u32) -> Vec<TrainingSample> {
+fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>) -> Vec<TrainingSample> {
     let mut board = Board::new();
     let move_gen = MoveGen::new();
     let pesto_eval = PestoEval::new();
     
-    // Each thread gets its own NN instance (if available)
-    let mut nn_policy = Some(NeuralNetPolicy::new_demo_enabled()); 
+    // Each thread gets its own NN instance
+    let mut nn_policy = if let Some(path) = model_path {
+        let mut nn = NeuralNetPolicy::new();
+        if let Err(e) = nn.load(&path) {
+            eprintln!("⚠️ Failed to load model from {}: {}", path, e);
+            None
+        } else {
+            Some(nn)
+        }
+    } else {
+        None
+    };
 
     let mut samples = Vec::new();
     let mut move_count = 0;

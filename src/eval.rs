@@ -82,7 +82,7 @@ impl PestoEval {
         self.eg_table[color][piece][square]
     }
 
-    pub fn eval_plus_game_phase(&self, board: &Board, _move_gen: &MoveGen) -> (i32, i32, i32) {
+    pub fn eval_plus_game_phase(&self, board: &Board, move_gen: &MoveGen) -> (i32, i32, i32) {
         let mut mg: [i32; 2] = [0, 0];
         let mut eg: [i32; 2] = [0, 0];
         let mut game_phase: i32 = 0;
@@ -360,7 +360,7 @@ impl PestoEval {
     pub fn move_eval(
         &self,
         board: &Board,
-        move_gen: &MoveGen,
+        _move_gen: &MoveGen, // Not fully utilized here, keeping signature
         from_sq_ind: usize,
         to_sq_ind: usize,
     ) -> i32 {
@@ -385,6 +385,7 @@ impl PestoEval {
         }
 
         let mg_phase: i32 = min(24, board.game_phase);
+        let eg_phase: i32 = 24 - mg_phase;
         (mg_score * mg_phase + eg_score * eg_phase) / 24
     }
 }
