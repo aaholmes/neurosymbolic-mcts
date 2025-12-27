@@ -11,6 +11,7 @@ pub mod tactical;
 pub mod neural_mcts;
 pub mod tactical_mcts;
 pub mod nn_counter;
+pub mod inference_server;
 
 use crate::board::Board;
 use crate::eval::PestoEval;
@@ -25,6 +26,7 @@ pub use self::tactical_mcts::{
     TacticalMctsConfig, TacticalMctsStats,
 };
 pub use self::neural_mcts::neural_mcts_search;
+pub use self::inference_server::InferenceServer;
 
 /// Exploration constant for UCB (sqrt(2))
 pub const EXPLORATION_CONSTANT: f64 = 1.41421356237;

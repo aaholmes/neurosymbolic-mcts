@@ -116,6 +116,66 @@ mod real {
             }
         }
 
+        /// Runs inference on a batch of boards. Returns Vec<(policy_probs, value, k)>.
+        pub fn predict_batch(&mut self, boards: &[Board]) -> Vec<Option<(Vec<f32>, f32, f32)>> {
+            let model = match self.model.as_ref() {
+                Some(m) => m,
+                None => return vec![None; boards.len()],
+            };
+
+            let mut input_tensors = Vec::with_capacity(boards.len());
+            let mut mat_scalars = Vec::with_capacity(boards.len());
+
+            for board in boards {
+                input_tensors.push(self.board_to_tensor(board));
+                mat_scalars.push(board.material_imbalance() as f32);
+            }
+
+            // Stack inputs into [B, 12, 8, 8] and [B, 1]
+            let input_batch = Tensor::stack(&input_tensors, 0);
+            let mat_batch = Tensor::from_slice(&mat_scalars)
+                .to_device(self.device)
+                .to_kind(Kind::Float)
+                .unsqueeze(1);
+
+            let ivalue = model.method_is("forward", &[tch::IValue::Tensor(input_batch), tch::IValue::Tensor(mat_batch)]);
+            
+            match ivalue {
+                Ok(tch::IValue::Tuple(elements)) if elements.len() == 3 => {
+                    let policy_batch = match &elements[0] {
+                        tch::IValue::Tensor(t) => t,
+                        _ => return vec![None; boards.len()],
+                    };
+                    let value_batch = match &elements[1] {
+                        tch::IValue::Tensor(t) => t,
+                        _ => return vec![None; boards.len()],
+                    };
+                    let k_batch = match &elements[2] {
+                        tch::IValue::Tensor(t) => t,
+                        _ => return vec![None; boards.len()],
+                    };
+
+                    let batch_size = boards.len();
+                    let mut results = Vec::with_capacity(batch_size);
+
+                    // Extract data from batch tensors
+                    // policy_batch: [B, 4672], value_batch: [B, 1], k_batch: [B, 1]
+                    
+                    for i in 0..batch_size {
+                        let mut policy_probs = vec![0.0f32; 4672];
+                        policy_batch.get(i as i64).exp().to_device(Device::Cpu).copy_data(&mut policy_probs, 4672);
+                        
+                        let value = value_batch.double_value(&[i as i64, 0]) as f32;
+                        let k_val = k_batch.double_value(&[i as i64, 0]) as f32;
+                        
+                        results.push(Some((policy_probs, value, k_val)));
+                    }
+                    results
+                }
+                _ => vec![None; boards.len()],
+            }
+        }
+
         pub fn policy_to_move_priors(&self, policy: &[f32], moves: &[Move]) -> Vec<(Move, f32)> {
             let mut result = Vec::with_capacity(moves.len());
             let mut total_prob = 0.0;
@@ -167,6 +227,7 @@ mod stub {
         pub fn is_available(&self) -> bool { false }
         pub fn board_to_tensor(&self, _board: &Board) -> () { () }
         pub fn predict(&mut self, _board: &Board) -> Option<(Vec<f32>, f32, f32)> { None }
+        pub fn predict_batch(&mut self, boards: &[Board]) -> Vec<Option<(Vec<f32>, f32, f32)>> { vec![None; boards.len()] }
         pub fn policy_to_move_priors(&self, _policy: &[f32], _moves: &[Move]) -> Vec<(Move, f32)> { Vec::new() }
         pub fn get_position_value(&mut self, _board: &Board) -> Option<i32> { None }
         pub fn cache_stats(&self) -> (usize, usize) { (0, 0) }

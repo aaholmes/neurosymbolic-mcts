@@ -11,6 +11,7 @@ use crate::boardstack::BoardStack;
 use crate::eval::{PestoEval, extrapolate_value};
 use crate::mcts::node::MctsNode;
 use crate::mcts::selection::select_child_with_tactical_priority;
+use crate::mcts::inference_server::InferenceServer;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use crate::neural_net::NeuralNetPolicy;
@@ -20,6 +21,7 @@ use crate::search::quiescence::quiescence_search_tactical;
 use crate::transposition::TranspositionTable;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Configuration for tactical-first MCTS search
@@ -30,6 +32,7 @@ pub struct TacticalMctsConfig {
     pub mate_search_depth: i32,
     pub exploration_constant: f64,
     pub use_neural_policy: bool,
+    pub inference_server: Option<Arc<InferenceServer>>,
 }
 
 impl Default for TacticalMctsConfig {
@@ -40,6 +43,7 @@ impl Default for TacticalMctsConfig {
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: true,
+            inference_server: None,
         }
     }
 }
@@ -79,9 +83,7 @@ pub fn tactical_mcts_search_with_tt(
     let start_time = Instant::now();
     let mut stats = TacticalMctsStats::default();
     
-    // Tier 1 Gate at Root
     if koth_center_in_3(&board, move_gen) {
-        // Return a move that wins immediately if possible
         let (captures, moves) = move_gen.gen_pseudo_legal_moves(&board);
         for m in captures.iter().chain(moves.iter()) {
             let next = board.apply_move_to_board(*m);
@@ -126,8 +128,8 @@ pub fn tactical_mcts_search_with_tt(
     for iteration in 0..config.max_iterations {
         if start_time.elapsed() > config.time_limit { break; }
         
-        let leaf_node = select_leaf_node(root_node.clone(), move_gen, nn_policy, config.exploration_constant, &mut stats);
-        let value = evaluate_leaf_node(leaf_node.clone(), move_gen, pesto_eval, nn_policy, config.mate_search_depth, transposition_table, &mut stats);
+        let leaf_node = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats);
+        let value = evaluate_leaf_node(leaf_node.clone(), move_gen, pesto_eval, nn_policy, &config, transposition_table, &mut stats);
         
         if !leaf_node.borrow().is_game_terminal() && leaf_node.borrow().visits == 0 {
             evaluate_and_expand_node(leaf_node.clone(), move_gen, pesto_eval, &mut stats);
@@ -147,7 +149,7 @@ fn select_leaf_node(
     mut current: Rc<RefCell<MctsNode>>,
     move_gen: &MoveGen,
     nn_policy: &mut Option<NeuralNetPolicy>,
-    exploration_constant: f64,
+    config: &TacticalMctsConfig,
     stats: &mut TacticalMctsStats,
 ) -> Rc<RefCell<MctsNode>> {
     loop {
@@ -160,12 +162,12 @@ fn select_leaf_node(
         
         if let Some(child) = select_child_with_tactical_priority(
             current.clone(),
-            exploration_constant,
+            config.exploration_constant,
             move_gen,
             nn_policy,
             stats,
         ) {
-            if !current.borrow().policy_evaluated && nn_policy.is_some() {
+            if !current.borrow().policy_evaluated && config.use_neural_policy {
                 stats.nn_policy_evaluations += 1;
             }
             current = child;
@@ -180,14 +182,13 @@ fn evaluate_leaf_node(
     move_gen: &MoveGen,
     pesto_eval: &PestoEval,
     nn_policy: &mut Option<NeuralNetPolicy>,
-    mate_search_depth: i32,
+    config: &TacticalMctsConfig,
     transposition_table: &mut TranspositionTable,
     stats: &mut TacticalMctsStats,
 ) -> f64 {
     let mut node_ref = node.borrow_mut();
     let board = &node_ref.state;
     
-    // Tier 1 Gates
     if let Some(cached_value) = node_ref.terminal_or_mate_value {
         if cached_value >= 0.0 { return cached_value; }
     }
@@ -198,8 +199,8 @@ fn evaluate_leaf_node(
         return win_val;
     }
 
-    if mate_search_depth > 0 {
-        if let Some((mate_depth, _mate_move)) = transposition_table.probe_mate(board, mate_search_depth) {
+    if config.mate_search_depth > 0 {
+        if let Some((mate_depth, _mate_move)) = transposition_table.probe_mate(board, config.mate_search_depth) {
             stats.tt_mate_hits += 1;
             if mate_depth > 0 {
                 let mate_value = if mate_depth > 0 { 1.0 } else { 0.0 };
@@ -209,8 +210,8 @@ fn evaluate_leaf_node(
         } else {
             stats.tt_mate_misses += 1;
             let mut board_stack = BoardStack::with_board(board.clone());
-            let mate_result = mate_search(&mut board_stack, move_gen, mate_search_depth, false);
-            transposition_table.store_mate_result(board, mate_result.0.abs(), mate_result.1, mate_search_depth);
+            let mate_result = mate_search(&mut board_stack, move_gen, config.mate_search_depth, false);
+            transposition_table.store_mate_result(board, mate_result.0.abs(), mate_result.1, config.mate_search_depth);
             
             if mate_result.0 != 0 {
                 let mate_value = if mate_result.0 > 0 { 1.0 } else { 0.0 };
@@ -221,11 +222,21 @@ fn evaluate_leaf_node(
     }
     
     if node_ref.nn_value.is_none() {
-        // Retrieve k from NN if available
         let mut k_val = 0.5;
-        let mut eval_val = -999.0; // Marker for no NN result
+        let mut eval_val = -999.0;
 
-        if let Some(nn) = nn_policy {
+        // 1. Batched Inference
+        if let Some(server) = &config.inference_server {
+            if config.use_neural_policy {
+                let receiver = server.predict_async(node_ref.state.clone());
+                if let Ok(Some((_policy, value, k))) = receiver.recv() {
+                    eval_val = value as f64;
+                    k_val = k;
+                }
+            }
+        } 
+        // 2. Direct Inference
+        else if let Some(nn) = nn_policy {
             if nn.is_available() {
                 if let Some((_policy, value, k)) = nn.predict(&node_ref.state) {
                     eval_val = value as f64;
@@ -235,7 +246,6 @@ fn evaluate_leaf_node(
         }
 
         if eval_val < -1.0 {
-            // Fallback to Pesto
             let eval_score = pesto_eval.eval(&node_ref.state, move_gen);
             eval_val = 1.0 / (1.0 + (-eval_score as f64 / 400.0).exp());
         }
@@ -259,7 +269,6 @@ fn evaluate_and_expand_node(
         return;
     }
 
-    // Tier 2: Tactical Integration (The Graft)
     let mut board_stack = BoardStack::with_board(node_ref.state.clone());
     let tactical_tree = quiescence_search_tactical(&mut board_stack, move_gen, pesto_eval);
 
@@ -366,8 +375,8 @@ pub fn tactical_mcts_search_for_training(
     let mut transposition_table = TranspositionTable::new();
     for iteration in 0..config.max_iterations {
         if start_time.elapsed() > config.time_limit { break; }
-        let leaf = select_leaf_node(root_node.clone(), move_gen, nn_policy, config.exploration_constant, &mut stats);
-        let value = evaluate_leaf_node(leaf.clone(), move_gen, pesto_eval, nn_policy, config.mate_search_depth, &mut transposition_table, &mut stats);
+        let leaf = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats);
+        let value = evaluate_leaf_node(leaf.clone(), move_gen, pesto_eval, nn_policy, &config, &mut transposition_table, &mut stats);
         if !leaf.borrow().is_game_terminal() && leaf.borrow().visits == 0 {
             evaluate_and_expand_node(leaf.clone(), move_gen, pesto_eval, &mut stats);
         }
