@@ -1,7 +1,6 @@
 use crate::board::{Board, KOTH_CENTER};
 use crate::move_generation::MoveGen;
 use crate::piece_types::{KING, WHITE, BLACK};
-use crate::board_utils::bit_to_sq_ind;
 
 /// Distance rings for KOTH-in-3 geometric pruning
 const RING_1: u64 = 0x00003C24243C0000 & !KOTH_CENTER; // Squares 1 distance from center
@@ -24,8 +23,6 @@ fn solve_koth_in_3(board: &Board, move_gen: &MoveGen, ply: i32) -> bool {
     let (white_won, black_won) = board.is_koth_win();
 
     // Determine who is the Root Side (the side that moved at ply 0)
-    // If ply is even, it's Root Side's turn.
-    // If ply is odd, it's Opponent's turn.
     let am_i_root_side = ply % 2 == 0;
     let current_side_is_white = board.w_to_move;
     let root_side_is_white = if am_i_root_side { current_side_is_white } else { !current_side_is_white };
@@ -41,64 +38,37 @@ fn solve_koth_in_3(board: &Board, move_gen: &MoveGen, ply: i32) -> bool {
 
     if ply >= 5 { return false; } // Limit to 3 our moves (ply 0, 2, 4)
 
-    let side_to_move = if board.w_to_move { WHITE } else { BLACK };
-    let king_bit = board.get_piece_bitboard(side_to_move, KING);
-    if king_bit == 0 { return false; }
-    let king_sq = bit_to_sq_ind(king_bit);
-
-    // PRUNING: Geometric Ring Constraints
-    // Ply 0 (1st move): Must land on R2, R1, or Center
-    // Ply 2 (2nd move): Must land on R1, or Center
-    // Ply 4 (3rd move): Must land on Center
-    /*
-    let allowed_mask = match ply {
-        0 => RING_2 | RING_1 | KOTH_CENTER, 
-        2 => RING_1 | KOTH_CENTER,          
-        4 => KOTH_CENTER,                   
-        _ => !0,                            
-    };
-    */
-
-    // If we (side to move) are making a move, apply pruning
-    let is_our_move = ply % 2 == 0;
-
+    let is_root_turn = ply % 2 == 0;
     let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
     let mut legal_move_found = false;
 
     for m in captures.iter().chain(moves.iter()) {
-        // If it's our move and it's a King move, apply ring pruning
-        if is_our_move && m.from == king_sq {
-            let bit_to = 1u64 << m.to;
-            
-            // RELAXED PRUNING:
-            // At ply 0, we can land on Center, R1, or R2.
-            // At ply 2, we can land on Center, R1.
-            // At ply 4, we must land on Center.
-            let is_allowed = match ply {
-                0 => (bit_to & (KOTH_CENTER | RING_1 | RING_2)) != 0,
-                2 => (bit_to & (KOTH_CENTER | RING_1)) != 0,
-                4 => (bit_to & KOTH_CENTER) != 0,
-                _ => true,
-            };
-
-            if !is_allowed {
-                continue; // Pruned
-            }
-        }
-
         let next_board = board.apply_move_to_board(*m);
         if !next_board.is_legal(move_gen) { continue; }
         
         legal_move_found = true;
 
-        if is_our_move {
-            // We want to find AT LEAST ONE move that leads to a win
+        if is_root_turn {
+            // After Root Side's move, their King MUST be close enough to win in remaining plies.
+            let root_side = if root_side_is_white { WHITE } else { BLACK };
+            let king_bit = next_board.get_piece_bitboard(root_side, KING);
+            
+            let allowed = match ply {
+                0 => (king_bit & (KOTH_CENTER | RING_1 | RING_2)) != 0, // After Move 1: Dist <= 2
+                2 => (king_bit & (KOTH_CENTER | RING_1)) != 0,          // After Move 2: Dist <= 1
+                4 => (king_bit & KOTH_CENTER) != 0,                    // After Move 3: Dist == 0
+                _ => unreachable!(),
+            };
+
+            if !allowed {
+                continue; // Pruned: King didn't make enough progress or was moved away
+            }
+
             if solve_koth_in_3(&next_board, move_gen, ply + 1) {
                 return true;
             }
         } else {
-            // Opponent wants to find AT LEAST ONE move that prevents our win
-            // So if ANY opponent move prevents the win, this branch fails
+            // Opponent turn: If ANY move prevents Root from winning, this branch fails.
             if !solve_koth_in_3(&next_board, move_gen, ply + 1) {
                 return false;
             }
@@ -109,7 +79,7 @@ fn solve_koth_in_3(board: &Board, move_gen: &MoveGen, ply: i32) -> bool {
         return false; // Mate or stalemate
     }
 
-    // If it's our move and we checked all moves without returning true, we fail.
-    // If it's opponent's move and we checked all moves without returning false, we succeed!
-    !is_our_move
+    // If it's Root's turn and no winning move found: false.
+    // If it's Opponent's turn and all moves were checked without failure: true.
+    !is_root_turn
 }
