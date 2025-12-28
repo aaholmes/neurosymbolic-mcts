@@ -55,13 +55,13 @@ cargo run --bin neural_test
 
 The chess neural network uses a ResNet-style architecture:
 
-- **Input**: 12×8×8 tensor (6 piece types × 2 colors × 8×8 board)
+- **Input**: 17×8×8 tensor (6 piece types × 2 colors × en passant × castling × 8×8 board)
 - **Body**: 8 residual blocks with 256 channels
-- **Policy Head**: Outputs 4096 move probabilities (64×64 from-to encoding)
+- **Policy Head**: Outputs 4672 move probabilities (AlphaZero encoding)
 - **Value Head**: Outputs position evaluation [-1, 1]
 
 ```
-Input (12×8×8)
+Input (17×8×8)
      ↓
 Conv2d + BatchNorm + ReLU
      ↓
@@ -71,7 +71,7 @@ Conv2d + BatchNorm + ReLU
   │ Policy  │ │ Value   │
   │ Head    │ │ Head    │
   └─────────┘ └─────────┘
-    4096        1
+    4672        1
 ```
 
 ## Training Data
@@ -153,7 +153,7 @@ import numpy as np
 interface = ChessNetInterface("models/chess_model.pth")
 
 # Predict on position
-board_tensor = np.random.rand(12, 8, 8)  # Your board representation
+board_tensor = np.random.rand(17, 8, 8)  # Your board representation
 policy, value = interface.predict(board_tensor)
 
 print(f"Position value: {value:.3f}")

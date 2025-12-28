@@ -299,6 +299,11 @@ impl Board {
         self.pieces[color][piece_type]
     }
 
+    /// Gets the en passant target square.
+    pub fn en_passant(&self) -> Option<u8> {
+        self.en_passant
+    }
+
     /// Gets the occupancy bitboard for a color.
     ///
     /// # Arguments

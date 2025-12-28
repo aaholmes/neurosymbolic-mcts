@@ -89,6 +89,7 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>) -> 
             mate_search_depth: 1, 
             exploration_constant: 1.414,
             use_neural_policy: true, 
+            inference_server: None,
         };
 
         let result = tactical_mcts_search_for_training(
@@ -174,24 +175,51 @@ fn save_binary_data(filename: &str, samples: &[TrainingSample]) -> std::io::Resu
     let mut buffer = Vec::new();
 
     for sample in samples {
-        // 1. Board Features [12, 8, 8] -> 768 floats
-        for color in [WHITE, BLACK] {
-            for piece_type in [PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING] {
-                let bb = sample.board.get_piece_bitboard(color, piece_type);
+        // 1. Board Features [17, 8, 8] -> 1088 floats
+        let mut board_planes = vec![0.0f32; 17 * 8 * 8];
+        
+        // 0-11: Pieces
+        for color in 0..2 {
+            for pt in 0..6 {
+                let offset = (color * 6 + pt) * 64;
+                let bb = sample.board.get_piece_bitboard(color, pt);
                 for i in 0..64 {
-                    let val = if (bb >> i) & 1 == 1 { 1.0f32 } else { 0.0f32 };
-                    // We need to map bit index `i` to rank/file correctly for the NN
-                    // Assuming NN expects [Plane, Rank, File]
-                    // Rank 0 is index 0-7? Let's check `src/neural_net.rs`.
-                    // It uses `tensor_row = 7 - rank`. So we should match that.
-                    // But simpler: just dump the bitboard bits linearly 0..63.
-                    // Python dataset needs to reshape [8, 8] correctly.
-                    // Let's assume standard linear dump: a1, b1... h8.
-                    buffer.extend_from_slice(&val.to_le_bytes());
+                    if (bb >> i) & 1 == 1 {
+                        let rank = i / 8;
+                        let file = i % 8;
+                        board_planes[offset + (7 - rank) * 8 + file] = 1.0;
+                    }
                 }
             }
         }
 
+        // 12: En Passant
+        if let Some(sq) = sample.board.en_passant() {
+            let offset = 12 * 64;
+            let rank = sq / 8;
+            let file = sq % 8;
+            board_planes[offset + (usize::from(7 - rank)) * 8 + usize::from(file)] = 1.0;
+        }
+
+        // 13-16: Castling
+        let rights = [
+            sample.board.castling_rights.white_kingside,
+            sample.board.castling_rights.white_queenside,
+            sample.board.castling_rights.black_kingside,
+            sample.board.castling_rights.black_queenside,
+        ];
+        for (i, &allowed) in rights.iter().enumerate() {
+            if allowed {
+                let offset = (13 + i) * 64;
+                for j in 0..64 {
+                    board_planes[offset + j] = 1.0;
+                }
+            }
+        }
+
+        for val in board_planes {
+            buffer.extend_from_slice(&val.to_le_bytes());
+        }
 
         // 2. Material Scalar [1 float]
         buffer.extend_from_slice(&sample.material_scalar.to_le_bytes());

@@ -28,7 +28,7 @@ Kingfisher's benchmarking suite provides professional-grade performance analysis
 
 ### 4. **MCTS-Neural**
 - MCTS with neural network policy guidance
-- PyTorch ResNet architecture (12×8×8 → policy/value)
+- PyTorch ResNet architecture (17×8×8 → policy/value)
 - Trained on human chess games
 - No mate search enhancement
 

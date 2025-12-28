@@ -57,24 +57,48 @@ mod real {
         }
 
         pub fn board_to_tensor(&self, board: &Board) -> Tensor {
-            let mut planes = Vec::with_capacity(12);
-            for &color in &[WHITE, BLACK] {
-                for &pt in &[PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING] {
-                    let mut plane = vec![0.0f32; 64];
-                    let bitboard = board.get_piece_bitboard(color, pt);
+            let mut planes = vec![0.0f32; 17 * 8 * 8];
+            
+            // 0-11: Pieces (P1 then P2)
+            for color in 0..2 {
+                for pt in 0..6 {
+                    let offset = (color * 6 + pt) * 64;
+                    let bb = board.get_piece_bitboard(color, pt);
                     for i in 0..64 {
-                        if (bitboard >> i) & 1 == 1 {
+                        if (bb >> i) & 1 == 1 {
                             let rank = i / 8;
                             let file = i % 8;
-                            let tensor_row = 7 - rank; 
-                            let tensor_col = file;
-                            plane[tensor_row as usize * 8 + tensor_col as usize] = 1.0;
+                            planes[offset + (7 - rank) * 8 + file] = 1.0;
                         }
                     }
-                    planes.extend(plane);
                 }
             }
-            Tensor::from_slice(&planes).view([12, 8, 8]).to_device(self.device).to_kind(Kind::Float)
+
+            // 12: En Passant (Target square only)
+            if let Some(sq) = board.en_passant {
+                let offset = 12 * 64;
+                let rank = sq / 8;
+                let file = sq % 8;
+                planes[offset + (usize::from(7 - rank)) * 8 + usize::from(file)] = 1.0;
+            }
+
+            // 13-16: Castling (Full planes of 1s)
+            let rights = [
+                board.castling_rights.white_kingside,
+                board.castling_rights.white_queenside,
+                board.castling_rights.black_kingside,
+                board.castling_rights.black_queenside,
+            ];
+            for (i, &allowed) in rights.iter().enumerate() {
+                if allowed {
+                    let offset = (13 + i) * 64;
+                    for j in 0..64 {
+                        planes[offset + j] = 1.0;
+                    }
+                }
+            }
+
+            Tensor::from_slice(&planes).view([17, 8, 8]).to_device(self.device).to_kind(Kind::Float)
         }
 
         /// Runs inference on the board. Returns (policy_probs, value, k).
@@ -131,7 +155,7 @@ mod real {
                 mat_scalars.push(board.material_imbalance() as f32);
             }
 
-            // Stack inputs into [B, 12, 8, 8] and [B, 1]
+            // Stack inputs into [B, 17, 8, 8] and [B, 1]
             let input_batch = Tensor::stack(&input_tensors, 0);
             let mat_batch = Tensor::from_slice(&mat_scalars)
                 .to_device(self.device)

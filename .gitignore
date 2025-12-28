@@ -1,5 +1,6 @@
 .cargo/
 data/
+full_repository_context.txt
 IMPLEMENTATION_PLAN.md
 models/
 python/__pycache__/

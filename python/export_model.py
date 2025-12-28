@@ -11,7 +11,7 @@ def export_model():
     
     # 2. Create dummy input for tracing/verification
     # Shape: [Batch, Channels, 8, 8]
-    dummy_input = torch.randn(1, 12, 8, 8)
+    dummy_input = torch.randn(1, 17, 8, 8)
     
     # 3. Trace the model
     # Tracing runs the model once and records the operations.

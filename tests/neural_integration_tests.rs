@@ -30,23 +30,16 @@ fn test_neural_network_integration() {
     println!("\n🎯 Testing board representation...");
     let board = Board::new();
     
-    // Board to tensor test disabled for stub. Re-enable once board_to_tensor is fully implemented to return a Tensor
-    /*
-    if let Some(ref nn) = nn_policy {
-        let tensor = nn.board_to_tensor(&board);
-        println!("✅ Board tensor shape: {} values (expected: {})", tensor.len(), 12 * 8 * 8);
-        
-        // Count pieces in starting position
-        let piece_count: f32 = tensor.iter().sum();
-        println!("✅ Total pieces in tensor: {} (expected: 32)", piece_count);
-    }
-    */
+    let tensor = nn_policy.board_to_tensor(&board);
+    // Note: tensor size might be hard to get generically if it returns tch::Tensor or stub ()
+    // But we know it should be 17*8*8 = 1088 values if real.
     
     // Test neural network prediction
     println!("\n🔮 Testing neural network prediction...");
-    if let Some((policy, value)) = nn_policy.predict(&board) {
+    if let Some((policy, value, k)) = nn_policy.predict(&board) {
         println!("✅ Policy prediction: {} values", policy.len());
         println!("✅ Value prediction: {:.4}", value);
+        println!("✅ K prediction: {:.4}", k);
         
         // Basic check for policy/value ranges
         assert!(!policy.is_empty());

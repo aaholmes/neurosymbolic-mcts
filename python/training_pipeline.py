@@ -42,7 +42,7 @@ class ChessPosition:
         
     def to_tensor(self) -> np.ndarray:
         """Convert board position to neural network input tensor"""
-        tensor = np.zeros((12, 8, 8), dtype=np.float32)
+        tensor = np.zeros((17, 8, 8), dtype=np.float32)
         
         # Map piece types to channels
         piece_map = {
@@ -54,9 +54,26 @@ class ChessPosition:
             piece = self.board.piece_at(square)
             if piece:
                 rank, file = divmod(square, 8)
+                tensor_rank = 7 - rank
                 color_offset = 0 if piece.color == chess.WHITE else 6
                 channel = color_offset + piece_map[piece.piece_type]
-                tensor[channel, rank, file] = 1.0
+                tensor[channel, tensor_rank, file] = 1.0
+
+        # 12: En Passant
+        if self.board.ep_square is not None:
+            rank, file = divmod(self.board.ep_square, 8)
+            tensor_rank = 7 - rank
+            tensor[12, tensor_rank, file] = 1.0
+            
+        # 13-16: Castling
+        if self.board.has_kingside_castling_rights(chess.WHITE):
+            tensor[13, :, :] = 1.0
+        if self.board.has_queenside_castling_rights(chess.WHITE):
+            tensor[14, :, :] = 1.0
+        if self.board.has_kingside_castling_rights(chess.BLACK):
+            tensor[15, :, :] = 1.0
+        if self.board.has_queenside_castling_rights(chess.BLACK):
+            tensor[16, :, :] = 1.0
                 
         return tensor
     

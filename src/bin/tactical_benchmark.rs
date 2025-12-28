@@ -220,6 +220,7 @@ fn benchmark_tactical_mcts(
         mate_search_depth: config.mate_search_depth,
         exploration_constant: 1.414,
         use_neural_policy: false,
+        inference_server: None,
     };
     
     let start_time = Instant::now();

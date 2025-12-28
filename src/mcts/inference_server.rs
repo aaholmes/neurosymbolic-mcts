@@ -16,6 +16,7 @@ pub struct PredictRequest {
 }
 
 /// The Shared Inference Server
+#[derive(Debug)]
 pub struct InferenceServer {
     request_sender: Sender<PredictRequest>,
 }

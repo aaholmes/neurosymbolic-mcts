@@ -11,7 +11,7 @@ import sys
 from model import LogosNet
 
 # Configuration
-INPUT_CHANNELS = 12
+INPUT_CHANNELS = 17
 BOARD_SIZE = 8 * 8
 POLICY_SIZE = 4672
 SAMPLE_SIZE_FLOATS = (INPUT_CHANNELS * BOARD_SIZE) + 1 + 1 + POLICY_SIZE 
@@ -50,7 +50,7 @@ class ChessDataset(Dataset):
     def __getitem__(self, idx):
         flat_data = self.samples[idx]
         
-        # 1. Board [12, 8, 8]
+        # 1. Board [17, 8, 8]
         board_end = INPUT_CHANNELS * BOARD_SIZE
         board_data = flat_data[:board_end]
         board_tensor = torch.from_numpy(board_data).view(INPUT_CHANNELS, 8, 8)

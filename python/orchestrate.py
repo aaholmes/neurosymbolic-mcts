@@ -17,7 +17,7 @@ def export_model_for_rust(model, output_path):
     """
     model.eval()
     # Dummy inputs
-    example_board = torch.randn(1, 12, 8, 8)
+    example_board = torch.randn(1, 17, 8, 8)
     example_material = torch.randn(1, 1)
     
     traced_script_module = torch.jit.trace(model, (example_board, example_material))

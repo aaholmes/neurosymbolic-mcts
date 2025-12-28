@@ -76,23 +76,26 @@ fn mcts_leaf_evaluation(board: &Board) -> (f64, Vec<f32>) {
 
 **ResNet-Style Architecture**:
 ```python
-Input: 12×8×8 tensor (piece_types × colors × squares)
+Input: 17×8×8 tensor (piece_types × colors × extra_info × squares)
   ↓
-Initial Convolution: 12 → 256 channels
+Initial Convolution: 17 → 256 channels
   ↓
 8× Residual Blocks (256 channels each)
   ↓
 ┌─────────────────┐    ┌─────────────────┐
 │   Policy Head   │    │   Value Head    │
-│   256 → 4096    │    │   256 → 1       │
+│   256 → 4672    │    │   256 → 1       │
 │ (move encoding) │    │ (position eval) │
 └─────────────────┘    └─────────────────┘
 ```
 
 **Board Representation**:
-- 12 channels: 6 piece types × 2 colors
+- 17 channels total:
+    - 12 channels: 6 piece types × 2 colors
+    - 1 channel: En Passant target square
+    - 4 channels: Castling rights (White K/Q, Black k/q) - full planes of 1s
 - 8×8 spatial dimensions preserve chess board structure
-- Binary encoding: 1.0 if piece present, 0.0 otherwise
+- Binary encoding: 1.0 if piece/feature present, 0.0 otherwise
 
 **Move Encoding**:
 - 4096 possible moves: 64×64 from-to square encoding

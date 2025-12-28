@@ -52,8 +52,8 @@ class ResBlock(nn.Module):
 
 # --- 3. The Main Network (LogosNet) ---
 class LogosNet(nn.Module):
-    def __init__(self, num_blocks=6, hidden_dim=128, input_channels=12, policy_output_size=4672): 
-        # Defaulting input_channels to 12 to match current Rust implementation
+    def __init__(self, num_blocks=6, hidden_dim=128, input_channels=17, policy_output_size=4672): 
+        # Defaulting input_channels to 17 to match current Rust implementation
         # Defaulting hidden_dim to 128 to match previous capacity
         super().__init__()
         

@@ -51,6 +51,7 @@ fn run_integration_showcase(positions: &[(&str, &str)], move_gen: &MoveGen, pest
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: true,
+            inference_server: None,
         };
         
         let start_time = Instant::now();
@@ -108,6 +109,7 @@ fn run_performance_comparison(positions: &[(&str, &str)], move_gen: &MoveGen, pe
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: true,
+            inference_server: None,
         };
         
         let start = Instant::now();
@@ -127,6 +129,7 @@ fn run_performance_comparison(positions: &[(&str, &str)], move_gen: &MoveGen, pe
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: false,
+            inference_server: None,
         };
         
         let start_classical = Instant::now();
@@ -145,6 +148,7 @@ fn run_performance_comparison(positions: &[(&str, &str)], move_gen: &MoveGen, pe
             mate_search_depth: 0,
             exploration_constant: 1.414,
             use_neural_policy: true,
+            inference_server: None,
         };
         
         let start_neural = Instant::now();

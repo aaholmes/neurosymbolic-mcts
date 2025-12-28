@@ -46,6 +46,7 @@ pub fn mcts_pesto_search(
         mate_search_depth,
         exploration_constant: EXPLORATION_CONSTANT,
         use_neural_policy: false,
+        inference_server: None,
     };
 
     let mut nn = None;

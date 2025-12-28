@@ -88,6 +88,7 @@ fn run_profiling_suite() {
             mate_search_depth: 1,
             exploration_constant: 1.414,
             use_neural_policy: false,
+            inference_server: None,
         }),
         ("Standard Search", TacticalMctsConfig {
             max_iterations: 500,
@@ -95,6 +96,7 @@ fn run_profiling_suite() {
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: false,
+            inference_server: None,
         }),
         ("Deep Search", TacticalMctsConfig {
             max_iterations: 1000,
@@ -102,6 +104,7 @@ fn run_profiling_suite() {
             mate_search_depth: 5,
             exploration_constant: 1.414,
             use_neural_policy: false,
+            inference_server: None,
         }),
     ];
     
@@ -133,6 +136,7 @@ fn run_profiling_suite() {
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: false,
+            inference_server: None,
         };
         
         println!("\n📈 {} iterations:", iterations);

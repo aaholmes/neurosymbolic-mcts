@@ -10,7 +10,7 @@ def test_model_shapes(model_class, name):
     print(f"\nTesting {name}...")
     batch_size = 4
     # Random chess board input: [Batch, Channels, Height, Width]
-    dummy_input = torch.randn(batch_size, 12, 8, 8)
+    dummy_input = torch.randn(batch_size, 17, 8, 8)
     
     try:
         model = model_class()
@@ -38,7 +38,7 @@ def test_overfitting(model_class, name):
     
     # Create a fixed batch of random data
     batch_size = 4 # Smaller batch to make memorization easier
-    inputs = torch.randn(batch_size, 12, 8, 8)
+    inputs = torch.randn(batch_size, 17, 8, 8)
     
     # Target Policy: Random probabilities
     target_policy = torch.randn(batch_size, 4096).softmax(dim=1)

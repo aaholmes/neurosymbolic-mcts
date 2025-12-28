@@ -37,13 +37,16 @@ fn main() {
         println!("Tensor Shape: {:?}", tensor.size());
         
         // Extract data
-        // Shape: [12, 8, 8]
-        let mut flat_data = vec![0.0f32; 12 * 8 * 8];
-        tensor.view([-1]).to_device(Device::Cpu).copy_data(&mut flat_data, 12 * 8 * 8);
+        // Shape: [17, 8, 8]
+        let mut flat_data = vec![0.0f32; 17 * 8 * 8];
+        tensor.view([-1]).to_device(Device::Cpu).copy_data(&mut flat_data, 17 * 8 * 8);
         
         let plane_names = [
             "White Pawn", "White Knight", "White Bishop", "White Rook", "White Queen", "White King",
-            "Black Pawn", "Black Knight", "Black Bishop", "Black Rook", "Black Queen", "Black King"
+            "Black Pawn", "Black Knight", "Black Bishop", "Black Rook", "Black Queen", "Black King",
+            "En Passant", 
+            "W King-side Castle", "W Queen-side Castle", 
+            "B King-side Castle", "B Queen-side Castle"
         ];
         
         for (i, name) in plane_names.iter().enumerate() {
