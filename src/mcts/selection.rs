@@ -171,24 +171,8 @@ fn calculate_ucb_value(
         return f64::INFINITY;
     }
     
-    // Q value: Average reward from this child's perspective
+    // Q value: Average reward from this child's perspective (already relative to side that just moved)
     let q_value = child.total_value / child.visits as f64;
-    
-    // Adjust Q value based on whose turn it is at the parent
-    let adjusted_q = if let Some(parent_weak) = &child.parent {
-        if let Some(parent_rc) = parent_weak.upgrade() {
-            let parent_ref = parent_rc.borrow();
-            if parent_ref.state.w_to_move {
-                q_value // White to move, use value as-is
-            } else {
-                1.0 - q_value // Black to move, invert value
-            }
-        } else {
-            0.5 // Parent dropped, use neutral value
-        }
-    } else {
-        0.5 // No parent (shouldn't happen in selection)
-    };
     
     // U value: Exploration term
     let exploration_term = exploration_constant
@@ -196,7 +180,7 @@ fn calculate_ucb_value(
         * (parent_visits as f64).sqrt()
         / (1.0 + child.visits as f64);
     
-    adjusted_q + exploration_term
+    q_value + exploration_term
 }
 
 /// Ensure neural network policy has been evaluated for the node

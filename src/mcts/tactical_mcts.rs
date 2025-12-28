@@ -190,11 +190,11 @@ fn evaluate_leaf_node(
     let board = &node_ref.state;
     
     if let Some(cached_value) = node_ref.terminal_or_mate_value {
-        if cached_value >= 0.0 { return cached_value; }
+        if cached_value >= -1.0 { return cached_value; }
     }
 
     if koth_center_in_3(board, move_gen) {
-        let win_val = if board.w_to_move { 1.0 } else { 0.0 };
+        let win_val = if board.w_to_move { 1.0 } else { -1.0 };
         node_ref.terminal_or_mate_value = Some(win_val);
         return win_val;
     }
@@ -202,8 +202,8 @@ fn evaluate_leaf_node(
     if config.mate_search_depth > 0 {
         if let Some((mate_depth, _mate_move)) = transposition_table.probe_mate(board, config.mate_search_depth) {
             stats.tt_mate_hits += 1;
-            if mate_depth > 0 {
-                let mate_value = if mate_depth > 0 { 1.0 } else { 0.0 };
+            if mate_depth != 0 {
+                let mate_value = if mate_depth > 0 { 1.0 } else { -1.0 };
                 node_ref.terminal_or_mate_value = Some(mate_value);
                 return mate_value;
             }
@@ -214,7 +214,7 @@ fn evaluate_leaf_node(
             transposition_table.store_mate_result(board, mate_result.0.abs(), mate_result.1, config.mate_search_depth);
             
             if mate_result.0 != 0 {
-                let mate_value = if mate_result.0 > 0 { 1.0 } else { 0.0 };
+                let mate_value = if mate_result.0 > 0 { 1.0 } else { -1.0 };
                 node_ref.terminal_or_mate_value = Some(mate_value);
                 return mate_value;
             }
@@ -223,38 +223,39 @@ fn evaluate_leaf_node(
     
     if node_ref.nn_value.is_none() {
         let mut k_val = 0.5;
-        let mut eval_val = -999.0;
+        let mut raw_val = -999.0;
 
         // 1. Batched Inference
         if let Some(server) = &config.inference_server {
             if config.use_neural_policy {
                 let receiver = server.predict_async(node_ref.state.clone());
                 if let Ok(Some((_policy, value, k))) = receiver.recv() {
-                    eval_val = value as f64;
+                    raw_val = value as f64;
                     k_val = k;
                 }
             }
         } 
-        // 2. Direct Inference
-        else if let Some(nn) = nn_policy {
-            if nn.is_available() {
-                if let Some((_policy, value, k)) = nn.predict(&node_ref.state) {
-                    eval_val = value as f64;
-                    k_val = k;
-                }
+        // Direct Inference or Batched Response Handling
+        if raw_val > -2.0 {
+            // Assert NN values are in range [-1, 1] to catch issues with model heads immediately.
+            if raw_val < -1.01 || raw_val > 1.01 {
+                panic!("Neural Network produced value out of range [-1, 1]: {}. issues must be caught immediately.", raw_val);
             }
-        }
+            node_ref.nn_value = Some(raw_val);
+        } else {
+            // If the user explicitly requested neural policy, do not fail silently to classical eval.
+            if config.use_neural_policy {
+                panic!("Neural network policy enabled but no valid prediction obtained!");
+            }
 
-        if eval_val < -1.0 {
+            // Classical path: Use Pesto evaluation mapped to tanh domain for search consistency.
             let eval_score = pesto_eval.eval(&node_ref.state, move_gen);
-            eval_val = 1.0 / (1.0 + (-eval_score as f64 / 400.0).exp());
+            node_ref.nn_value = Some((eval_score as f64 / 400.0).tanh());
         }
-
-        node_ref.nn_value = Some(eval_val);
         node_ref.k_val = k_val;
     }
     
-    node_ref.nn_value.unwrap_or(0.5)
+    node_ref.nn_value.unwrap()
 }
 
 fn evaluate_and_expand_node(
@@ -274,7 +275,7 @@ fn evaluate_and_expand_node(
 
     if !tactical_tree.siblings.is_empty() {
         let parent_eval = pesto_eval.eval(&node_ref.state, move_gen);
-        let parent_v = node_ref.nn_value.unwrap_or(0.5);
+        let parent_v = node_ref.nn_value.unwrap_or(0.0); // Neutral is 0.0 in [-1, 1]
         let k = node_ref.k_val;
 
         for (mv, qs_score) in tactical_tree.siblings {
@@ -316,10 +317,13 @@ fn backpropagate_value(mut node: Rc<RefCell<MctsNode>>, mut value: f64) {
         {
             let mut node_ref = node.borrow_mut();
             node_ref.visits += 1;
-            let value_to_add = if node_ref.state.w_to_move { 1.0 - value } else { value };
-            node_ref.total_value += value_to_add;
-            node_ref.total_value_squared += value_to_add * value_to_add;
-            value = 1.0 - value;
+            // value is White's perspective.
+            // Reward side that just moved:
+            // If it's White to move now, Black just moved. Reward is -value.
+            // If it's Black to move now, White just moved. Reward is value.
+            let reward = if node_ref.state.w_to_move { -value } else { value };
+            node_ref.total_value += reward;
+            node_ref.total_value_squared += reward * reward;
         }
         let parent = {
             let node_ref = node.borrow();
@@ -393,7 +397,10 @@ pub fn tactical_mcts_search_for_training(
     }
     
     let best_move = select_best_move_from_root(root_node.clone(), &config);
-    let root_val = if root.visits > 0 { root.total_value / root.visits as f64 } else { 0.5 };
+    // root.total_value stores rewards relative to side that just moved (parent's parent).
+    // For root, this is the opponent of the side to move.
+    // So we negate it to get the side to move's perspective.
+    let root_val = if root.visits > 0 { -(root.total_value / root.visits as f64) } else { 0.0 };
     
     MctsTrainingResult { best_move, root_policy: policy, root_value_prediction: root_val, stats }
 }

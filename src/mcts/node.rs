@@ -29,18 +29,18 @@ pub struct MctsNode {
     /// Number of times this node has been visited
     pub visits: u32,
 
-    /// Total value accumulated through this node (always from White's perspective, 0.0 to 1.0)
+    /// Total value accumulated through this node (Relative to side that just moved, [-visits, visits])
     pub total_value: f64,
     /// Sum of squared values accumulated through this node (for variance calculation).
     pub total_value_squared: f64,
 
     // --- Evaluation / Mate Status ---
-    /// Stores the exact value if determined by terminal state check or mate search (0.0, 0.5, 1.0 for White).
+    /// Stores the exact value if determined by terminal state check or mate search (1.0 for White Win, -1.0 for White Loss).
     /// Also used as a flag to indicate if mate search has been performed. None = not checked, Some(-999.0) = checked, no mate.
     pub terminal_or_mate_value: Option<f64>,
     /// If mate search found a mate, stores the mating move
     pub mate_move: Option<Move>,
-    /// Stores the value from the evaluation (Pesto or NN) (0.0 to 1.0 for White) when node is first evaluated.
+    /// Stores the value from the evaluation (Pesto or NN) ([-1, 1] for White) when node is first evaluated.
     pub nn_value: Option<f64>, 
     /// The material confidence scalar (k) predicted by the neural network for this node.
     /// Used for extrapolating values of child tactical nodes.
@@ -87,9 +87,9 @@ impl MctsNode {
         let is_terminal = is_checkmate || is_stalemate;
 
         let initial_terminal_value = if is_stalemate {
-            Some(0.5)
+            Some(0.0)
         } else if is_checkmate {
-            Some(if state.w_to_move { 0.0 } else { 1.0 })
+            Some(if state.w_to_move { -1.0 } else { 1.0 })
         } else {
             None
         };
@@ -132,9 +132,9 @@ impl MctsNode {
         let is_terminal = is_checkmate || is_stalemate;
 
         let initial_terminal_value = if is_stalemate {
-            Some(0.5)
+            Some(0.0)
         } else if is_checkmate {
-            Some(if new_state.w_to_move { 0.0 } else { 1.0 })
+            Some(if new_state.w_to_move { -1.0 } else { 1.0 })
         } else {
             None
         };
@@ -189,13 +189,8 @@ impl MctsNode {
             return u_value;
         }
 
-        let avg_value_white = self.total_value / self.visits as f64;
-
-        let q_value_for_selector = if let Some(parent_weak) = &self.parent {
-            if let Some(parent_rc) = parent_weak.upgrade() {
-                if parent_rc.borrow().state.w_to_move { avg_value_white } else { 1.0 - avg_value_white }
-            } else { 0.5 }
-        } else { 0.5 };
+        // total_value is relative to side that just moved (parent's perspective during selection)
+        let q_value = self.total_value / self.visits as f64;
 
         let prior_p = if parent_num_legal_moves > 0 {
             1.0 / parent_num_legal_moves as f64
@@ -207,7 +202,7 @@ impl MctsNode {
             * (parent_visits as f64).sqrt()
             / (1.0 + self.visits as f64);
 
-        q_value_for_selector + exploration_term
+        q_value + exploration_term
     }
 
     pub fn uct_value(&self, parent_visits: u32, exploration_constant: f64) -> f64 {
@@ -215,26 +210,13 @@ impl MctsNode {
             return f64::INFINITY;
         }
 
-        let avg_value_white = self.total_value / self.visits as f64;
-
-        let q_value_for_selector = if let Some(parent_weak) = &self.parent {
-            if let Some(parent_rc) = parent_weak.upgrade() {
-                if parent_rc.borrow().state.w_to_move {
-                    avg_value_white
-                } else {
-                    1.0 - avg_value_white
-                }
-            } else {
-                0.5
-            }
-        } else {
-            0.5
-        };
+        // total_value is relative to side that just moved (parent's perspective during selection)
+        let q_value = self.total_value / self.visits as f64;
 
         let exploration_term =
             exploration_constant * ((parent_visits as f64).ln() / self.visits as f64).sqrt();
 
-        q_value_for_selector + exploration_term
+        q_value + exploration_term
     }
 
     pub fn select_best_explored_child(&self, exploration_constant: f64) -> Rc<RefCell<MctsNode>> {
