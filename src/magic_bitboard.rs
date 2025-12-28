@@ -295,20 +295,20 @@ pub fn init_bishop_moves(
 
         // Iterate over all possible blocker combinations
         for blocker_ind in 0..(1 << blocker_squares.len()) {
-            blockers = B_MASKS[from_sq_ind];
+            let mut current_blockers = 0u64;
             for i in 0..blocker_squares.len() {
                 if (blocker_ind & (1 << i)) != 0 {
-                    blockers &= !sq_ind_to_bit(blocker_squares[i]);
+                    current_blockers |= sq_ind_to_bit(blocker_squares[i]);
                 }
             }
 
             // Generate the key using a multiplication and right shift
-            key = ((blockers.wrapping_mul(b_magics[from_sq_ind])) >> (64 - B_BITS[from_sq_ind]))
+            key = ((current_blockers.wrapping_mul(b_magics[from_sq_ind])) >> (64 - B_BITS[from_sq_ind]))
                 as usize;
 
             // Assign the captures and moves for this blocker combination
-            out1[from_sq_ind][key] = bishop_attacks(from_sq_ind, blockers);
-            for i in out1[from_sq_ind][key].0.iter_mut() {
+            out1[from_sq_ind][key] = bishop_attacks(from_sq_ind, current_blockers);
+            for i in out1[from_sq_ind][key].0.iter() {
                 out2[from_sq_ind][key] |= sq_ind_to_bit(*i);
             }
         }
@@ -330,35 +330,34 @@ pub fn init_bishop_moves(
 pub fn init_rook_moves(r_magics: [u64; 64]) -> (Vec<Vec<(Vec<usize>, Vec<usize>)>>, Vec<Vec<u64>>) {
     let mut out1: Vec<Vec<(Vec<usize>, Vec<usize>)>> = Vec::new();
     let mut out2: Vec<Vec<u64>> = Vec::new();
-    let mut blockers: u64;
     let mut key: usize;
     let mut blocker_squares: Vec<usize> = Vec::new();
     for from_sq_ind in 0..64 {
         out1.push(vec![(vec![], vec![]); 4096]);
         out2.push(vec![0; 4096]);
         // Mask blockers
-        blockers = R_MASKS[from_sq_ind];
+        let mask = R_MASKS[from_sq_ind];
         blocker_squares.clear();
-        for i in bits(&blockers) {
+        for i in bits(&mask) {
             blocker_squares.push(i);
         }
 
         // Iterate over all possible blocker combinations
         for blocker_ind in 0..(1 << blocker_squares.len()) {
-            blockers = R_MASKS[from_sq_ind];
+            let mut current_blockers = 0u64;
             for i in 0..blocker_squares.len() {
                 if (blocker_ind & (1 << i)) != 0 {
-                    blockers &= !sq_ind_to_bit(blocker_squares[i]);
+                    current_blockers |= sq_ind_to_bit(blocker_squares[i]);
                 }
             }
 
             // Generate the key using a multiplication and right shift
-            key = ((blockers.wrapping_mul(r_magics[from_sq_ind])) >> (64 - R_BITS[from_sq_ind]))
+            key = ((current_blockers.wrapping_mul(r_magics[from_sq_ind])) >> (64 - R_BITS[from_sq_ind]))
                 as usize;
 
             // Assign the captures and moves for this blocker combination
-            out1[from_sq_ind][key] = rook_attacks(from_sq_ind, blockers);
-            for i in out1[from_sq_ind][key].0.iter_mut() {
+            out1[from_sq_ind][key] = rook_attacks(from_sq_ind, current_blockers);
+            for i in out1[from_sq_ind][key].0.iter() {
                 out2[from_sq_ind][key] |= sq_ind_to_bit(*i);
             }
         }
@@ -379,58 +378,29 @@ pub fn init_rook_moves(r_magics: [u64; 64]) -> (Vec<Vec<(Vec<usize>, Vec<usize>)
 /// - The first vector represents capture squares.
 /// - The second vector represents move squares.
 pub fn rook_attacks(sq: usize, block: u64) -> (Vec<usize>, Vec<usize>) {
-    // Return the attacks for a rook on a given square, given a blocking mask.
-    // Return the captures and moves separately
-    // Following the tradition of using blocking masks, this routine has two quirks:
-    // 1. Captures can include capturing own pieces
-    // 2. For unblocked moves to end of the board, for now we store that as both a capture and a move
-    // These are both because of the way the blocking masks are defined.
-    let rk = sq / 8;
-    let fl = sq % 8;
+    let rk = (sq / 8) as i32;
+    let fl = (sq % 8) as i32;
     let mut captures: Vec<usize> = Vec::new();
     let mut moves: Vec<usize> = Vec::new();
-    for r in rk + 1..8 {
-        if r == 7 {
-            captures.push(fl + r * 8);
-            moves.push(fl + r * 8);
-        } else if (block & (1 << (fl + r * 8))) != 0 {
-            captures.push(fl + r * 8);
-            break;
-        } else {
-            moves.push(fl + r * 8);
-        }
-    }
-    for r in (0..rk).rev() {
-        if r == 0 {
-            captures.push(fl + r * 8);
-            moves.push(fl + r * 8);
-        } else if (block & (1 << (fl + r * 8))) != 0 {
-            captures.push(fl + r * 8);
-            break;
-        } else {
-            moves.push(fl + r * 8);
-        }
-    }
-    for f in fl + 1..8 {
-        if f == 7 {
-            captures.push(f + rk * 8);
-            moves.push(f + rk * 8);
-        } else if (block & (1 << (f + rk * 8))) != 0 {
-            captures.push(f + rk * 8);
-            break;
-        } else {
-            moves.push(f + rk * 8);
-        }
-    }
-    for f in (0..fl).rev() {
-        if f == 0 {
-            captures.push(f + rk * 8);
-            moves.push(f + rk * 8);
-        } else if (block & (1 << (f + rk * 8))) != 0 {
-            captures.push(f + rk * 8);
-            break;
-        } else {
-            moves.push(f + rk * 8);
+
+    let dr = [1, -1, 0, 0];
+    let df = [0, 0, 1, -1];
+
+    for i in 0..4 {
+        for d in 1..8 {
+            let r = rk + dr[i] * d;
+            let f = fl + df[i] * d;
+            if r >= 0 && r < 8 && f >= 0 && f < 8 {
+                let s = (r * 8 + f) as usize;
+                if (block & (1u64 << s)) != 0 {
+                    captures.push(s);
+                    break;
+                } else {
+                    moves.push(s);
+                }
+            } else {
+                break;
+            }
         }
     }
     (captures, moves)
@@ -449,74 +419,28 @@ pub fn rook_attacks(sq: usize, block: u64) -> (Vec<usize>, Vec<usize>) {
 /// - The first vector represents capture squares.
 /// - The second vector represents move squares.
 pub fn bishop_attacks(sq: usize, block: u64) -> (Vec<usize>, Vec<usize>) {
-    // Return the attacks for a bishop on a given square, given a blocking mask.
-    // Return the captures and moves separately
-    // Following the tradition of using blocking masks, this routine has two quirks:
-    // 1. Captures can include capturing own pieces
-    // 2. For unblocked moves to end of the board, for now we store that as both a capture and a move
-    // These are both because of the way the blocking masks are defined.
-    let rk = sq / 8;
-    let fl = sq % 8;
-    let mut f: usize;
+    let rk = (sq / 8) as i32;
+    let fl = (sq % 8) as i32;
     let mut captures: Vec<usize> = Vec::new();
     let mut moves: Vec<usize> = Vec::new();
-    if rk < 7 && fl < 7 {
-        for r in rk + 1..8 {
-            f = fl + r - rk;
-            if r == 7 || f == 7 {
-                captures.push(f + r * 8);
-                moves.push(f + r * 8);
-                break;
-            } else if (block & (1 << (f + r * 8))) != 0 {
-                captures.push(f + r * 8);
-                break;
+
+    let dr = [1, 1, -1, -1];
+    let df = [1, -1, 1, -1];
+
+    for i in 0..4 {
+        for d in 1..8 {
+            let r = rk + dr[i] * d;
+            let f = fl + df[i] * d;
+            if r >= 0 && r < 8 && f >= 0 && f < 8 {
+                let s = (r * 8 + f) as usize;
+                if (block & (1u64 << s)) != 0 {
+                    captures.push(s);
+                    break;
+                } else {
+                    moves.push(s);
+                }
             } else {
-                moves.push(f + r * 8);
-            }
-        }
-    }
-    if rk < 7 && fl > 0 {
-        for r in rk + 1..8 {
-            f = fl + rk - r;
-            if r == 7 || f == 0 {
-                captures.push(f + r * 8);
-                moves.push(f + r * 8);
                 break;
-            } else if (block & (1 << (f + r * 8))) != 0 {
-                captures.push(f + r * 8);
-                break;
-            } else {
-                moves.push(f + r * 8);
-            }
-        }
-    }
-    if rk > 0 && fl > 0 {
-        for r in (0..rk).rev() {
-            f = fl + r - rk;
-            if r == 0 || f == 0 {
-                captures.push(f + r * 8);
-                moves.push(f + r * 8);
-                break;
-            } else if (block & (1 << (f + r * 8))) != 0 {
-                captures.push(f + r * 8);
-                break;
-            } else {
-                moves.push(f + r * 8);
-            }
-        }
-    }
-    if rk > 0 && fl < 7 {
-        for r in (0..rk).rev() {
-            f = fl + rk - r;
-            if r == 0 || f == 7 {
-                captures.push(f + r * 8);
-                moves.push(f + r * 8);
-                break;
-            } else if (block & (1 << (f + r * 8))) != 0 {
-                captures.push(f + r * 8);
-                break;
-            } else {
-                moves.push(f + r * 8);
             }
         }
     }

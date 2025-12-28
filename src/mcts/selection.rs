@@ -157,7 +157,7 @@ fn select_ucb_with_policy(
 }
 
 /// Calculate UCB value for a child node
-fn calculate_ucb_value(
+pub fn calculate_ucb_value(
     child: &MctsNode,
     parent_visits: u32,
     prior_prob: f64,

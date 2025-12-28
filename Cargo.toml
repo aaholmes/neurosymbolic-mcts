@@ -52,6 +52,22 @@ neural = ["dep:tch"]
 
 [dev-dependencies]
 tempfile = "3.0"
+proptest = "1.4"
+criterion = "0.5"
 
-[profile.release]
-debug = true
+[[test]]
+name = "unit_tests"
+path = "tests/unit/mod.rs"
+
+[[test]]
+name = "integration_tests"  
+path = "tests/integration/mod.rs"
+
+[[test]]
+name = "property_tests"
+path = "tests/property/mod.rs"
+
+[[test]]
+name = "regression_tests"
+path = "tests/regression/mod.rs"
+
