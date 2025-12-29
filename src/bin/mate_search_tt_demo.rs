@@ -49,6 +49,7 @@ fn show_tt_speedup(
         exploration_constant: 1.414,
         use_neural_policy: false,
         inference_server: None,
+        logger: None,
     };
     
     // Cold transposition table test
@@ -117,6 +118,7 @@ fn analyze_mate_cache_efficiency(
         exploration_constant: 1.414,
         use_neural_policy: false,
         inference_server: None,
+        logger: None,
     };
     
     let mut shared_tt = TranspositionTable::new();
@@ -138,8 +140,8 @@ fn analyze_mate_cache_efficiency(
         };
         
         println!("   Position {}: {}", i + 1, name);
-        println!("      • Time: {:?}, Iterations: {}", elapsed, stats.iterations);
-        println!("      • Mates Found: {}, Best Move: {:?}", stats.mates_found, best_move.is_some());
+        println!("      • Time: {:?}, Iterations: ?{}", elapsed, stats.iterations);
+        println!("      • Mates Found: {}, Best Move: ?{:?}", stats.mates_found, best_move.is_some());
         println!("      • TT Mate Hit Rate: {:.1}% ({}/{})", 
                  hit_rate, stats.tt_mate_hits, stats.tt_mate_hits + stats.tt_mate_misses);
     }
@@ -159,6 +161,7 @@ fn benchmark_repeated_searches(
         exploration_constant: 1.414,
         use_neural_policy: false,
         inference_server: None,
+        logger: None,
     };
     
     let rounds = 5;

@@ -28,6 +28,7 @@ pub fn neural_mcts_search(
         exploration_constant: 1.414,
         use_neural_policy: nn_policy.is_some(),
         inference_server: None,
+        logger: None,
     };
 
     let (best_move, _stats, _root) = tactical_mcts_search(

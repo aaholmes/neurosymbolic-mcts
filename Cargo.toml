@@ -75,3 +75,7 @@ path = "tests/regression/mod.rs"
 [[bin]]
 name = "mcts_inspector"
 path = "src/bin/mcts_inspector.rs"
+
+[[bin]]
+name = "verbose_search"
+path = "src/bin/verbose_search.rs"

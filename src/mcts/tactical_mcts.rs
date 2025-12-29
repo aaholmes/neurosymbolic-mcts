@@ -12,6 +12,7 @@ use crate::eval::{PestoEval, extrapolate_value};
 use crate::mcts::node::{MctsNode, NodeOrigin};
 use crate::mcts::selection::select_child_with_tactical_priority;
 use crate::mcts::inference_server::InferenceServer;
+use crate::mcts::search_logger::{SearchLogger, GateReason};
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use crate::neural_net::NeuralNetPolicy;
@@ -33,6 +34,8 @@ pub struct TacticalMctsConfig {
     pub exploration_constant: f64,
     pub use_neural_policy: bool,
     pub inference_server: Option<Arc<InferenceServer>>,
+    /// Search logger for stream of consciousness output
+    pub logger: Option<Arc<SearchLogger>>,
 }
 
 impl Default for TacticalMctsConfig {
@@ -44,6 +47,7 @@ impl Default for TacticalMctsConfig {
             exploration_constant: 1.414,
             use_neural_policy: true,
             inference_server: None,
+            logger: None,
         }
     }
 }
@@ -83,11 +87,17 @@ pub fn tactical_mcts_search_with_tt(
     let start_time = Instant::now();
     let mut stats = TacticalMctsStats::default();
     
+    // Get logger reference (or silent default)
+    let logger = config.logger.as_ref();
+    
     if koth_center_in_3(&board, move_gen) {
         let (captures, moves) = move_gen.gen_pseudo_legal_moves(&board);
         for m in captures.iter().chain(moves.iter()) {
             let next = board.apply_move_to_board(*m);
             if next.is_legal(move_gen) && next.is_koth_win().0 == board.w_to_move {
+                if let Some(log) = logger {
+                    log.log_tier1_gate(&GateReason::KothWin, Some(*m));
+                }
                 stats.search_time = start_time.elapsed();
                 let root_node = MctsNode::new_root(board, move_gen);
                 root_node.borrow_mut().origin = NodeOrigin::Gate;
@@ -97,11 +107,28 @@ pub fn tactical_mcts_search_with_tt(
     }
 
     let mate_move_result = if config.mate_search_depth > 0 {
+        if let Some(log) = logger {
+            log.log_mate_search_start(config.mate_search_depth);
+        }
+        
         let mut mate_search_stack = BoardStack::with_board(board.clone());
-        let (mate_score, mate_move, _) = mate_search(&mut mate_search_stack, move_gen, config.mate_search_depth, false);
+        let (mate_score, mate_move, nodes) = mate_search(&mut mate_search_stack, move_gen, config.mate_search_depth, false);
+        
+        if let Some(log) = logger {
+            log.log_mate_search_result(mate_score, mate_move, nodes as u64);
+        }
         
         if mate_score >= 1_000_000 {
             stats.mates_found += 1;
+             if let Some(log) = logger {
+                log.log_tier1_gate(
+                    &GateReason::MateFound { 
+                        depth: config.mate_search_depth, 
+                        score: mate_score 
+                    },
+                    Some(mate_move)
+                );
+            }
             Some(mate_move)
         } else if mate_score <= -1_000_000 {
             Some(mate_move)
@@ -126,25 +153,45 @@ pub fn tactical_mcts_search_with_tt(
         return (None, stats, root_node);
     }
     
-    evaluate_and_expand_node(root_node.clone(), move_gen, pesto_eval, &mut stats);
+    evaluate_and_expand_node(root_node.clone(), move_gen, pesto_eval, &mut stats, logger);
     
     for iteration in 0..config.max_iterations {
         if start_time.elapsed() > config.time_limit { break; }
         
-        let leaf_node = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats);
-        let value = evaluate_leaf_node(leaf_node.clone(), move_gen, pesto_eval, nn_policy, &config, transposition_table, &mut stats);
+        if let Some(log) = logger {
+            log.log_iteration_start(iteration + 1);
+        }
+        
+        let leaf_node = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats, logger);
+        let value = evaluate_leaf_node(leaf_node.clone(), move_gen, pesto_eval, nn_policy, &config, transposition_table, &mut stats, logger);
         
         if !leaf_node.borrow().is_game_terminal() && leaf_node.borrow().visits == 0 {
-            evaluate_and_expand_node(leaf_node.clone(), move_gen, pesto_eval, &mut stats);
+            evaluate_and_expand_node(leaf_node.clone(), move_gen, pesto_eval, &mut stats, logger);
         }
         
         backpropagate_value(leaf_node, value);
         stats.iterations = iteration + 1;
+        
+        if let Some(log) = logger {
+            let best = select_best_move_from_root(root_node.clone(), &config);
+            log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
+        }
+        
         if iteration % 100 == 0 && start_time.elapsed() > config.time_limit { break; }
     }
     
     stats.search_time = start_time.elapsed();
     let best_move = select_best_move_from_root(root_node.clone(), &config);
+    
+    if let Some(log) = logger {
+        log.log_search_complete(
+            best_move,
+            stats.iterations,
+            stats.nodes_expanded,
+            stats.mates_found,
+        );
+    }
+    
     (best_move, stats, root_node)
 }
 
@@ -154,8 +201,14 @@ fn select_leaf_node(
     nn_policy: &mut Option<NeuralNetPolicy>,
     config: &TacticalMctsConfig,
     stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
 ) -> Rc<RefCell<MctsNode>> {
+    let mut depth = 0;
     loop {
+        if let Some(log) = logger {
+            log.log_enter_node(&current.borrow(), depth);
+        }
+        
         let is_terminal = current.borrow().is_game_terminal();
         let has_children = !current.borrow().children.is_empty();
         
@@ -169,11 +222,14 @@ fn select_leaf_node(
             move_gen,
             nn_policy,
             stats,
+            logger,
+            depth,
         ) {
             if !current.borrow().policy_evaluated && config.use_neural_policy {
                 stats.nn_policy_evaluations += 1;
             }
             current = child;
+            depth += 1;
         } else {
             return current;
         }
@@ -188,6 +244,7 @@ fn evaluate_leaf_node(
     config: &TacticalMctsConfig,
     transposition_table: &mut TranspositionTable,
     stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
 ) -> f64 {
     let mut node_ref = node.borrow_mut();
     let board = &node_ref.state;
@@ -198,6 +255,9 @@ fn evaluate_leaf_node(
 
     if koth_center_in_3(board, move_gen) {
         let win_val = 1.0; // StM wins
+        if let Some(log) = logger {
+            log.log_koth_check(true, Some(0)); // Distance 0 as place holder or calculate it
+        }
         node_ref.terminal_or_mate_value = Some(win_val);
         return win_val;
     }
@@ -206,6 +266,12 @@ fn evaluate_leaf_node(
         if let Some((mate_depth, _mate_move)) = transposition_table.probe_mate(board, config.mate_search_depth) {
             stats.tt_mate_hits += 1;
             if mate_depth != 0 {
+                if let Some(log) = logger {
+                    log.log_tier1_gate(
+                        &GateReason::TtMateHit { depth: mate_depth },
+                        None
+                    );
+                }
                 let mate_value = if mate_depth > 0 { 1.0 } else { -1.0 };
                 node_ref.terminal_or_mate_value = Some(mate_value);
                 node_ref.origin = NodeOrigin::Gate;
@@ -218,6 +284,9 @@ fn evaluate_leaf_node(
             transposition_table.store_mate_result(board, mate_result.0.abs(), mate_result.1, config.mate_search_depth);
             
             if mate_result.0 != 0 {
+                if let Some(log) = logger {
+                    log.log_mate_search_result(mate_result.0, mate_result.1, 0);
+                 }
                 let mate_value = if mate_result.0 > 0 { 1.0 } else { -1.0 };
                 node_ref.terminal_or_mate_value = Some(mate_value);
                 return mate_value;
@@ -245,6 +314,9 @@ fn evaluate_leaf_node(
             if raw_val < -1.01 || raw_val > 1.01 {
                 panic!("Neural Network produced value out of range [-1, 1]: {}. issues must be caught immediately.", raw_val);
             }
+            if let Some(log) = logger {
+                log.log_tier3_neural(raw_val, k_val);
+            }
             node_ref.nn_value = Some(raw_val);
             if node_ref.origin == NodeOrigin::Unknown {
                 node_ref.origin = NodeOrigin::Neural;
@@ -257,7 +329,11 @@ fn evaluate_leaf_node(
 
             // Classical path: Use Pesto evaluation mapped to tanh domain for search consistency.
             let eval_score = pesto_eval.eval(&node_ref.state, move_gen);
-            node_ref.nn_value = Some((eval_score as f64 / 400.0).tanh());
+            let tanh_val = (eval_score as f64 / 400.0).tanh();
+            if let Some(log) = logger {
+                log.log_classical_eval(eval_score, tanh_val);
+            }
+            node_ref.nn_value = Some(tanh_val);
         }
         node_ref.k_val = k_val;
     }
@@ -270,6 +346,7 @@ fn evaluate_and_expand_node(
     move_gen: &MoveGen,
     pesto_eval: &PestoEval,
     stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
 ) {
     let mut node_ref = node.borrow_mut();
     
@@ -277,10 +354,16 @@ fn evaluate_and_expand_node(
         return;
     }
 
+    if let Some(log) = logger {
+        log.log_qs_start(&node_ref.state);
+    }
     let mut board_stack = BoardStack::with_board(node_ref.state.clone());
     let tactical_tree = quiescence_search_tactical(&mut board_stack, move_gen, pesto_eval);
 
     if !tactical_tree.siblings.is_empty() {
+        if let Some(log) = logger {
+             log.log_qs_pv(&tactical_tree.principal_variation, tactical_tree.leaf_score);
+        }
         let parent_eval = pesto_eval.eval(&node_ref.state, move_gen);
         let parent_v = node_ref.nn_value.unwrap_or(0.0); // Neutral is 0.0 in [-1, 1]
         let k = node_ref.k_val;
@@ -288,6 +371,10 @@ fn evaluate_and_expand_node(
         for (mv, qs_score) in tactical_tree.siblings {
             let material_delta = qs_score - parent_eval;
             let extrapolated_v = extrapolate_value(parent_v, material_delta, k);
+            
+            if let Some(log) = logger {
+                log.log_tier2_graft(mv, extrapolated_v, k);
+            }
             
             node_ref.tactical_values.insert(mv, extrapolated_v);
             
@@ -399,14 +486,14 @@ pub fn tactical_mcts_search_for_training(
         return MctsTrainingResult { best_move: None, root_policy: vec![], root_value_prediction: 0.0, stats };
     }
     
-    evaluate_and_expand_node(root_node.clone(), move_gen, pesto_eval, &mut stats);
+    evaluate_and_expand_node(root_node.clone(), move_gen, pesto_eval, &mut stats, None);
     let mut transposition_table = TranspositionTable::new();
     for iteration in 0..config.max_iterations {
         if start_time.elapsed() > config.time_limit { break; }
-        let leaf = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats);
-        let value = evaluate_leaf_node(leaf.clone(), move_gen, pesto_eval, nn_policy, &config, &mut transposition_table, &mut stats);
+        let leaf = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats, None);
+        let value = evaluate_leaf_node(leaf.clone(), move_gen, pesto_eval, nn_policy, &config, &mut transposition_table, &mut stats, None);
         if !leaf.borrow().is_game_terminal() && leaf.borrow().visits == 0 {
-            evaluate_and_expand_node(leaf.clone(), move_gen, pesto_eval, &mut stats);
+            evaluate_and_expand_node(leaf.clone(), move_gen, pesto_eval, &mut stats, None);
         }
         backpropagate_value(leaf, value);
         stats.iterations = iteration + 1;

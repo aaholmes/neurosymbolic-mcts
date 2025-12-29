@@ -9,9 +9,11 @@ use crate::move_types::Move;
 use crate::mcts::node::MctsNode;
 use crate::mcts::tactical::identify_tactical_moves;
 use crate::mcts::tactical_mcts::TacticalMctsStats;
+use crate::mcts::search_logger::{SearchLogger, SelectionReason};
 use crate::neural_net::NeuralNetPolicy;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Select a child node using tactical-first prioritization
 pub fn select_child_with_tactical_priority(
@@ -20,6 +22,8 @@ pub fn select_child_with_tactical_priority(
     move_gen: &MoveGen,
     nn_policy: &mut Option<NeuralNetPolicy>,
     stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
+    depth: usize,
 ) -> Option<Rc<RefCell<MctsNode>>> {
     // First, ensure the node has been expanded (children created)
     ensure_node_expanded(node.clone(), move_gen);
@@ -32,12 +36,27 @@ pub fn select_child_with_tactical_priority(
     }
     
     // Phase 1: Check for unexplored tactical moves
-    if let Some(tactical_child) = select_unexplored_tactical_move(node.clone(), move_gen, stats) {
+    if let Some(tactical_child) = select_unexplored_tactical_move(node.clone(), move_gen, stats, logger) {
+        if let Some(log) = logger {
+            let child_ref = tactical_child.borrow();
+            if let Some(mv) = child_ref.action {
+                // Determine score (extrapolated value from graft)
+                let score = node.borrow().tactical_values.get(&mv).copied().unwrap_or(0.0);
+                log.log_selection(
+                    mv, 
+                    &SelectionReason::TacticalPriority { 
+                        move_type: "tactical".to_string(), 
+                        score 
+                    }, 
+                    depth
+                );
+            }
+        }
         return Some(tactical_child);
     }
     
     // Phase 2: All tactical moves explored, use UCB with policy values
-    select_ucb_with_policy(node, exploration_constant, nn_policy)
+    select_ucb_with_policy(node, exploration_constant, nn_policy, logger, depth)
 }
 
 /// Ensure the node has been expanded with all child nodes
@@ -71,12 +90,16 @@ fn select_unexplored_tactical_move(
     node: Rc<RefCell<MctsNode>>,
     move_gen: &MoveGen,
     stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
 ) -> Option<Rc<RefCell<MctsNode>>> {
     let mut node_ref = node.borrow_mut();
     
     // Ensure tactical moves have been identified
     if node_ref.tactical_moves.is_none() {
         let tactical_moves = identify_tactical_moves(&node_ref.state, move_gen);
+        if let Some(log) = logger {
+            log.log_tactical_moves_found(&tactical_moves);
+        }
         node_ref.tactical_moves = Some(tactical_moves);
     }
     
@@ -112,6 +135,8 @@ fn select_ucb_with_policy(
     node: Rc<RefCell<MctsNode>>,
     exploration_constant: f64,
     nn_policy: &mut Option<NeuralNetPolicy>,
+    logger: Option<&Arc<SearchLogger>>,
+    depth: usize,
 ) -> Option<Rc<RefCell<MctsNode>>> {
     // Ensure policy has been evaluated
     ensure_policy_evaluated(node.clone(), nn_policy);
@@ -127,6 +152,7 @@ fn select_ucb_with_policy(
     // Calculate UCB values for all children
     let mut best_child = None;
     let mut best_ucb = f64::NEG_INFINITY;
+    let mut best_details = (0.0, 0.0, 0.0); // Q, U, Total
     
     for child in &node_ref.children {
         let child_ref = child.borrow();
@@ -150,6 +176,27 @@ fn select_ucb_with_policy(
         if ucb_value > best_ucb {
             best_ucb = ucb_value;
             best_child = Some(child.clone());
+            
+            // Re-calculate components for logging
+            let q = if child_ref.visits == 0 { q_init } else { child_ref.total_value / child_ref.visits as f64 };
+            let u = exploration_constant * prior_prob * (parent_visits as f64).sqrt() / (1.0 + child_ref.visits as f64);
+            best_details = (q, u, ucb_value);
+        }
+    }
+    
+    if let Some(log) = logger {
+        if let Some(ref child) = best_child {
+            if let Some(mv) = child.borrow().action {
+                log.log_selection(
+                    mv,
+                    &SelectionReason::UcbSelection {
+                        q_value: best_details.0,
+                        u_value: best_details.1,
+                        total: best_details.2,
+                    },
+                    depth
+                );
+            }
         }
     }
     

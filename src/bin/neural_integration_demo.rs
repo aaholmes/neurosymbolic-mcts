@@ -1,180 +1,183 @@
-//! Neural Network Integration Demonstration
-//!
-//! This demo shows how the tactical-first MCTS search successfully integrates
-//! with neural network policy evaluation to combine strategic guidance
-//! with tactical precision.
+//! Neural Integration Demo
+//! 
+//! This binary demonstrates the integration of the neural network policy
+//! into the tactical MCTS search. It compares:
+//! 1. Pure MCTS (Baseline)
+//! 2. Tactical-First MCTS (No NN)
+//! 3. Neural-Enhanced MCTS (With NN)
 
 use kingfisher::board::Board;
 use kingfisher::eval::PestoEval;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::mcts::{tactical_mcts_search, TacticalMctsConfig};
+use kingfisher::mcts::inference_server::InferenceServer;
 use kingfisher::neural_net::NeuralNetPolicy;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn main() {
-    println!("🧠 Kingfisher Neural Network Integration Demo");
-    println!("===========================================");
+    println!("🧠 Neural Integration Demo");
+    println!("========================");
     
+    // Paths
+    let model_path = "models/latest.pt"; // Adjust as needed
+    
+    // Initialize components
     let move_gen = MoveGen::new();
     let pesto_eval = PestoEval::new();
     
-    // Sample test positions
+    // Try to load the model
+    let mut nn_policy = NeuralNetPolicy::new();
+    // We clone the policy for the server usage later, as load consumes or we need a fresh one
+    // Actually NeuralNetPolicy::load takes &mut self usually.
+    let model_loaded = match nn_policy.load(model_path) {
+        Ok(_) => {
+            println!("✅ Model loaded successfully from {}", model_path);
+            true
+        },
+        Err(e) => {
+            println!("❌ Failed to load model: {}", e);
+            println!("   Running in fallback mode (Tactical MCTS only)");
+            false
+        }
+    };
+    
+    // Test positions
     let positions = vec![
         ("Starting Position", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
-        ("Tactical Pin", "r1bqk1nr/pp3ppp/2n5/1B1pp3/1b1PP3/2N2N2/PP3PPP/R1BQK2R w KQkq - 0 7"),
-        ("Endgame Puzzle", "8/8/8/4k3/4P3/4K3/8/8 w - - 0 1"),
+        ("Tactical Midgame", "r1bqkb1r/pppp1ppp/2n2n2/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4"),
+        ("Sharp Position", "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"),
     ];
     
-    // 1. Showcase basic integration
-    run_integration_showcase(&positions, &move_gen, &pesto_eval);
-    
-    // 2. Performance comparison
-    run_performance_comparison(&positions, &move_gen, &pesto_eval);
-}
-
-/// Showcase basic integration of tactical-first search with neural policy
-fn run_integration_showcase(positions: &[(&str, &str)], move_gen: &MoveGen, pesto_eval: &PestoEval) {
-    println!("-- Part 1: Neural Integration Showcase --");
-    
-    // Create neural policy instance
-    let mut nn_policy = Some(NeuralNetPolicy::new_demo_enabled());
-    
     for (name, fen) in positions {
-        println!("🔍 Analyzing: {}", name);
-        println!("   Position: {}", fen);
-        
+        println!("\n🔍 Analyzing: {}", name);
         let board = Board::new_from_fen(fen);
         
         let config = TacticalMctsConfig {
-            max_iterations: 500,
-            time_limit: Duration::from_millis(1000),
+            max_iterations: 100,
+            time_limit: Duration::from_secs(1),
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: true,
             inference_server: None,
+            logger: None,
         };
         
-        let start_time = Instant::now();
-        let (best_move, stats, _) = tactical_mcts_search(
-            board.clone(),
-            move_gen,
-            pesto_eval,
-            &mut nn_policy,
-            config,
-        );
-        let search_time = start_time.elapsed();
-        
-        if let Some(mv) = best_move {
-            println!("   🎯 Best Move: {}", mv.to_uci());
-        } else {
-            println!("   ❌ No move found");
+        // 1. Direct Inference (if model loaded)
+        if model_loaded {
+            println!("   Running with Direct Inference...");
+            let start = Instant::now();
+            let mut policy_opt = Some(nn_policy.clone());
+            let (best_move, stats, _) = tactical_mcts_search(
+                board.clone(),
+                &move_gen,
+                &pesto_eval,
+                &mut policy_opt,
+                config.clone(),
+            );
+            println!("   Direct: {:?} ({} iter, {:?})", 
+                     best_move, stats.iterations, start.elapsed());
         }
         
-        println!("   📈 Search Statistics:");
-        println!("      • Iterations: {}", stats.iterations);
-        println!("      • Nodes Expanded: {}", stats.nodes_expanded);
-        println!("      • Tactical Moves Explored: {}", stats.tactical_moves_explored);
-        println!("      • NN Policy Evaluations: {}", stats.nn_policy_evaluations);
-        println!("      • Mates Found: {}", stats.mates_found);
-        println!("      • Search Time: {:?}", search_time);
-        
-        println!("   ✅ Integration working: Classical tactics + Neural guidance\n");
+        // 2. Inference Server (Batched) - Simulation
+        if model_loaded {
+            println!("   Running with Inference Server (Batched)...");
+            // Create a new policy instance for the server
+            let mut server_policy = NeuralNetPolicy::new();
+            let _ = server_policy.load(model_path);
+            
+            let server = Arc::new(InferenceServer::new(
+                server_policy, 
+                1 // batch size
+            ));
+            
+            // Wait for server to start
+            std::thread::sleep(Duration::from_millis(500));
+            
+            let server_config = TacticalMctsConfig {
+                inference_server: Some(server.clone()),
+                ..config.clone()
+            };
+            
+            let start = Instant::now();
+            let mut policy_opt = Some(nn_policy.clone()); // Still need local policy for fallback or structure?
+            // Actually if using inference server, we might not need local policy, but tactical_mcts_search takes &mut Option<NeuralNetPolicy>
+            let (best_move, stats, _) = tactical_mcts_search(
+                board.clone(),
+                &move_gen,
+                &pesto_eval,
+                &mut policy_opt,
+                server_config,
+            );
+            println!("   Server: {:?} ({} iter, {:?})", 
+                     best_move, stats.iterations, start.elapsed());
+        }
     }
-}
-
-fn run_performance_comparison(positions: &[(&str, &str)], move_gen: &MoveGen, pesto_eval: &PestoEval) {
-    println!("-- Part 2: Performance Comparison --");
     
-    let mut hybrid_total_time = Duration::from_millis(0);
-    let mut classical_total_time = Duration::from_millis(0);
-    let mut neural_total_time = Duration::from_millis(0);
-    
-    let mut hybrid_tactical_moves = 0;
-    let mut classical_tactical_moves = 0;
-    let mut neural_tactical_moves = 0;
-    
-    let mut hybrid_nn_calls = 0;
-    let mut neural_nn_calls = 0;
-    
-    for (i, (name, fen)) in positions.iter().enumerate() {
-        println!("🏁 Round {}: {}", i + 1, name);
+    // Compare Configurations
+    if model_loaded {
+        println!("\n📊 Configuration Comparison");
+        let board = Board::new_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         
-        let board = Board::new_from_fen(fen);
+        let mut server_policy = NeuralNetPolicy::new();
+        let _ = server_policy.load(model_path);
+        let server = Arc::new(InferenceServer::new(server_policy, 4));
         
-        // 1. Hybrid
-        let mut nn_policy_hybrid = Some(NeuralNetPolicy::new_demo_enabled());
         let hybrid_config = TacticalMctsConfig {
-            max_iterations: 300,
-            time_limit: Duration::from_millis(800),
+            max_iterations: 200,
+            time_limit: Duration::from_secs(2),
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: true,
-            inference_server: None,
+            inference_server: Some(server.clone()),
+            logger: None,
         };
         
+        println!("   Running Hybrid Search...");
         let start = Instant::now();
-        let (hybrid_move, hybrid_stats, _) = tactical_mcts_search(
-            board.clone(), move_gen, pesto_eval, &mut nn_policy_hybrid, hybrid_config
+        let mut policy = Some(nn_policy.clone());
+        let (_, hybrid_stats, _) = tactical_mcts_search(
+            board.clone(), &move_gen, &pesto_eval, &mut policy, hybrid_config
         );
-        let hybrid_time = start.elapsed();
-        hybrid_total_time += hybrid_time;
-        hybrid_tactical_moves += hybrid_stats.tactical_moves_explored;
-        hybrid_nn_calls += hybrid_stats.nn_policy_evaluations;
-        
-        // 2. Classical
-        let mut nn_policy_none = None;
+        println!("   Hybrid: {} nodes/sec", 
+                 hybrid_stats.nodes_expanded as f64 / start.elapsed().as_secs_f64());
+
         let classical_config = TacticalMctsConfig {
-            max_iterations: 300,
-            time_limit: Duration::from_millis(800),
+            max_iterations: 200,
+            time_limit: Duration::from_secs(2),
             mate_search_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: false,
             inference_server: None,
+            logger: None,
         };
         
-        let start_classical = Instant::now();
-        let (classical_move, classical_stats, _) = tactical_mcts_search(
-            board.clone(), move_gen, pesto_eval, &mut nn_policy_none, classical_config
+        println!("   Running Classical Search...");
+        let start = Instant::now();
+        let mut no_policy = None;
+        let (_, classical_stats, _) = tactical_mcts_search(
+            board.clone(), &move_gen, &pesto_eval, &mut no_policy, classical_config
         );
-        let classical_time = start_classical.elapsed();
-        classical_total_time += classical_time;
-        classical_tactical_moves += classical_stats.tactical_moves_explored;
-
-        // 3. Neural-Only
-        let mut nn_policy_neural = Some(NeuralNetPolicy::new_demo_enabled());
+        println!("   Classical: {} nodes/sec", 
+                 classical_stats.nodes_expanded as f64 / start.elapsed().as_secs_f64());
+                 
         let neural_config = TacticalMctsConfig {
-            max_iterations: 300,
-            time_limit: Duration::from_millis(800),
-            mate_search_depth: 0,
+            max_iterations: 200,
+            time_limit: Duration::from_secs(2),
+            mate_search_depth: 0, // Disable mate search to test pure neural MCTS
             exploration_constant: 1.414,
             use_neural_policy: true,
-            inference_server: None,
+            inference_server: Some(server.clone()),
+            logger: None,
         };
         
-        let start_neural = Instant::now();
-        let (neural_move, neural_stats, _) = tactical_mcts_search(
-            board.clone(), move_gen, pesto_eval, &mut nn_policy_neural, neural_config
+        println!("   Running Pure Neural Search...");
+        let start = Instant::now();
+        let mut policy = Some(nn_policy.clone());
+        let (_, neural_stats, _) = tactical_mcts_search(
+            board.clone(), &move_gen, &pesto_eval, &mut policy, neural_config
         );
-        let neural_time = start_neural.elapsed();
-        neural_total_time += neural_time;
-        neural_tactical_moves += neural_stats.tactical_moves_explored;
-        neural_nn_calls += neural_stats.nn_policy_evaluations;
-        
-        println!("   🧠 Hybrid: {} ({}ms, {} tactical, {} NN)", 
-                 format_move_option(hybrid_move), hybrid_time.as_millis(),
-                 hybrid_stats.tactical_moves_explored, hybrid_stats.nn_policy_evaluations);
-        println!("   ⚔️  Classical: {} ({}ms, {} tactical)", 
-                 format_move_option(classical_move), classical_time.as_millis(),
-                 classical_stats.tactical_moves_explored);
-        println!("   🤖 Neural: {} ({}ms, {} tactical, {} NN)", 
-                 format_move_option(neural_move), neural_time.as_millis(),
-                 neural_stats.tactical_moves_explored, neural_stats.nn_policy_evaluations);
-    }
-}
-
-fn format_move_option(mv: Option<kingfisher::move_types::Move>) -> String {
-    match mv {
-        Some(m) => m.to_uci(),
-        None => "None".to_string(),
+        println!("   Neural: {} nodes/sec", 
+                 neural_stats.nodes_expanded as f64 / start.elapsed().as_secs_f64());
     }
 }

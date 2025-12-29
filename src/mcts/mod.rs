@@ -12,6 +12,7 @@ pub mod neural_mcts;
 pub mod tactical_mcts;
 pub mod nn_counter;
 pub mod inference_server;
+pub mod search_logger;
 
 use crate::board::Board;
 use crate::eval::PestoEval;
@@ -27,6 +28,7 @@ pub use self::tactical_mcts::{
 };
 pub use self::neural_mcts::neural_mcts_search;
 pub use self::inference_server::InferenceServer;
+pub use self::search_logger::{SearchLogger, Verbosity, GateReason, SelectionReason};
 
 /// Exploration constant for UCB (sqrt(2))
 pub const EXPLORATION_CONSTANT: f64 = 1.41421356237;
@@ -47,6 +49,7 @@ pub fn mcts_pesto_search(
         exploration_constant: EXPLORATION_CONSTANT,
         use_neural_policy: false,
         inference_server: None,
+        logger: None,
     };
 
     let mut nn = None;

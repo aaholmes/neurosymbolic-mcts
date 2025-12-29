@@ -215,12 +215,13 @@ fn benchmark_tactical_mcts(
     let mut nn_policy = None; // Start without neural network for baseline comparison
     
     let tactical_config = TacticalMctsConfig {
-        max_iterations: config.tactical_mcts_iterations,
+        max_iterations: 1000,
         time_limit: config.tactical_mcts_time,
-        mate_search_depth: config.mate_search_depth,
+        mate_search_depth: 5,
         exploration_constant: 1.414,
         use_neural_policy: false,
         inference_server: None,
+        logger: None,
     };
     
     let start_time = Instant::now();

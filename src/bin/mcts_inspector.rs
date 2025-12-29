@@ -50,6 +50,7 @@ fn main() {
         exploration_constant: 1.414,
         use_neural_policy: false, // Use mock for visualization
         inference_server: Some(Arc::new(server)),
+        logger: None,
     };
     
     println!("🔄 Running MCTS search...");

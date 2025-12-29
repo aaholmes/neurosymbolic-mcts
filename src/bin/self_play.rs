@@ -83,15 +83,15 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>) -> 
     
     loop {
         // 1. MCTS Search
-        let config = TacticalMctsConfig {
-            max_iterations: simulations,
-            time_limit: Duration::from_secs(60), 
-            mate_search_depth: 1, 
-            exploration_constant: 1.414,
-            use_neural_policy: true, 
-            inference_server: None,
-        };
-
+                let config = TacticalMctsConfig {
+                    max_iterations: simulations,
+                    time_limit: Duration::from_secs(60),
+                    mate_search_depth: 5,
+                    exploration_constant: 1.414,
+                    use_neural_policy: false,
+                    inference_server: None,
+                    logger: None,
+                };
         let result = tactical_mcts_search_for_training(
             board.clone(),
             &move_gen,
