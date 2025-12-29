@@ -193,12 +193,26 @@ Nodes are color-coded to reveal how the engine solved or evaluated them:
 - **🔵 Blue (Tier 3 Neural):** A standard node evaluated by the neural network (or Pesto in classical mode).
 - **⚪ Grey (Shadow Prior):** A tactical move that was considered but refuted/pruned by the engine.
 
+### Stream of Consciousness Logger
+For real-time insight into the engine's "thought process," use the **Stream of Consciousness Logger**. This tool narrates the search as it happens, explaining why specific moves are being prioritized.
+
+#### Using the Verbose Search
+Run the `verbose_search` binary on any position:
+
+```bash
+# Narrate the search for a specific position with verbose output
+cargo run --release --bin verbose_search -- "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" --verbosity verbose
+```
+
+For more details on verbosity levels and configuration, see [STREAM_OF_CONSCIOUSNESS_LOGGER.md](STREAM_OF_CONSCIOUSNESS_LOGGER.md).
+
 ## Binary Targets
 The crate is organized to produce several distinct binaries for different tasks:
 
 - **caissawary**: The main UCI chess engine.
 - **benchmark**: A suite for performance testing, measuring nodes-per-second and puzzle-solving speed.
 - **mcts_inspector**: A tool for visualizing and debugging the MCTS search tree.
+- **verbose_search**: A real-time search narration tool with customizable verbosity.
 - **self_play**: A high-throughput data generation tool that plays games against itself to create training datasets for the neural network.
 
 ## References

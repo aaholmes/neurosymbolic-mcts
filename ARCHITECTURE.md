@@ -1,12 +1,12 @@
-# Kingfisher Chess Engine - Technical Architecture
+# Caissawary Chess Engine - Technical Architecture
 
-This document provides a detailed technical overview of the Kingfisher Chess Engine architecture, focusing on our novel mate-search-first MCTS approach and neural network integration.
+This document provides a detailed technical overview of the Caissawary Chess Engine architecture, focusing on our novel mate-search-first MCTS approach and neural network integration.
 
 ## 🏗 Core Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Kingfisher Chess Engine                 │
+│                    Caissawary Chess Engine                 │
 ├─────────────────────────────────────────────────────────────┤
 │  UCI Interface │ Time Management │ Position Analysis        │
 ├─────────────────────────────────────────────────────────────┤

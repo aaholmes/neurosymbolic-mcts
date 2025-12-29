@@ -147,7 +147,7 @@ impl UCIEngine {
 
             match tokens[0] {
                 "uci" => {
-                    println!("id name Kingfisher");
+                    println!("id name Caissawary");
                     println!("id author Adam Holmes");
                     // Define the AgentType option
                     println!("option name AgentType type combo default Humanlike var AlphaBeta var Humanlike");

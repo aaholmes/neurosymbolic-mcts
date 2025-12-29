@@ -1,10 +1,10 @@
-# Kingfisher Chess Engine - Benchmarking Guide
+# Caissawary Chess Engine - Benchmarking Guide
 
-This guide covers comprehensive performance testing and analysis of the Kingfisher Chess Engine, including our novel mate-search-first MCTS approach and neural network integration.
+This guide covers comprehensive performance testing and analysis of the Caissawary Chess Engine, including our novel mate-search-first MCTS approach and neural network integration.
 
-## 🎯 Overview
+## 📊 Benchmarking Philosophy
 
-Kingfisher's benchmarking suite provides professional-grade performance analysis comparing 5 distinct engine variants across tactical, positional, and endgame scenarios with statistical Elo estimation.
+Caissawary's benchmarking suite provides professional-grade performance analysis comparing 5 distinct engine variants across tactical, positional, and endgame scenarios with statistical Elo estimation.
 
 ## 🏆 Engine Variants Tested
 
