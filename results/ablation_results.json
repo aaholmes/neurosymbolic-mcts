@@ -1,0 +1,1467 @@
+[
+  {
+    "config_name": "baseline_mcts",
+    "timestamp": "2026-01-05T00:50:40.556189439+00:00",
+    "search_metrics": [
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 146,
+        "search_time": {
+          "secs": 0,
+          "nanos": 477414
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 784,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 9061,
+        "search_time": {
+          "secs": 0,
+          "nanos": 6933027
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 3442,
+        "search_time": {
+          "secs": 0,
+          "nanos": 2462676
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 567,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 24659,
+        "search_time": {
+          "secs": 0,
+          "nanos": 20800809
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 26268,
+        "search_time": {
+          "secs": 0,
+          "nanos": 17995047
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 19342,
+        "search_time": {
+          "secs": 0,
+          "nanos": 10875653
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 6056,
+        "search_time": {
+          "secs": 0,
+          "nanos": 2383618
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 23424,
+        "search_time": {
+          "secs": 0,
+          "nanos": 13495618
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      }
+    ],
+    "aggregated": {
+      "config_name": "baseline_mcts",
+      "num_positions": 8,
+      "mean_iterations": 800.0,
+      "mean_nodes": 14049.75,
+      "mean_time_ms": 8.75,
+      "mean_nn_reduction_percent": 25.0,
+      "total_tier1_activations": 0,
+      "total_tier2_grafts": 0,
+      "total_nn_evaluations": 0,
+      "std_iterations": 0.0,
+      "std_nn_reduction": 43.30127018922193,
+      "tactical_accuracy": 0.0,
+      "positional_score": 0.0,
+      "estimated_elo": 0.0,
+      "elo_confidence_interval": [
+        0.0,
+        0.0
+      ]
+    },
+    "safety": {
+      "positions_analyzed": 8,
+      "positions_with_forced_mate": 3,
+      "forced_mates_found": 1,
+      "positions_being_mated": 0,
+      "best_defenses_found": 0,
+      "material_blunders": 0,
+      "hanging_piece_misses": 0
+    },
+    "position_results": [
+      {
+        "fen": "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "e1e8",
+        "engine_move": "e1e8",
+        "correct": true,
+        "time_ms": 0,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "6k1/5ppp/8/8/8/5Q2/8/6K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "f3f8",
+        "engine_move": "f3h1",
+        "correct": false,
+        "time_ms": 6,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "5rk1/4Nppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "d1d8",
+        "engine_move": "e7g8",
+        "correct": false,
+        "time_ms": 2,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "r1bqkb1r/pppp1ppp/2n5/4p3/2B1n3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "d2d4",
+        "engine_move": "d2d4",
+        "correct": true,
+        "time_ms": 20,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "r2qkbnr/ppp2ppp/2np4/4p3/2B1P1b1/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "f1e2",
+        "engine_move": "d2d4",
+        "correct": false,
+        "time_ms": 17,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "position_type": "positional",
+        "expected_move": null,
+        "engine_move": "f7f5",
+        "correct": true,
+        "time_ms": 10,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "8/8/8/3k4/8/3K4/3P4/8 w - - 0 1",
+        "position_type": "endgame",
+        "expected_move": "d3c3",
+        "engine_move": "d3c3",
+        "correct": true,
+        "time_ms": 2,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+        "position_type": "safety",
+        "expected_move": null,
+        "engine_move": "b1c3",
+        "correct": true,
+        "time_ms": 13,
+        "tier_used": "ClassicalEval"
+      }
+    ]
+  },
+  {
+    "config_name": "tier1_only",
+    "timestamp": "2026-01-05T00:50:48.227445338+00:00",
+    "search_metrics": [
+      {
+        "total_iterations": 0,
+        "nodes_expanded": 0,
+        "search_time": {
+          "secs": 0,
+          "nanos": 1352752
+        },
+        "tier1_activations": 1,
+        "mates_found_by_gate": 1,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 56,
+        "nodes_expanded": 542,
+        "search_time": {
+          "secs": 1,
+          "nanos": 38443218
+        },
+        "tier1_activations": 10,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 10,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 0,
+        "nodes_expanded": 0,
+        "search_time": {
+          "secs": 0,
+          "nanos": 249816
+        },
+        "tier1_activations": 1,
+        "mates_found_by_gate": 1,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 1,
+        "nodes_expanded": 71,
+        "search_time": {
+          "secs": 1,
+          "nanos": 743185334
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 1,
+        "nodes_expanded": 73,
+        "search_time": {
+          "secs": 1,
+          "nanos": 693536854
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 2,
+        "nodes_expanded": 80,
+        "search_time": {
+          "secs": 1,
+          "nanos": 492820464
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 5735,
+        "search_time": {
+          "secs": 0,
+          "nanos": 363727804
+        },
+        "tier1_activations": 573,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 573,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 1,
+        "nodes_expanded": 59,
+        "search_time": {
+          "secs": 1,
+          "nanos": 320930066
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      }
+    ],
+    "aggregated": {
+      "config_name": "tier1_only",
+      "num_positions": 8,
+      "mean_iterations": 107.625,
+      "mean_nodes": 820.0,
+      "mean_time_ms": 956.25,
+      "mean_nn_reduction_percent": 25.0,
+      "total_tier1_activations": 585,
+      "total_tier2_grafts": 0,
+      "total_nn_evaluations": 0,
+      "std_iterations": 262.31609629414663,
+      "std_nn_reduction": 43.30127018922193,
+      "tactical_accuracy": 0.0,
+      "positional_score": 0.0,
+      "estimated_elo": 0.0,
+      "elo_confidence_interval": [
+        0.0,
+        0.0
+      ]
+    },
+    "safety": {
+      "positions_analyzed": 8,
+      "positions_with_forced_mate": 3,
+      "forced_mates_found": 2,
+      "positions_being_mated": 0,
+      "best_defenses_found": 0,
+      "material_blunders": 0,
+      "hanging_piece_misses": 0
+    },
+    "position_results": [
+      {
+        "fen": "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "e1e8",
+        "engine_move": "e1e8",
+        "correct": true,
+        "time_ms": 1,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "6k1/5ppp/8/8/8/5Q2/8/6K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "f3f8",
+        "engine_move": "f3h1",
+        "correct": false,
+        "time_ms": 1038,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "5rk1/4Nppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "d1d8",
+        "engine_move": "d1d8",
+        "correct": true,
+        "time_ms": 0,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "r1bqkb1r/pppp1ppp/2n5/4p3/2B1n3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "d2d4",
+        "engine_move": "f3e5",
+        "correct": false,
+        "time_ms": 1743,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "r2qkbnr/ppp2ppp/2np4/4p3/2B1P1b1/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "f1e2",
+        "engine_move": "f3e5",
+        "correct": false,
+        "time_ms": 1693,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "position_type": "positional",
+        "expected_move": null,
+        "engine_move": "a7a5",
+        "correct": true,
+        "time_ms": 1492,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "8/8/8/3k4/8/3K4/3P4/8 w - - 0 1",
+        "position_type": "endgame",
+        "expected_move": "d3c3",
+        "engine_move": "d3e3",
+        "correct": false,
+        "time_ms": 363,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+        "position_type": "safety",
+        "expected_move": null,
+        "engine_move": "f3e5",
+        "correct": true,
+        "time_ms": 1320,
+        "tier_used": "ClassicalEval"
+      }
+    ]
+  },
+  {
+    "config_name": "classical_hybrid",
+    "timestamp": "2026-01-05T00:50:55.650273732+00:00",
+    "search_metrics": [
+      {
+        "total_iterations": 0,
+        "nodes_expanded": 0,
+        "search_time": {
+          "secs": 0,
+          "nanos": 117308
+        },
+        "tier1_activations": 1,
+        "mates_found_by_gate": 1,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 56,
+        "nodes_expanded": 542,
+        "search_time": {
+          "secs": 1,
+          "nanos": 53085546
+        },
+        "tier1_activations": 10,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 10,
+        "tier2_grafts": 14,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 0,
+        "nodes_expanded": 0,
+        "search_time": {
+          "secs": 0,
+          "nanos": 251167
+        },
+        "tier1_activations": 1,
+        "mates_found_by_gate": 1,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 2,
+        "nodes_expanded": 60,
+        "search_time": {
+          "secs": 1,
+          "nanos": 362224056
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 3,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 2,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 1,
+        "nodes_expanded": 70,
+        "search_time": {
+          "secs": 1,
+          "nanos": 740103066
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 2,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 2,
+        "nodes_expanded": 80,
+        "search_time": {
+          "secs": 1,
+          "nanos": 528945450
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 5730,
+        "search_time": {
+          "secs": 0,
+          "nanos": 351171502
+        },
+        "tier1_activations": 575,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 575,
+        "tier2_grafts": 56,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 1,
+        "nodes_expanded": 58,
+        "search_time": {
+          "secs": 1,
+          "nanos": 375102058
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 1,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      }
+    ],
+    "aggregated": {
+      "config_name": "classical_hybrid",
+      "num_positions": 8,
+      "mean_iterations": 107.75,
+      "mean_nodes": 817.5,
+      "mean_time_ms": 926.125,
+      "mean_nn_reduction_percent": 37.5,
+      "total_tier1_activations": 587,
+      "total_tier2_grafts": 76,
+      "total_nn_evaluations": 0,
+      "std_iterations": 262.2654904862628,
+      "std_nn_reduction": 48.41229182759271,
+      "tactical_accuracy": 0.0,
+      "positional_score": 0.0,
+      "estimated_elo": 0.0,
+      "elo_confidence_interval": [
+        0.0,
+        0.0
+      ]
+    },
+    "safety": {
+      "positions_analyzed": 8,
+      "positions_with_forced_mate": 3,
+      "forced_mates_found": 2,
+      "positions_being_mated": 0,
+      "best_defenses_found": 0,
+      "material_blunders": 0,
+      "hanging_piece_misses": 0
+    },
+    "position_results": [
+      {
+        "fen": "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "e1e8",
+        "engine_move": "e1e8",
+        "correct": true,
+        "time_ms": 0,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "6k1/5ppp/8/8/8/5Q2/8/6K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "f3f8",
+        "engine_move": "f3h1",
+        "correct": false,
+        "time_ms": 1053,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "5rk1/4Nppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "d1d8",
+        "engine_move": "d1d8",
+        "correct": true,
+        "time_ms": 0,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "r1bqkb1r/pppp1ppp/2n5/4p3/2B1n3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "d2d4",
+        "engine_move": "c4f7",
+        "correct": false,
+        "time_ms": 1362,
+        "tier_used": "Tier2Graft"
+      },
+      {
+        "fen": "r2qkbnr/ppp2ppp/2np4/4p3/2B1P1b1/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "f1e2",
+        "engine_move": "a2a4",
+        "correct": false,
+        "time_ms": 1740,
+        "tier_used": "Tier2Graft"
+      },
+      {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "position_type": "positional",
+        "expected_move": null,
+        "engine_move": "a7a5",
+        "correct": true,
+        "time_ms": 1528,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "8/8/8/3k4/8/3K4/3P4/8 w - - 0 1",
+        "position_type": "endgame",
+        "expected_move": "d3c3",
+        "engine_move": "d3e3",
+        "correct": false,
+        "time_ms": 351,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+        "position_type": "safety",
+        "expected_move": null,
+        "engine_move": "a2a4",
+        "correct": true,
+        "time_ms": 1375,
+        "tier_used": "Tier2Graft"
+      }
+    ]
+  },
+  {
+    "config_name": "neural_only",
+    "timestamp": "2026-01-05T00:50:55.737884878+00:00",
+    "search_metrics": [
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 146,
+        "search_time": {
+          "secs": 0,
+          "nanos": 473444
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 784,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 1,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 9061,
+        "search_time": {
+          "secs": 0,
+          "nanos": 6093448
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 25,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 3442,
+        "search_time": {
+          "secs": 0,
+          "nanos": 2441607
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 567,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 35,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 24659,
+        "search_time": {
+          "secs": 0,
+          "nanos": 21115634
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 423,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 26268,
+        "search_time": {
+          "secs": 0,
+          "nanos": 18024466
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 246,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 19342,
+        "search_time": {
+          "secs": 0,
+          "nanos": 10398899
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 48,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 6056,
+        "search_time": {
+          "secs": 0,
+          "nanos": 2496906
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 27,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 23424,
+        "search_time": {
+          "secs": 0,
+          "nanos": 13231731
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 136,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      }
+    ],
+    "aggregated": {
+      "config_name": "neural_only",
+      "num_positions": 8,
+      "mean_iterations": 800.0,
+      "mean_nodes": 14049.75,
+      "mean_time_ms": 9.0,
+      "mean_nn_reduction_percent": 25.0,
+      "total_tier1_activations": 0,
+      "total_tier2_grafts": 0,
+      "total_nn_evaluations": 0,
+      "std_iterations": 0.0,
+      "std_nn_reduction": 43.30127018922193,
+      "tactical_accuracy": 0.0,
+      "positional_score": 0.0,
+      "estimated_elo": 0.0,
+      "elo_confidence_interval": [
+        0.0,
+        0.0
+      ]
+    },
+    "safety": {
+      "positions_analyzed": 8,
+      "positions_with_forced_mate": 3,
+      "forced_mates_found": 1,
+      "positions_being_mated": 0,
+      "best_defenses_found": 0,
+      "material_blunders": 0,
+      "hanging_piece_misses": 0
+    },
+    "position_results": [
+      {
+        "fen": "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "e1e8",
+        "engine_move": "e1e8",
+        "correct": true,
+        "time_ms": 0,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "6k1/5ppp/8/8/8/5Q2/8/6K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "f3f8",
+        "engine_move": "f3h1",
+        "correct": false,
+        "time_ms": 6,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "5rk1/4Nppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "d1d8",
+        "engine_move": "e7g8",
+        "correct": false,
+        "time_ms": 2,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "r1bqkb1r/pppp1ppp/2n5/4p3/2B1n3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "d2d4",
+        "engine_move": "d2d4",
+        "correct": true,
+        "time_ms": 21,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "r2qkbnr/ppp2ppp/2np4/4p3/2B1P1b1/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "f1e2",
+        "engine_move": "d2d4",
+        "correct": false,
+        "time_ms": 18,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "position_type": "positional",
+        "expected_move": null,
+        "engine_move": "f7f5",
+        "correct": true,
+        "time_ms": 10,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "8/8/8/3k4/8/3K4/3P4/8 w - - 0 1",
+        "position_type": "endgame",
+        "expected_move": "d3c3",
+        "engine_move": "d3c3",
+        "correct": true,
+        "time_ms": 2,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+        "position_type": "safety",
+        "expected_move": null,
+        "engine_move": "b1c3",
+        "correct": true,
+        "time_ms": 13,
+        "tier_used": "ClassicalEval"
+      }
+    ]
+  },
+  {
+    "config_name": "full_system",
+    "timestamp": "2026-01-05T00:51:03.229650417+00:00",
+    "search_metrics": [
+      {
+        "total_iterations": 0,
+        "nodes_expanded": 0,
+        "search_time": {
+          "secs": 0,
+          "nanos": 119119
+        },
+        "tier1_activations": 1,
+        "mates_found_by_gate": 1,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 56,
+        "nodes_expanded": 542,
+        "search_time": {
+          "secs": 1,
+          "nanos": 53901531
+        },
+        "tier1_activations": 10,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 10,
+        "tier2_grafts": 14,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 1,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 0,
+        "nodes_expanded": 0,
+        "search_time": {
+          "secs": 0,
+          "nanos": 252827
+        },
+        "tier1_activations": 1,
+        "mates_found_by_gate": 1,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 2,
+        "nodes_expanded": 60,
+        "search_time": {
+          "secs": 1,
+          "nanos": 357034770
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 3,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 2,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 1,
+        "nodes_expanded": 70,
+        "search_time": {
+          "secs": 1,
+          "nanos": 764282022
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 2,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 2,
+        "nodes_expanded": 80,
+        "search_time": {
+          "secs": 1,
+          "nanos": 551145123
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 0,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 800,
+        "nodes_expanded": 5730,
+        "search_time": {
+          "secs": 0,
+          "nanos": 359832104
+        },
+        "tier1_activations": 575,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 575,
+        "tier2_grafts": 56,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 21,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      },
+      {
+        "total_iterations": 1,
+        "nodes_expanded": 58,
+        "search_time": {
+          "secs": 1,
+          "nanos": 394031967
+        },
+        "tier1_activations": 0,
+        "mates_found_by_gate": 0,
+        "koth_wins_detected": 0,
+        "nn_calls_saved_tier1": 0,
+        "tier2_grafts": 1,
+        "positions_with_tactical_moves": 0,
+        "avg_graft_depth": 0.0,
+        "nn_calls_saved_tier2": 0,
+        "nn_evaluations": 0,
+        "nn_policy_queries": 0,
+        "avg_nn_inference_time_us": 0.0,
+        "best_move_visits": 0,
+        "second_best_visits": 0,
+        "root_value": 0.0,
+        "value_confidence": 0.0
+      }
+    ],
+    "aggregated": {
+      "config_name": "full_system",
+      "num_positions": 8,
+      "mean_iterations": 107.75,
+      "mean_nodes": 817.5,
+      "mean_time_ms": 934.75,
+      "mean_nn_reduction_percent": 37.5,
+      "total_tier1_activations": 587,
+      "total_tier2_grafts": 76,
+      "total_nn_evaluations": 0,
+      "std_iterations": 262.2654904862628,
+      "std_nn_reduction": 48.41229182759271,
+      "tactical_accuracy": 0.0,
+      "positional_score": 0.0,
+      "estimated_elo": 0.0,
+      "elo_confidence_interval": [
+        0.0,
+        0.0
+      ]
+    },
+    "safety": {
+      "positions_analyzed": 8,
+      "positions_with_forced_mate": 3,
+      "forced_mates_found": 2,
+      "positions_being_mated": 0,
+      "best_defenses_found": 0,
+      "material_blunders": 0,
+      "hanging_piece_misses": 0
+    },
+    "position_results": [
+      {
+        "fen": "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "e1e8",
+        "engine_move": "e1e8",
+        "correct": true,
+        "time_ms": 0,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "6k1/5ppp/8/8/8/5Q2/8/6K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "f3f8",
+        "engine_move": "f3h1",
+        "correct": false,
+        "time_ms": 1053,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "5rk1/4Nppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+        "position_type": "mate",
+        "expected_move": "d1d8",
+        "engine_move": "d1d8",
+        "correct": true,
+        "time_ms": 0,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "r1bqkb1r/pppp1ppp/2n5/4p3/2B1n3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "d2d4",
+        "engine_move": "c4f7",
+        "correct": false,
+        "time_ms": 1357,
+        "tier_used": "Tier2Graft"
+      },
+      {
+        "fen": "r2qkbnr/ppp2ppp/2np4/4p3/2B1P1b1/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1",
+        "position_type": "tactical",
+        "expected_move": "f1e2",
+        "engine_move": "a2a4",
+        "correct": false,
+        "time_ms": 1764,
+        "tier_used": "Tier2Graft"
+      },
+      {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "position_type": "positional",
+        "expected_move": null,
+        "engine_move": "a7a5",
+        "correct": true,
+        "time_ms": 1551,
+        "tier_used": "ClassicalEval"
+      },
+      {
+        "fen": "8/8/8/3k4/8/3K4/3P4/8 w - - 0 1",
+        "position_type": "endgame",
+        "expected_move": "d3c3",
+        "engine_move": "d3e3",
+        "correct": false,
+        "time_ms": 359,
+        "tier_used": "Tier1Gate"
+      },
+      {
+        "fen": "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+        "position_type": "safety",
+        "expected_move": null,
+        "engine_move": "a2a4",
+        "correct": true,
+        "time_ms": 1394,
+        "tier_used": "Tier2Graft"
+      }
+    ]
+  }
+]

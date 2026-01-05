@@ -165,14 +165,17 @@ mod tactical_q_init {
         
         // Selection should prefer Nxd5 initially because of higher Q-init (0.8 vs 0.0)
         let mut stats = TacticalMctsStats::default();
-        let mut nn_policy = None;
-        let best_child = select_child_with_tactical_priority(
-            root.clone(),
-            1.5,
-            &move_gen,
-            &mut nn_policy,
-            &mut stats
-        );
+        let mut nn_policy: Option<NeuralNetPolicy> = None;
+    let config = TacticalMctsConfig::default();
+    let best_child = select_child_with_tactical_priority(
+        root.clone(),
+        &config,
+        &move_gen,
+        &mut None,
+        &mut stats,
+        None,
+        0,
+    );
         
         assert!(best_child.is_some());
         assert_eq!(best_child.unwrap().borrow().action.unwrap(), nxd5,

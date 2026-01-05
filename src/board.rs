@@ -339,20 +339,25 @@ impl Board {
     /// A boolean indicating whether the current position is legal.
     pub fn is_legal(&self, move_gen: &MoveGen) -> bool {
         let king_sq_ind: usize;
+        // is_legal is called AFTER w_to_move has been flipped.
+        // So we check the king of the side that JUST MOVED.
         if self.w_to_move {
+            // Check if Black king is attacked by White
             king_sq_ind = bit_to_sq_ind(self.pieces[BLACK][KING]);
             if king_sq_ind == 64 {
-                println!("No black king");
-                self.print();
+                println!("DEBUG: Black king missing!");
+                return false;
             }
+            !self.is_square_attacked(king_sq_ind, true, move_gen)
         } else {
+            // Check if White king is attacked by Black
             king_sq_ind = bit_to_sq_ind(self.pieces[WHITE][KING]);
             if king_sq_ind == 64 {
-                println!("No white king");
-                self.print();
+                println!("DEBUG: White king missing!");
+                return false;
             }
+            !self.is_square_attacked(king_sq_ind, false, move_gen)
         }
-        !self.is_square_attacked(king_sq_ind, self.w_to_move, move_gen)
     }
 
     /// Determines whether the current position is checkmate or stalemate.

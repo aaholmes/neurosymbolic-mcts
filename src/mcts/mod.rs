@@ -50,6 +50,7 @@ pub fn mcts_pesto_search(
         use_neural_policy: false,
         inference_server: None,
         logger: None,
+        ..Default::default()
     };
 
     let mut nn = None;

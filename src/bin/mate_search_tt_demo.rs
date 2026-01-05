@@ -50,6 +50,7 @@ fn show_tt_speedup(
         use_neural_policy: false,
         inference_server: None,
         logger: None,
+        ..Default::default()
     };
     
     // Cold transposition table test
@@ -119,6 +120,7 @@ fn analyze_mate_cache_efficiency(
         use_neural_policy: false,
         inference_server: None,
         logger: None,
+        ..Default::default()
     };
     
     let mut shared_tt = TranspositionTable::new();
@@ -162,6 +164,7 @@ fn benchmark_repeated_searches(
         use_neural_policy: false,
         inference_server: None,
         logger: None,
+        ..Default::default()
     };
     
     let rounds = 5;

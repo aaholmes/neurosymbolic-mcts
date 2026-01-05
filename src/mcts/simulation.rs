@@ -37,6 +37,9 @@ pub fn simulate_random_playout(state: &Board, move_gen: &MoveGen) -> f64 {
 
         // Check captures for legality
         for m in captures {
+            if current_state.get_piece(m.from).is_none() {
+                continue;
+            }
             let new_board = current_state.apply_move_to_board(m);
             if new_board.is_legal(move_gen) {
                 legal_moves.push(m);
@@ -45,6 +48,9 @@ pub fn simulate_random_playout(state: &Board, move_gen: &MoveGen) -> f64 {
 
         // Check moves for legality
         for m in moves {
+            if current_state.get_piece(m.from).is_none() {
+                continue;
+            }
             let new_board = current_state.apply_move_to_board(m);
             if new_board.is_legal(move_gen) {
                 legal_moves.push(m);

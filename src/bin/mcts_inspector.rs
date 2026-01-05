@@ -28,6 +28,7 @@ fn main() {
     let output_file = parse_string_arg(&args, "--output")
         .unwrap_or_else(|| "mcts_tree.dot".to_string());
     let iterations = parse_arg(&args, "--iterations").unwrap_or(500);
+    let mate_depth = parse_arg(&args, "--mate-depth").unwrap_or(3);
     
     println!("🔍 MCTS Inspector");
     println!("==================");
@@ -35,22 +36,23 @@ fn main() {
     println!("Depth limit: {}", depth_limit);
     println!("Min visits: {}", min_visits);
     println!("Iterations: {}", iterations);
+    println!("Mate search depth: {}", mate_depth);
     println!();
     
     // Initialize components
     let board = Board::new_from_fen(fen);
     let move_gen = MoveGen::new();
     let pesto = PestoEval::new();
-    let server = InferenceServer::new_mock();
     
     let config = TacticalMctsConfig {
         max_iterations: iterations,
-        time_limit: Duration::from_secs(30),
-        mate_search_depth: 5,
+        time_limit: Duration::from_secs(60), // Generous limit for inspection
+        mate_search_depth: mate_depth as i32,
         exploration_constant: 1.414,
-        use_neural_policy: false, // Use mock for visualization
-        inference_server: Some(Arc::new(server)),
+        use_neural_policy: false,
+        inference_server: None,
         logger: None,
+        ..Default::default()
     };
     
     println!("🔄 Running MCTS search...");

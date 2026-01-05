@@ -142,6 +142,7 @@ pub fn alpha_beta_search(
         if let Some(start_time) = start_time {
             if let Some(time_limit) = time_limit {
                 if start_time.elapsed() > time_limit {
+                    board.undo_move();
                     if verbose {
                         println!("Time limit reached. Stopping search.");
                     }
@@ -285,7 +286,6 @@ fn alpha_beta_recursive(
                 if !is_capture(&board.current_state(), &m) {
                     history.update(&m, depth);
                 }
-                board.undo_move();
                 board.undo_move();
                 return (beta, n, false); // Not terminated here
             }

@@ -118,6 +118,7 @@ fn calculate_ucb_value_for_test(
         parent_visits,
         prior_prob,
         q_init,
-        exploration_constant
+        exploration_constant,
+        true
     )
 }

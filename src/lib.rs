@@ -64,5 +64,6 @@ pub mod tensor;
 pub mod training;
 pub mod transposition;
 pub mod tuning;
+pub mod experiments;
 pub mod uci;
 pub mod utils;

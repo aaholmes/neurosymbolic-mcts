@@ -14,7 +14,34 @@ Like the engine itself, the name Caissawary is also a hybrid:
 - **Caïssa**: The mythical goddess of chess, representing the engine's strategic intelligence and artistry.
 - **Cassowary**: A large, formidable, and famously aggressive bird, representing the engine's raw tactical power and speed.
 
-## Core Architecture
+## 🔬 Research: Safe & Sample-Efficient RL
+
+Caissawary is designed as a research platform exploring **how structured inductive biases improve reinforcement learning**. Our key insight: many RL domains contain tractable subproblems where exact analysis outperforms learned approximations.
+
+### The Three-Tier Hypothesis
+
+| Tier | Mechanism | Property |
+|------|-----------|
+| **Tier 1** | Safety Gates | Provably correct in forced situations |
+| **Tier 2** | Tactical Grafting | Classical expertise without NN overhead |
+| **Tier 3** | Neural Networks | Handles genuinely uncertain positions |
+
+### Running Experiments
+
+```bash
+# Full ablation study
+cargo run --release --bin run_experiments -- --config ablation
+
+# Generate publication figures
+python scripts/analyze_results.py results/ablation_results.json
+
+# View results
+# (Output will be in results/figures/)
+```
+
+See [RESEARCH.md](RESEARCH.md) for full methodology and analysis.
+
+## 🏗 Architecture
 Caissawary's intelligence stems from how it handles each node during an MCTS traversal. Instead of a single, uniform approach, its behavior adapts based on the node's state, ensuring that cheap, powerful analysis is always performed before expensive strategic evaluation.
 
 ### The MCTS Node Handling Flow

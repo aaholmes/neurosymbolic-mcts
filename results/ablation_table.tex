@@ -1,0 +1,16 @@
+\begin{table}[h]
+\centering
+\caption{Ablation Study Results}
+\label{tab:ablation}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Config & Iter & Nodes & NN Reduction & T1 & T2 & NN Calls \\
+\midrule
+baseline_mcts & 800 & 14050 & 25.0\% $\pm$ 30.0 & 0 & 0 & 0 \\
+tier1_only & 108 & 820 & 25.0\% $\pm$ 30.0 & 585 & 0 & 0 \\
+classical_hybrid & 108 & 818 & 37.5\% $\pm$ 33.5 & 587 & 76 & 0 \\
+neural_only & 800 & 14050 & 25.0\% $\pm$ 30.0 & 0 & 0 & 0 \\
+full_system & 108 & 818 & 37.5\% $\pm$ 33.5 & 587 & 76 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}

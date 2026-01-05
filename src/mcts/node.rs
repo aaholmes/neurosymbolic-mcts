@@ -216,6 +216,9 @@ impl MctsNode {
     }
 
     pub fn puct_value(&self, parent_visits: u32, parent_num_legal_moves: usize, exploration_constant: f64) -> f64 {
+        if self.action.is_some() && self.state.get_piece(self.action.unwrap().from).is_none() {
+             return f64::NEG_INFINITY;
+        }
         if self.visits == 0 {
             let prior_p = if parent_num_legal_moves > 0 {
                 1.0 / parent_num_legal_moves as f64
@@ -243,6 +246,9 @@ impl MctsNode {
     }
 
     pub fn uct_value(&self, parent_visits: u32, exploration_constant: f64) -> f64 {
+        if self.action.is_some() && self.state.get_piece(self.action.unwrap().from).is_none() {
+             return f64::NEG_INFINITY;
+        }
         if self.visits == 0 {
             return f64::INFINITY;
         }
@@ -256,21 +262,26 @@ impl MctsNode {
         q_value + exploration_term
     }
 
-    pub fn select_best_explored_child(&self, exploration_constant: f64) -> Rc<RefCell<MctsNode>> {
+    pub fn select_best_explored_child(&self, move_gen: &MoveGen, exploration_constant: f64) -> Rc<RefCell<MctsNode>> {
         let parent_visits = self.visits;
         let parent_num_legal = self.num_legal_moves.unwrap_or(1);
 
-        self.children
-            .iter()
-            .max_by(|a, b| {
-                let puct_a = a.borrow().puct_value(parent_visits, parent_num_legal, exploration_constant);
-                let puct_b = b.borrow().puct_value(parent_visits, parent_num_legal, exploration_constant);
-                puct_a
-                    .partial_cmp(&puct_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .cloned()
-            .expect("select_best_explored_child called on node with no children")
+        let mut children_sorted = self.children.clone();
+        children_sorted.sort_by(|a, b| {
+            let puct_b = b.borrow().puct_value(parent_visits, parent_num_legal, exploration_constant);
+            let puct_a = a.borrow().puct_value(parent_visits, parent_num_legal, exploration_constant);
+            puct_b.partial_cmp(&puct_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for child in children_sorted {
+            let action = child.borrow().action.expect("Child node must have an action");
+            let next_state = self.state.apply_move_to_board(action);
+            if next_state.is_legal(move_gen) {
+                return child;
+            }
+        }
+
+        panic!("select_best_explored_child: no legal child found!")
     }
 
     pub fn categorize_and_store_moves(
@@ -288,6 +299,9 @@ impl MctsNode {
 
         let mut capture_scores: HashMap<Move, i32> = HashMap::new();
         for mv in &legal_moves {
+             if self.state.get_piece(mv.from).is_none() {
+                 continue;
+             }
              let opponent_color = !self.state.w_to_move as usize;
              let is_capture = (self.state.pieces_occ[opponent_color] & (1u64 << mv.to)) != 0 || mv.is_en_passant();
              if is_capture || mv.is_promotion() {
@@ -319,6 +333,9 @@ impl MctsNode {
     }
 
     fn categorize_move(&self, mv: &Move, move_gen: &MoveGen) -> MoveCategory {
+        if self.state.get_piece(mv.from).is_none() {
+            return MoveCategory::Quiet;
+        }
         let next_state = self.state.apply_move_to_board(*mv);
         if next_state.is_check(move_gen) {
              return MoveCategory::Check;
@@ -374,24 +391,26 @@ impl MctsNode {
         }
     }
 
-    pub fn backpropagate(node: Rc<RefCell<MctsNode>>, value: f64) {
+    pub fn backpropagate(node: Rc<RefCell<MctsNode>>, mut value: f64) {
         let mut current_node_opt = Some(node);
 
         while let Some(current_node_rc) = current_node_opt {
-            {
+            let next_parent = {
                 let mut current_node = current_node_rc.borrow_mut();
                 current_node.visits += 1;
-                current_node.total_value += value;
-            }
-
-            current_node_opt = {
-                let current_node = current_node_rc.borrow();
-                if let Some(parent_weak) = &current_node.parent {
-                    parent_weak.upgrade()
-                } else {
-                    None
-                }
+                
+                // value is relative to side to move at current_node
+                // node.total_value is relative to side that just moved (parent's side)
+                let reward = -value;
+                current_node.total_value += reward;
+                current_node.total_value_squared += reward * reward;
+                
+                // Flip value for parent (opponent's perspective)
+                value = -value;
+                
+                current_node.parent.as_ref().and_then(|w| w.upgrade())
             };
+            current_node_opt = next_parent;
         }
     }
 
@@ -495,6 +514,14 @@ impl MctsNode {
             if child_ref.visits < min_visits && min_visits > 0 {
                 continue;
             }
+
+            // Safety check for move legality
+            if let Some(mv) = child_ref.action {
+                let mg = MoveGen::new();
+                if self.state.get_piece(mv.from).is_none() || !self.state.apply_move_to_board(mv).is_legal(&mg) {
+                    continue;
+                }
+            }
             
             *id_counter += 1;
             let child_id = *id_counter;
@@ -580,6 +607,7 @@ fn should_expand_not_select(node: &MctsNode) -> bool {
 
 pub fn select_leaf_for_expansion(
     root: Rc<RefCell<MctsNode>>,
+    move_gen: &MoveGen,
     exploration_constant: f64,
 ) -> Rc<RefCell<MctsNode>> {
     let mut current = root;
@@ -605,7 +633,7 @@ pub fn select_leaf_for_expansion(
 
         let next = current
             .borrow()
-            .select_best_explored_child(exploration_constant);
+            .select_best_explored_child(move_gen, exploration_constant);
         current = next;
     }
 

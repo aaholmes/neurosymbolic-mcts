@@ -90,6 +90,7 @@ fn run_profiling_suite() {
             use_neural_policy: false,
             inference_server: None,
             logger: None,
+            ..Default::default()
         }),
         ("Standard Search", TacticalMctsConfig {
             max_iterations: 500,
@@ -99,6 +100,7 @@ fn run_profiling_suite() {
             use_neural_policy: false,
             inference_server: None,
             logger: None,
+            ..Default::default()
         }),
         ("Deep Search", TacticalMctsConfig {
             max_iterations: 1000,
@@ -108,6 +110,7 @@ fn run_profiling_suite() {
             use_neural_policy: false,
             inference_server: None,
             logger: None,
+            ..Default::default()
         }),
     ];
     
@@ -141,6 +144,7 @@ fn run_profiling_suite() {
             use_neural_policy: false,
             inference_server: None,
             logger: None,
+            ..Default::default()
         };
         
         println!("\n📈 {} iterations:", iterations);

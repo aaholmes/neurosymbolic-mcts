@@ -24,6 +24,18 @@ impl Board {
         // Assumes the move is legal.
 
         let mut new_board = self.clone();
+
+        // Null move: remove en passant ability and return new board
+        if the_move.from == 0 && the_move.to == 0 {
+            new_board.en_passant = None;
+            new_board.w_to_move = !new_board.w_to_move;
+            if new_board.w_to_move {
+                new_board.fullmove_number += 1;
+            }
+            new_board.zobrist_hash = new_board.compute_zobrist_hash();
+            return new_board;
+        }
+
         new_board.halfmove_clock += 1;
 
         let from_bit = sq_ind_to_bit(the_move.from);
@@ -31,10 +43,7 @@ impl Board {
 
         let from_piece = self.get_piece(the_move.from);
         if from_piece.is_none() {
-            println!("Board:");
-            self.print();
-            println!("Move: {}", the_move);
-            panic!("No piece at from_sq_ind");
+            panic!("No piece at from_sq_ind {} ({})", the_move.from, crate::board_utils::sq_ind_to_algebraic(the_move.from));
         }
 
         let to_piece = self.get_piece(the_move.to);
@@ -81,8 +90,8 @@ impl Board {
         }
 
         // Handle castling
-        if from_piece.unwrap().1 == KING {
-            if from_piece.unwrap().0 == WHITE {
+        if let Some((color, KING)) = from_piece {
+            if color == WHITE {
                 // White king
                 if the_move.from == 4 && the_move.to == 6 {
                     // White king-side castle
@@ -109,8 +118,8 @@ impl Board {
                 new_board.castling_rights.black_kingside = false;
                 new_board.castling_rights.black_queenside = false;
             }
-        } else if from_piece.unwrap().1 == ROOK {
-            if from_piece.unwrap().0 == WHITE {
+        } else if let Some((color, ROOK)) = from_piece {
+            if color == WHITE {
                 // White rook
                 if the_move.from == 0 {
                     new_board.castling_rights.white_queenside = false;
@@ -132,11 +141,6 @@ impl Board {
             new_board.fullmove_number += 1;
         }
 
-        // Null move: remove en passant ability and return new board
-        if the_move.from == 0 && the_move.to == 0 {
-            new_board.en_passant = None;
-            return new_board;
-        }
         for color in 0..2 {
             new_board.pieces_occ[color] = new_board.pieces[color][PAWN];
             for piece in 1..6 {

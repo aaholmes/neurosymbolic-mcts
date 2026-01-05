@@ -618,7 +618,7 @@ impl MoveGen {
         let mut captures: Vec<Move> = Vec::with_capacity(8);
         if board.w_to_move {
             // White to move
-            if board.castling_rights.white_kingside {
+            if board.castling_rights.white_kingside && board.pieces[WHITE][KING] & (1u64 << 4) != 0 {
                 // Make sure a rook is there because it could have been captured
                 if board.pieces[WHITE][ROOK] & (1u64 << 7) != 0
                     && (board.pieces_occ[WHITE] | board.pieces_occ[BLACK])
@@ -631,7 +631,7 @@ impl MoveGen {
                     moves.push(Move::new(4, 6, None));
                 }
             }
-            if board.castling_rights.white_queenside {
+            if board.castling_rights.white_queenside && board.pieces[WHITE][KING] & (1u64 << 4) != 0 {
                 // Make sure a rook is there because it could have been captured
                 if board.pieces[WHITE][ROOK] & (1u64 << 0) != 0
                     && (board.pieces_occ[WHITE] | board.pieces_occ[BLACK])
@@ -655,7 +655,7 @@ impl MoveGen {
             }
         } else {
             // Black to move
-            if board.castling_rights.black_kingside {
+            if board.castling_rights.black_kingside && board.pieces[BLACK][KING] & (1u64 << 60) != 0 {
                 // Make sure a rook is there because it could have been captured
                 if board.pieces[BLACK][ROOK] & (1u64 << 63) != 0
                     && (board.pieces_occ[WHITE] | board.pieces_occ[BLACK])
@@ -668,7 +668,7 @@ impl MoveGen {
                     moves.push(Move::new(60, 62, None));
                 }
             }
-            if board.castling_rights.black_queenside {
+            if board.castling_rights.black_queenside && board.pieces[BLACK][KING] & (1u64 << 60) != 0 {
                 // Make sure a rook is there because it could have been captured
                 if board.pieces[BLACK][ROOK] & (1u64 << 56) != 0
                     && (board.pieces_occ[BLACK] | board.pieces_occ[WHITE])

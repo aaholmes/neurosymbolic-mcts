@@ -1,0 +1,21 @@
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Engine A & Engine B & W & D & L & Elo Diff (95\% CI) \\
+\midrule
+AlphaBeta & PureMCTS & 2 & 0 & 0 & 800 [-113, 1200] \\
+AlphaBeta & MCTS+T1 & 1 & 1 & 0 & 191 [-243, 625] \\
+AlphaBeta & MCTS+T1+T2 & 1 & 1 & 0 & 191 [-243, 625] \\
+AlphaBeta & TacticalMCTS & 0 & 2 & 0 & -0 [-393, 393] \\
+PureMCTS & MCTS+T1 & 0 & 2 & 0 & -0 [-393, 393] \\
+PureMCTS & MCTS+T1+T2 & 0 & 2 & 0 & -0 [-393, 393] \\
+PureMCTS & TacticalMCTS & 0 & 1 & 1 & -191 [-625, 243] \\
+MCTS+T1 & MCTS+T1+T2 & 0 & 1 & 1 & -191 [-625, 243] \\
+MCTS+T1 & TacticalMCTS & 0 & 2 & 0 & -0 [-393, 393] \\
+MCTS+T1+T2 & TacticalMCTS & 0 & 2 & 0 & -0 [-393, 393] \\
+\bottomrule
+\end{tabular}
+\caption{Head-to-head results between engine variants}
+\label{tab:elo_results}
+\end{table}

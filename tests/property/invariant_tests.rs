@@ -15,28 +15,31 @@ fn random_position() -> impl Strategy<Value = Board> {
         positions::CASTLING_BOTH,
         "r1bqkbnr/pppppppp/2n5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2",
         "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
-    ]).prop_map(|fen| Board::from_fen(fen).unwrap())
+    ]).prop_map(|fen| Board::new_from_fen(fen))
 }
 
 proptest! {
     #[test]
     fn test_move_gen_legal_moves_are_legal(board in random_position()) {
         let move_gen = MoveGen::new();
-        let moves = move_gen.generate_legal_moves(&board);
+        let (captures, quiet) = move_gen.gen_pseudo_legal_moves(&board);
+        let moves: Vec<_> = captures.iter().chain(quiet.iter())
+            .filter(|mv| board.apply_move_to_board(**mv).is_legal(&move_gen))
+            .copied()
+            .collect();
         
         for mv in moves {
-            let mut new_board = board.clone();
-            new_board.make_move(&mv);
+            let new_board = board.apply_move_to_board(mv);
             
             // After a legal move, the opponent should not be able to capture our king
-            let opp_moves = move_gen.generate_legal_moves(&new_board);
+            let (opp_captures, opp_quiet) = move_gen.gen_pseudo_legal_moves(&new_board);
             let our_king_sq = if board.w_to_move {
                 new_board.get_piece_bitboard(WHITE, KING).trailing_zeros() as usize
             } else {
                 new_board.get_piece_bitboard(BLACK, KING).trailing_zeros() as usize
             };
             
-            for opp_mv in &opp_moves {
+            for opp_mv in opp_captures.iter().chain(opp_quiet.iter()) {
                 prop_assert!(opp_mv.to != our_king_sq, 
                     "Legal move resulted in king capture being possible");
             }

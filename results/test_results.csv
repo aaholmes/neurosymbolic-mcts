@@ -1,0 +1,11 @@
+engine_a,engine_b,wins_a,draws,wins_b,elo_diff,ci_low,ci_high
+AlphaBeta,PureMCTS,2,0,0,800.0,-113.4,1199.8
+AlphaBeta,MCTS+T1,1,1,0,190.8,-243.2,624.9
+AlphaBeta,MCTS+T1+T2,1,1,0,190.8,-243.2,624.9
+AlphaBeta,TacticalMCTS,0,2,0,-0.0,-392.5,392.5
+PureMCTS,MCTS+T1,0,2,0,-0.0,-392.5,392.5
+PureMCTS,MCTS+T1+T2,0,2,0,-0.0,-392.5,392.5
+PureMCTS,TacticalMCTS,0,1,1,-190.8,-624.9,243.2
+MCTS+T1,MCTS+T1+T2,0,1,1,-190.8,-624.9,243.2
+MCTS+T1,TacticalMCTS,0,2,0,-0.0,-392.5,392.5
+MCTS+T1+T2,TacticalMCTS,0,2,0,-0.0,-392.5,392.5

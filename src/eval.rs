@@ -364,7 +364,10 @@ impl PestoEval {
         from_sq_ind: usize,
         to_sq_ind: usize,
     ) -> i32 {
-        let piece = board.get_piece(from_sq_ind).unwrap();
+        let piece = match board.get_piece(from_sq_ind) {
+            Some(p) => p,
+            None => return 0,
+        };
         let mut mg_score: i32 = self.mg_table[piece.0][piece.1][to_sq_ind]
             - self.mg_table[piece.0][piece.1][from_sq_ind];
         let eg_score: i32 = self.eg_table[piece.0][piece.1][to_sq_ind]

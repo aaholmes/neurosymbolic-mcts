@@ -1,0 +1,51 @@
+name: Run Experiments
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+  workflow_dispatch:
+
+jobs:
+  experiments:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Cache cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Build
+      run: cargo build --release
+    
+    - name: Run experiments
+      run: cargo run --release --bin run_experiments -- --config ablation
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install Python deps
+      run: pip install matplotlib numpy
+    
+    - name: Generate figures
+      run: python scripts/analyze_results.py results/ablation_results.json
+    
+    - name: Upload results
+      uses: actions/upload-artifact@v3
+      with:
+        name: experiment-results
+        path: results/

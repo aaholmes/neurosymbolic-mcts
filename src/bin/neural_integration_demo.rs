@@ -28,8 +28,6 @@ fn main() {
     
     // Try to load the model
     let mut nn_policy = NeuralNetPolicy::new();
-    // We clone the policy for the server usage later, as load consumes or we need a fresh one
-    // Actually NeuralNetPolicy::load takes &mut self usually.
     let model_loaded = match nn_policy.load(model_path) {
         Ok(_) => {
             println!("✅ Model loaded successfully from {}", model_path);
@@ -61,6 +59,7 @@ fn main() {
             use_neural_policy: true,
             inference_server: None,
             logger: None,
+            ..Default::default()
         };
         
         // 1. Direct Inference (if model loaded)
@@ -100,8 +99,7 @@ fn main() {
             };
             
             let start = Instant::now();
-            let mut policy_opt = Some(nn_policy.clone()); // Still need local policy for fallback or structure?
-            // Actually if using inference server, we might not need local policy, but tactical_mcts_search takes &mut Option<NeuralNetPolicy>
+            let mut policy_opt = Some(nn_policy.clone());
             let (best_move, stats, _) = tactical_mcts_search(
                 board.clone(),
                 &move_gen,
@@ -131,6 +129,7 @@ fn main() {
             use_neural_policy: true,
             inference_server: Some(server.clone()),
             logger: None,
+            ..Default::default()
         };
         
         println!("   Running Hybrid Search...");
@@ -150,6 +149,7 @@ fn main() {
             use_neural_policy: false,
             inference_server: None,
             logger: None,
+            ..Default::default()
         };
         
         println!("   Running Classical Search...");
@@ -169,6 +169,7 @@ fn main() {
             use_neural_policy: true,
             inference_server: Some(server.clone()),
             logger: None,
+            ..Default::default()
         };
         
         println!("   Running Pure Neural Search...");

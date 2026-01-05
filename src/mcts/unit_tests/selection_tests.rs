@@ -16,16 +16,7 @@ use std::time::Duration;
 fn setup_test_env() -> (Board, MoveGen, TacticalMctsStats) {
     let board = Board::new_from_fen("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3");
     let move_gen = MoveGen::new();
-    let stats = TacticalMctsStats {
-        iterations: 0,
-        nodes_expanded: 0,
-        tactical_moves_explored: 0,
-        mates_found: 0,
-        nn_policy_evaluations: 0,
-        search_time: Duration::from_millis(0),
-        tt_mate_hits: 0,
-        tt_mate_misses: 0,
-    };
+    let stats = TacticalMctsStats::default();
     (board, move_gen, stats)
 }
 
@@ -37,6 +28,7 @@ mod tests {
     fn test_node_expansion_from_start() {
         let (board, move_gen, mut stats) = setup_test_env();
         let mut nn_policy = None;
+        let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
         
@@ -46,10 +38,12 @@ mod tests {
         // Call selection which should trigger expansion
         let selected = select_child_with_tactical_priority(
             root_node.clone(),
-            1.414,
+            &config,
             &move_gen,
             &mut nn_policy,
             &mut stats,
+            None,
+            0,
         );
         
         // Should have expanded children
@@ -63,6 +57,7 @@ mod tests {
     fn test_tactical_move_prioritization() {
         let (board, move_gen, mut stats) = setup_test_env();
         let mut nn_policy = None;
+        let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
         
@@ -70,10 +65,12 @@ mod tests {
         for _ in 0..5 {
             let selected = select_child_with_tactical_priority(
                 root_node.clone(),
-                1.414,
+                &config,
                 &move_gen,
                 &mut nn_policy,
                 &mut stats,
+                None,
+                0,
             );
             
             assert!(selected.is_some(), "Should always select a valid child");
@@ -88,6 +85,7 @@ mod tests {
     fn test_statistics_tracking() {
         let (board, move_gen, mut stats) = setup_test_env();
         let mut nn_policy = None;
+        let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
         
@@ -97,10 +95,12 @@ mod tests {
         for _ in 0..10 {
             select_child_with_tactical_priority(
                 root_node.clone(),
-                1.414,
+                &config,
                 &move_gen,
                 &mut nn_policy,
                 &mut stats,
+                None,
+                0,
             );
         }
         
@@ -119,16 +119,19 @@ mod tests {
     fn test_ucb_selection_with_policy() {
         let (board, move_gen, mut stats) = setup_test_env();
         let mut nn_policy = None;
+        let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
         
         // Force expansion first
         select_child_with_tactical_priority(
             root_node.clone(),
-            1.414,
+            &config,
             &move_gen,
             &mut nn_policy,
             &mut stats,
+            None,
+            0,
         );
         
         // Simulate some visits to create UCB values
@@ -145,10 +148,12 @@ mod tests {
         // Should still be able to select using UCB
         let selected = select_child_with_tactical_priority(
             root_node.clone(),
-            1.414,
+            &config,
             &move_gen,
             &mut nn_policy,
             &mut stats,
+            None,
+            0,
         );
         
         assert!(selected.is_some(), "Should select child using UCB");
@@ -157,17 +162,9 @@ mod tests {
     #[test]
     fn test_terminal_position_handling() {
         let move_gen = MoveGen::new();
-        let mut stats = TacticalMctsStats {
-            iterations: 0,
-            nodes_expanded: 0,
-            tactical_moves_explored: 0,
-            mates_found: 0,
-            nn_policy_evaluations: 0,
-            search_time: Duration::from_millis(0),
-            tt_mate_hits: 0,
-            tt_mate_misses: 0,
-        };
+        let mut stats = TacticalMctsStats::default();
         let mut nn_policy = None;
+        let config = TacticalMctsConfig::default();
         
         // Checkmate position - black king is mated
         let terminal_board = Board::new_from_fen("rnbqkbnQ/pppppppr/8/8/8/8/PPPPPPPP/RNBQKB1R b KQkq - 0 1");
@@ -175,10 +172,12 @@ mod tests {
         
         let selected = select_child_with_tactical_priority(
             terminal_node.clone(),
-            1.414,
+            &config,
             &move_gen,
             &mut nn_policy,
             &mut stats,
+            None,
+            0,
         );
         
         // Should handle terminal position gracefully without panicking
@@ -195,12 +194,18 @@ mod tests {
         let mut nn_policy1 = None;
         let mut nn_policy2 = None;
         
+        let mut config1 = TacticalMctsConfig::default();
+        config1.exploration_constant = 0.5;
+        
+        let mut config2 = TacticalMctsConfig::default();
+        config2.exploration_constant = 2.0;
+        
         let root1 = MctsNode::new_root(board.clone(), &move_gen);
         let root2 = MctsNode::new_root(board, &move_gen);
         
         // Force some visits to create selection differences
-        select_child_with_tactical_priority(root1.clone(), 0.5, &move_gen, &mut nn_policy1, &mut stats1);
-        select_child_with_tactical_priority(root2.clone(), 2.0, &move_gen, &mut nn_policy2, &mut stats2);
+        select_child_with_tactical_priority(root1.clone(), &config1, &move_gen, &mut nn_policy1, &mut stats1, None, 0);
+        select_child_with_tactical_priority(root2.clone(), &config2, &move_gen, &mut nn_policy2, &mut stats2, None, 0);
         
         // Different exploration constants should potentially lead to different selections
         // (This is a behavioral test - exact outcomes depend on position)
@@ -214,6 +219,7 @@ mod tests {
     fn test_policy_evaluation_deferral() {
         let (board, move_gen, mut stats) = setup_test_env();
         let mut nn_policy = None; // No neural network
+        let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
         
@@ -221,10 +227,12 @@ mod tests {
         for _ in 0..5 {
             select_child_with_tactical_priority(
                 root_node.clone(),
-                1.414,
+                &config,
                 &move_gen,
                 &mut nn_policy,
                 &mut stats,
+                None,
+                0,
             );
         }
         
@@ -241,6 +249,7 @@ mod tests {
     fn test_repeated_selection_consistency() {
         let (board, move_gen, mut stats) = setup_test_env();
         let mut nn_policy = None;
+        let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
         
@@ -250,10 +259,12 @@ mod tests {
         for _ in 0..3 {
             if let Some(selected) = select_child_with_tactical_priority(
                 root_node.clone(),
-                1.414,
+                &config,
                 &move_gen,
                 &mut nn_policy,
                 &mut stats,
+                None,
+                0,
             ) {
                 if let Some(action) = selected.borrow().action {
                     selected_moves.push(action);
