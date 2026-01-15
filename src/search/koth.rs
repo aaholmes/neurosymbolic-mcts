@@ -1,3 +1,19 @@
+//! King of the Hill (KOTH) variant win detection.
+//!
+//! In King of the Hill chess, a player wins instantly by moving their king
+//! to one of the four center squares (d4, e4, d5, e5). This module provides
+//! efficient detection of forced KOTH wins within a small number of moves.
+//!
+//! The `koth_center_in_3` function is used as a **Tier 1 Safety Gate** in the
+//! three-tier MCTS architecture, allowing the engine to detect instant wins
+//! before committing to expensive neural network evaluation.
+//!
+//! # Algorithm
+//!
+//! Uses a depth-limited minimax search with geometric pruning based on
+//! king distance from the center squares. Kings more than 3 moves away
+//! are pruned early.
+
 use crate::board::{Board, KOTH_CENTER};
 use crate::move_generation::MoveGen;
 use crate::piece_types::{KING, WHITE, BLACK};

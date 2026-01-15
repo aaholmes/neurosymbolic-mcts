@@ -1,6 +1,26 @@
-// src/egtb.rs
+//! Endgame Tablebase (EGTB) integration using Syzygy tablebases.
+//!
+//! Provides access to pre-computed endgame solutions for positions with 6 or fewer
+//! pieces. When available, tablebase probes give perfect play information:
+//!
+//! - **WDL (Win/Draw/Loss)**: The theoretical outcome with perfect play
+//! - **DTZ (Distance to Zeroing)**: Moves until pawn push or capture (for 50-move rule)
+//!
+//! # Status
+//!
+//! Currently **disabled** to focus on MCTS development. The conversion functions
+//! and probe logic are implemented but return stub values. Enable by uncommenting
+//! the tablebase loading and probe calls.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! let prober = EgtbProber::new("/path/to/syzygy")?;
+//! if let Ok(Some((wdl, dtz))) = prober.probe(&board) {
+//!     // Use WDL for move selection, DTZ for optimal winning
+//! }
+//! ```
 
-// Use internal project types
 use crate::board::Board;
 use crate::move_types::Move;
  // Needed for piece count calculation

@@ -1,3 +1,13 @@
+//! Board state stack for move history and undo/redo operations.
+//!
+//! The `BoardStack` maintains a history of board states and moves, enabling:
+//! - Efficient move making and unmaking during search
+//! - Three-fold repetition detection via position hash counting
+//! - State restoration for backtracking in search algorithms
+//!
+//! This is the primary interface for search algorithms to interact with the board,
+//! as it handles all the bookkeeping needed for correct game state management.
+
 use crate::board::Board;
 use crate::move_types::Move;
 use std::collections::{HashMap, VecDeque};

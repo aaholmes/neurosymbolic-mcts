@@ -8,6 +8,8 @@ mod search_logger_tests;
 mod tactical_mcts_tests;
 mod mate_search_tests;
 mod quiescence_tests;
+mod see_tests;
+mod koth_tests;
 
 // Re-export common utilities
 mod common {

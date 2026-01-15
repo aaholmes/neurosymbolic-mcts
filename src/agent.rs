@@ -70,8 +70,6 @@ pub struct HumanlikeAgent<'a> {
     pub mate_search_depth: i32,
     pub mcts_iterations: u32,
     pub mcts_time_limit_ms: u64,
-    pub placeholder_ab_depth: i32,
-    pub placeholder_q_depth: i32,
     /// Stores the root of the last MCTS search for inspection
     last_tree: RefCell<Option<Rc<RefCell<MctsNode>>>>,
 }
@@ -84,8 +82,6 @@ impl HumanlikeAgent<'_> {
         mate_search_depth: i32,
         mcts_iterations: u32,
         mcts_time_limit_ms: u64,
-        placeholder_ab_depth: i32,
-        placeholder_q_depth: i32,
     ) -> HumanlikeAgent<'a> {
         HumanlikeAgent {
             move_gen,
@@ -94,8 +90,6 @@ impl HumanlikeAgent<'_> {
             mate_search_depth,
             mcts_iterations,
             mcts_time_limit_ms,
-            placeholder_ab_depth,
-            placeholder_q_depth,
             last_tree: RefCell::new(None),
         }
     }

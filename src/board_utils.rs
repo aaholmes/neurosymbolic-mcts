@@ -1,6 +1,17 @@
-// Little Endian Rank Mapping
-// Least Significant File
-// ind = 8 * rank + file
+//! Board utility functions for coordinate conversion and square manipulation.
+//!
+//! Provides helper functions for converting between different board representations:
+//! - Square indices (0-63) to file/rank coordinates
+//! - Algebraic notation (e.g., "e4") to square indices
+//! - Bitboard operations for individual squares
+//!
+//! # Square Indexing Convention
+//!
+//! Uses Little-Endian Rank-File Mapping (LERF):
+//! - `index = 8 * rank + file`
+//! - a1 = 0, h1 = 7, a8 = 56, h8 = 63
+//! - File 0 = a-file, File 7 = h-file
+//! - Rank 0 = 1st rank (white's back rank), Rank 7 = 8th rank
 
 /// Converts file and rank coordinates to a square index.
 ///

@@ -40,8 +40,6 @@ pub struct UCIEngine {
     q_search_max_depth: i32,
     mcts_iterations: u32,
     mcts_time_limit_ms: u64,
-    // placeholder_ab_depth: i32, // Included in HumanlikeAgent::new
-    // placeholder_q_depth: i32, // Included in HumanlikeAgent::new
 }
 
 impl UCIEngine {
@@ -106,14 +104,12 @@ impl UCIEngine {
                     self.agent_type = "Humanlike".to_string(); // Correct the stored type
                 }
                 Box::new(HumanlikeAgent::new(
-                    &*GLOBAL_MOVE_GEN, // Use static instance
-                    &*GLOBAL_PESTO_EVAL,    // Use static instance
-                    temp_egtb_prober, // Use cloned Option<EgtbProber>
+                    &*GLOBAL_MOVE_GEN,
+                    &*GLOBAL_PESTO_EVAL,
+                    temp_egtb_prober,
                     self.mate_search_depth,
                     self.mcts_iterations,
                     self.mcts_time_limit_ms,
-                    self.ab_search_depth, // Using ab_search_depth for placeholder
-                    self.q_search_max_depth, // Using q_search_max_depth for placeholder
                 ))
             }
         };

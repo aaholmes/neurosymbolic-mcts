@@ -1,3 +1,18 @@
+//! History heuristic for move ordering in alpha-beta search.
+//!
+//! The history heuristic tracks which moves have historically caused beta cutoffs
+//! (fail-highs) in the search tree. Moves that frequently cause cutoffs are likely
+//! to be good moves, so they are searched earlier in subsequent positions.
+//!
+//! This is a "quiet move" ordering technique - it helps order non-tactical moves
+//! that don't have obvious features like captures or checks.
+//!
+//! # Implementation
+//!
+//! Uses a 64x64 table indexed by (from_square, to_square). When a move causes
+//! a beta cutoff, its history score is incremented by depth². Higher depths
+//! give larger bonuses since deeper cutoffs save more work.
+
 use crate::move_types::Move;
 
 /// Maximum ply depth for history table

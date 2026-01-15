@@ -95,7 +95,5 @@ pub fn create_humanlike_agent() -> HumanlikeAgent<'static> {
         3,    // mate_search_depth
         1000, // mcts_iterations
         5000, // mcts_time_limit_ms
-        8,    // placeholder_ab_depth
-        16,   // placeholder_q_depth
     )
 }

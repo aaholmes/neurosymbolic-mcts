@@ -41,7 +41,6 @@
 //! - **`bits`**, **`hash`**, **`utils`** - Utility functions
 
 pub mod agent;
-pub mod arena;
 pub mod benchmarks;
 pub mod bits;
 pub mod board;

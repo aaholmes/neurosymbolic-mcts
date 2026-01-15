@@ -1,3 +1,22 @@
+//! Static Exchange Evaluation (SEE) for capture analysis.
+//!
+//! SEE determines whether a capture sequence on a square is likely to win or lose
+//! material. It's used extensively for:
+//!
+//! - **Move ordering**: Prioritize winning captures over losing ones
+//! - **Quiescence search pruning**: Skip captures that lose material
+//! - **Search extensions/reductions**: Adjust depth for tactical exchanges
+//!
+//! The algorithm simulates a sequence of captures on the target square,
+//! alternating sides, using the least valuable attacker each time. It builds
+//! a "swap list" of material gains/losses and determines the optimal stopping
+//! point for each side.
+//!
+//! # Example
+//!
+//! If a queen captures a pawn defended by a knight, SEE would return negative
+//! because QxP, NxQ loses 9 pawns worth of material (Q=9, P=1, N=3).
+
 use crate::board::Board;
 use crate::move_generation::MoveGen;
 use crate::piece_types::{KING, PAWN};
