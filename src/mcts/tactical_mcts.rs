@@ -533,10 +533,6 @@ fn evaluate_and_expand_node(
     }
 }
 
-fn backpropagate_value(node: Rc<RefCell<MctsNode>>, value: f64) {
-    MctsNode::backpropagate(node, value);
-}
-
 fn select_best_move_from_root(
     root: Rc<RefCell<MctsNode>>,
     move_gen: &MoveGen,

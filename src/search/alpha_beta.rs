@@ -1,3 +1,74 @@
+//! Alpha-beta search with modern pruning enhancements.
+//!
+//! This module implements the core alpha-beta minimax search algorithm with several
+//! enhancements to improve search efficiency:
+//!
+//! # Pruning Techniques
+//!
+//! - **Alpha-Beta Pruning**: The fundamental optimization that eliminates branches
+//!   that cannot affect the final result.
+//!
+//! - **Check Extensions**: Extends search depth by 1 ply when a move gives check,
+//!   ensuring tactical sequences are fully explored.
+//!
+//! - **History Heuristic**: Prioritizes moves that have caused beta cutoffs in
+//!   previous searches, improving move ordering.
+//!
+//! - **Transposition Table**: Caches search results to avoid re-searching identical
+//!   positions reached via different move orders.
+//!
+//! # Search Flow
+//!
+//! ```text
+//! alpha_beta_search (root)
+//!     │
+//!     ├── Generate moves with eval-based ordering
+//!     │
+//!     ├── For each legal move:
+//!     │   ├── Make move
+//!     │   ├── alpha_beta_recursive (child)
+//!     │   │   ├── Check extensions if in check
+//!     │   │   ├── Recurse or call quiescence_search at depth 0
+//!     │   │   └── Update alpha/beta bounds
+//!     │   ├── Undo move
+//!     │   └── Update best move if improved
+//!     │
+//!     └── Store result in transposition table
+//! ```
+//!
+//! # Integration
+//!
+//! This search is primarily used by the `SimpleAgent` for pure alpha-beta play.
+//! The MCTS system uses [`crate::search::mate_search`] and [`crate::search::quiescence_search`]
+//! directly for tactical analysis.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use kingfisher::search::alpha_beta::alpha_beta_search;
+//! use kingfisher::boardstack::BoardStack;
+//! use kingfisher::move_generation::MoveGen;
+//! use kingfisher::eval::PestoEval;
+//!
+//! let mut board = BoardStack::new();
+//! let move_gen = MoveGen::new();
+//! let pesto = PestoEval::new();
+//! let mut tt = TranspositionTable::new();
+//! let mut killers = [[Move::null(); 2]; MAX_PLY];
+//! let mut history = HistoryTable::new();
+//!
+//! let (score, best_move, nodes, _) = alpha_beta_search(
+//!     &mut board, &move_gen, &pesto, &mut tt,
+//!     &mut killers, &mut history,
+//!     6,           // depth
+//!     -1000000,    // alpha
+//!     1000000,     // beta
+//!     4,           // q_search_max_depth
+//!     false,       // verbose
+//!     None, None,  // time limits
+//! );
+//! ```
+
 use super::history::HistoryTable;
 use super::history::MAX_PLY;
 use super::quiescence::quiescence_search;

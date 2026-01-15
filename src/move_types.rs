@@ -8,17 +8,13 @@ use crate::piece_types::{BISHOP, KNIGHT, QUEEN, ROOK};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-// Constants for special squares and files
-const A1: usize = 0;
-const C1: usize = 2;  // Added for white queenside castle
-const E1: usize = 4;
-const G1: usize = 6;  // Added for white kingside castle
-const H1: usize = 7;
-const A8: usize = 56;
-const C8: usize = 58; // Added for black queenside castle
-const E8: usize = 60;
-const G8: usize = 62; // Added for black kingside castle
-const H8: usize = 63;
+// Constants for castling squares
+const C1: usize = 2;  // White queenside castle destination
+const E1: usize = 4;  // King starting square (white)
+const G1: usize = 6;  // White kingside castle destination
+const C8: usize = 58; // Black queenside castle destination
+const E8: usize = 60; // King starting square (black)
+const G8: usize = 62; // Black kingside castle destination
 
 /// Represents a chess move.
 ///

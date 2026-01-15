@@ -23,9 +23,7 @@ lazy_static! {
 
 pub struct UCIEngine {
     board: BoardStack,
-    move_gen: MoveGen,
-    pesto: PestoEval, // Keep pesto for agent creation
-    egtb_prober: Option<EgtbProber>, // Add EGTB prober
+    egtb_prober: Option<EgtbProber>,
     time_left: Duration,
     increment: Duration,
     moves_to_go: Option<u32>,
@@ -48,33 +46,22 @@ pub struct UCIEngine {
 
 impl UCIEngine {
     pub fn new() -> Self {
-        let move_gen = MoveGen::new();
-        let pesto = PestoEval::new();
-        // Initialize EGTB prober - requires path, set to None for now
+        // EGTB prober disabled by default - requires path configuration
         // TODO: Add UCI option for EGTB path
         let egtb_prober: Option<EgtbProber> = None;
-        // match EgtbProber::load("/path/to/egtb") {
-        //     Ok(prober) => Some(prober),
-        //     Err(e) => {
-        //         println!("info string Failed to load EGTB: {}", e);
-        //         None
-        //     }
-        // };
 
         let agent_type = "Humanlike".to_string(); // Default agent type
 
         // Default configurations
-        let mate_search_depth = 4; // Example default
-        let ab_search_depth = 6;   // Example default
-        let q_search_max_depth = 4; // Example default
-        let mcts_iterations = 10000; // Example default
-        let mcts_time_limit_ms = 5000; // Example default
+        let mate_search_depth = 4;
+        let ab_search_depth = 6;
+        let q_search_max_depth = 4;
+        let mcts_iterations = 10000;
+        let mcts_time_limit_ms = 5000;
 
         let mut engine = UCIEngine {
             board: BoardStack::new(),
-            move_gen, // Store initialized move_gen
-            pesto,    // Store initialized pesto
-            egtb_prober, // Store initialized egtb_prober
+            egtb_prober,
             time_left: Duration::from_secs(0),
             increment: Duration::from_secs(0),
             moves_to_go: None,

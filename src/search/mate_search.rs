@@ -1,3 +1,55 @@
+//! Parallel portfolio mate search algorithm.
+//!
+//! This module implements a sophisticated mate-finding algorithm that runs multiple
+//! search strategies in parallel, sharing a common node budget and stopping as soon
+//! as any strategy finds a forced mate.
+//!
+//! # Algorithm Overview
+//!
+//! The mate search uses a "portfolio" approach with three complementary strategies:
+//!
+//! 1. **Spearhead (Checks Only)**: Searches deeply but only considers checking moves.
+//!    Effective for finding long forcing sequences where every move is a check.
+//!
+//! 2. **Flanker (One Quiet Move)**: Allows one non-checking "quiet" move in the sequence.
+//!    Catches mates that require a single setup move (e.g., blocking escape squares).
+//!
+//! 3. **Guardsman (Exhaustive)**: Full-width search at shallow depth.
+//!    Guarantees finding any mate within the depth limit, regardless of move types.
+//!
+//! # Integration with MCTS
+//!
+//! This module provides the **Tier 1 Safety Gate** in the three-tier MCTS architecture.
+//! Before expanding any MCTS node, the engine checks for forced mates:
+//!
+//! - If a forced win is found, the move is played immediately (no MCTS needed)
+//! - Results are cached in the transposition table to avoid redundant searches
+//! - The parallel design minimizes latency while maximizing mate detection
+//!
+//! # Score Convention
+//!
+//! - `1_000_000 + depth`: Forced mate in `depth` plies (winning)
+//! - `-1_000_000 - depth`: Being mated in `depth` plies (losing)
+//! - `0`: No forced mate found, or draw
+//!
+//! # Example
+//!
+//! ```ignore
+//! use kingfisher::search::mate_search;
+//! use kingfisher::boardstack::BoardStack;
+//! use kingfisher::move_generation::MoveGen;
+//!
+//! let mut board = BoardStack::new();
+//! let move_gen = MoveGen::new();
+//!
+//! // Search for mate up to depth 6 (3 moves each side)
+//! let (score, best_move, nodes) = mate_search(&mut board, &move_gen, 6, false);
+//!
+//! if score >= 1_000_000 {
+//!     println!("Forced mate found! Play: {:?}", best_move);
+//! }
+//! ```
+
 use crate::boardstack::BoardStack;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;

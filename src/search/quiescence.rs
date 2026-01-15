@@ -1,3 +1,64 @@
+//! Quiescence search to resolve tactical positions.
+//!
+//! Quiescence search solves the "horizon effect" - the problem where a fixed-depth
+//! search might stop in the middle of a capture sequence and return a misleading
+//! evaluation. By searching captures until the position is "quiet", we get more
+//! accurate evaluations.
+//!
+//! # Algorithm
+//!
+//! 1. **Stand-Pat**: Evaluate the current position. If it's already good enough
+//!    to cause a beta cutoff, return immediately.
+//!
+//! 2. **Generate Captures**: Only consider capture moves (and possibly checks).
+//!
+//! 3. **SEE Pruning**: Skip captures that lose material according to Static
+//!    Exchange Evaluation (e.g., QxP when the pawn is defended).
+//!
+//! 4. **Recurse**: Search remaining captures recursively until no captures remain
+//!    or depth limit is reached.
+//!
+//! # Two Variants
+//!
+//! This module provides two quiescence search functions:
+//!
+//! - [`quiescence_search`]: Standard version returning just the score, used by
+//!   alpha-beta search.
+//!
+//! - [`quiescence_search_tactical`]: Extended version returning a [`TacticalTree`]
+//!   with the principal variation and sibling moves. Used by MCTS Tier 2 for
+//!   tactical move grafting.
+//!
+//! # Integration with MCTS
+//!
+//! The `quiescence_search_tactical` function provides the **Tier 2 Tactical Grafting**
+//! in the three-tier MCTS architecture:
+//!
+//! - Identifies forcing tactical sequences from any position
+//! - Returns Q-value estimates for tactical moves to initialize MCTS nodes
+//! - Helps MCTS avoid wasting simulations on obviously bad captures
+//!
+//! # Example
+//!
+//! ```ignore
+//! use kingfisher::search::quiescence_search_tactical;
+//! use kingfisher::boardstack::BoardStack;
+//! use kingfisher::move_generation::MoveGen;
+//! use kingfisher::eval::PestoEval;
+//!
+//! let mut board = BoardStack::new();
+//! let move_gen = MoveGen::new();
+//! let pesto = PestoEval::new();
+//!
+//! let tactical_tree = quiescence_search_tactical(&mut board, &move_gen, &pesto);
+//!
+//! println!("Best tactical line: {:?}", tactical_tree.principal_variation);
+//! println!("Leaf evaluation: {}", tactical_tree.leaf_score);
+//! for (mv, score) in &tactical_tree.siblings {
+//!     println!("  Alternative: {:?} -> {}", mv, score);
+//! }
+//! ```
+
 use super::see::see;
 use crate::boardstack::BoardStack;
 use crate::eval::PestoEval;
