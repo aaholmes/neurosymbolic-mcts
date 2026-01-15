@@ -7,6 +7,7 @@ mod graphviz_tests;
 mod search_logger_tests;
 mod tactical_mcts_tests;
 mod mate_search_tests;
+mod quiescence_tests;
 
 // Re-export common utilities
 mod common {

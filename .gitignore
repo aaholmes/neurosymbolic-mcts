@@ -8,3 +8,4 @@ target/
 test_tree.dot
 weights/
 .context-distiller-cache
+.aider*

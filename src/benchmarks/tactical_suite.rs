@@ -103,9 +103,9 @@ pub fn get_tactical_test_suite() -> Vec<TacticalPosition> {
 
 /// Benchmark a single position with the given agent
 pub fn benchmark_position<T: Agent>(
-    position: &TacticalPosition, 
+    position: &TacticalPosition,
     agent: &mut T,
-    time_limit: Duration
+    _time_limit: Duration, // TODO: Pass time limit to agent when Agent trait supports it
 ) -> BenchmarkResult {
     let start_time = Instant::now();
     let mut board_stack = BoardStack::new_from_fen(&position.fen);

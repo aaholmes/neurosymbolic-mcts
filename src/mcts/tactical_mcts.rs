@@ -333,7 +333,7 @@ fn evaluate_leaf_node(
     node: Rc<RefCell<MctsNode>>,
     move_gen: &MoveGen,
     pesto_eval: &PestoEval,
-    nn_policy: &mut Option<NeuralNetPolicy>,
+    _nn_policy: &mut Option<NeuralNetPolicy>, // TODO: Use for Tier 3 neural evaluation
     config: &TacticalMctsConfig,
     transposition_table: &mut TranspositionTable,
     stats: &mut TacticalMctsStats,

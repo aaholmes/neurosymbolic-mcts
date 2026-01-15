@@ -7,22 +7,17 @@ use std::collections::HashMap;
 use crate::benchmarks::strength_testing::{EngineVariant, PositionResult};
 
 /// Elo calculation utilities
-pub struct EloCalculator {
-    /// K-factor for Elo calculations
-    k_factor: f64,
-}
+pub struct EloCalculator;
 
 impl Default for EloCalculator {
     fn default() -> Self {
-        EloCalculator {
-            k_factor: 32.0, // Standard K-factor for rapid improvement detection
-        }
+        EloCalculator
     }
 }
 
 impl EloCalculator {
-    pub fn new(k_factor: f64) -> Self {
-        EloCalculator { k_factor }
+    pub fn new() -> Self {
+        EloCalculator
     }
     
     /// Calculate expected score based on rating difference

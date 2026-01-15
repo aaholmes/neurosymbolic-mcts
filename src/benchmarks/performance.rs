@@ -1,7 +1,7 @@
 //! Performance comparison framework for demonstrating mate-search-first advantage
 
 use super::*;
-use crate::benchmarks::tactical_suite::{run_tactical_benchmark, get_tactical_test_suite};
+use crate::benchmarks::tactical_suite::run_tactical_benchmark;
 use std::time::Duration;
 
 /// Compare performance between different engine configurations
@@ -146,8 +146,7 @@ pub fn run_performance_comparison(time_limit_per_position: Duration) -> Performa
 pub fn mate_speed_benchmark() {
     println!("\n⚡ MATE FINDING SPEED BENCHMARK");
     println!("================================");
-    
-    let positions = get_tactical_test_suite();
+
     let time_limits = vec![
         Duration::from_millis(100),
         Duration::from_millis(500), 

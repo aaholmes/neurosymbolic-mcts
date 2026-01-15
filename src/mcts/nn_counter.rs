@@ -3,30 +3,19 @@
 //! This module provides utilities to track and measure neural network
 //! evaluation calls to validate the efficiency claims of lazy policy evaluation.
 
-use crate::neural_net::NeuralNetPolicy;
 use crate::board::Board;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// A wrapper around NeuralNetPolicy that counts evaluation calls
+/// A wrapper that counts neural network evaluation calls for efficiency measurement
 pub struct CountingNeuralNetPolicy {
-    inner: Option<NeuralNetPolicy>,
     call_count: Rc<RefCell<u32>>,
     total_positions: Rc<RefCell<u32>>,
 }
 
 impl CountingNeuralNetPolicy {
-    pub fn new(policy: Option<NeuralNetPolicy>) -> Self {
+    pub fn new() -> Self {
         CountingNeuralNetPolicy {
-            inner: policy,
-            call_count: Rc::new(RefCell::new(0)),
-            total_positions: Rc::new(RefCell::new(0)),
-        }
-    }
-    
-    pub fn new_mock() -> Self {
-        CountingNeuralNetPolicy {
-            inner: None,
             call_count: Rc::new(RefCell::new(0)),
             total_positions: Rc::new(RefCell::new(0)),
         }
@@ -142,7 +131,7 @@ mod tests {
     
     #[test]
     fn test_counting_neural_net_policy() {
-        let counter = CountingNeuralNetPolicy::new_mock();
+        let counter = CountingNeuralNetPolicy::new();
         let board = Board::new();
         
         // Simulate some evaluations

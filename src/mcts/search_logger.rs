@@ -5,13 +5,12 @@
 
 use crate::board::Board;
 use crate::move_types::Move;
-use crate::mcts::node::{MctsNode, NodeOrigin};
+use crate::mcts::node::MctsNode;
 use crate::mcts::tactical::TacticalMove;
 use std::cell::RefCell;
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::{self, Write};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
