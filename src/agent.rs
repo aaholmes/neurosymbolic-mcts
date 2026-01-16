@@ -7,6 +7,8 @@ use crate::move_types::Move;
 use crate::mcts::tactical_mcts::{tactical_mcts_search, TacticalMctsConfig};
 use crate::mcts::node::MctsNode;
 use crate::search::mate_search;
+use crate::search::iterative_deepening_ab_search;
+use crate::transposition::TranspositionTable;
 use crate::egtb::EgtbProber;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -134,11 +136,25 @@ impl Agent for HumanlikeAgent<'_> {
 
 impl Agent for SimpleAgent<'_> {
     fn get_move(&mut self, board: &mut BoardStack) -> Move {
+        // 1. Try mate search first
         let (eval, m, _nodes) = mate_search(board, self.move_gen, self.mate_search_depth, self.verbose);
         if eval >= 1000000 {
             return m;
         }
-        // ... (AlphaBeta search omitted for brevity, keeping simple implementation)
-        m
+
+        // 2. Fall back to iterative deepening alpha-beta search
+        let mut tt = TranspositionTable::new();
+        let (_depth, _eval, best_move, _nodes) = iterative_deepening_ab_search(
+            board,
+            self.move_gen,
+            self.pesto,
+            &mut tt,
+            self.ab_search_depth,
+            self.q_search_max_depth,
+            None, // No time limit
+            self.verbose,
+        );
+
+        best_move
     }
 }

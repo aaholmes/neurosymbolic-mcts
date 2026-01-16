@@ -1,3 +1,24 @@
+//! Iterative deepening search wrapper.
+//!
+//! Provides iterative deepening around alpha-beta search for better time management
+//! and move ordering via previous iterations. Each iteration searches one ply deeper,
+//! allowing the engine to return the best move found within a time limit.
+//!
+//! # Benefits
+//!
+//! - **Time Management**: Can stop at any depth and return the best move found
+//! - **Move Ordering**: Previous iteration's best move searched first
+//! - **Aspiration Windows**: Future optimization opportunity for narrower search windows
+//!
+//! # Usage
+//!
+//! ```ignore
+//! let (depth, eval, best_move, nodes) = iterative_deepening_ab_search(
+//!     &mut board, &move_gen, &pesto, &mut tt,
+//!     max_depth, q_depth, Some(time_limit), verbose
+//! );
+//! ```
+
 use super::alpha_beta::alpha_beta_search;
 use super::history::HistoryTable;
 use super::history::MAX_PLY;
