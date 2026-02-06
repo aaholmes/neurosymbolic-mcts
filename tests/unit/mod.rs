@@ -27,6 +27,7 @@ mod gives_check_tests;
 mod self_play_loop_tests;
 mod incremental_hash_tests;
 mod legality_check_tests;
+mod training_diversity_tests;
 
 // Re-export common utilities
 mod common {

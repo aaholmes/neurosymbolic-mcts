@@ -127,6 +127,7 @@ fn run_experiment(
             use_neural_policy: config.ablation.enable_tier3_neural,
             inference_server: None,
             logger: None,
+            ..Default::default()
         };
         
         let start = Instant::now();

@@ -20,6 +20,7 @@ use crate::search::mate_search;
 use crate::search::koth_center_in_3;
 use crate::search::quiescence_search_tactical;
 use crate::transposition::TranspositionTable;
+use rand_distr::{Gamma, Distribution};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,6 +47,12 @@ pub struct TacticalMctsConfig {
     pub enable_tier3_neural: bool,
     /// Enable Q-init from tactical values
     pub enable_q_init: bool,
+    /// Enable KOTH (King of the Hill) win detection — off for standard chess
+    pub enable_koth: bool,
+    /// Dirichlet noise alpha (0.0 = disabled, 0.3 for chess training)
+    pub dirichlet_alpha: f64,
+    /// Dirichlet noise epsilon (0.0 = disabled, 0.25 for chess training)
+    pub dirichlet_epsilon: f64,
 }
 
 impl Default for TacticalMctsConfig {
@@ -63,6 +70,9 @@ impl Default for TacticalMctsConfig {
             enable_tier2_graft: true,
             enable_tier3_neural: true,
             enable_q_init: true,
+            enable_koth: false,
+            dirichlet_alpha: 0.0,
+            dirichlet_epsilon: 0.0,
         }
     }
 }
@@ -148,7 +158,7 @@ pub fn tactical_mcts_search_with_tt(
     // Get logger reference (or silent default)
     let logger = config.logger.as_ref();
     
-    if config.enable_tier1_gate && koth_center_in_3(&board, move_gen) {
+    if config.enable_koth && config.enable_tier1_gate && koth_center_in_3(&board, move_gen) {
         let (captures, moves) = move_gen.gen_pseudo_legal_moves(&board);
         for m in captures.iter().chain(moves.iter()) {
             let next = board.apply_move_to_board(*m);
@@ -348,7 +358,7 @@ fn evaluate_leaf_node(
         }
     }
 
-    if config.enable_tier1_gate && koth_center_in_3(board, move_gen) {
+    if config.enable_koth && config.enable_tier1_gate && koth_center_in_3(board, move_gen) {
         let win_val = 1.0; // StM wins
         if let Some(log) = logger {
             log.log_koth_check(true, Some(0)); 
@@ -641,6 +651,25 @@ pub fn tactical_mcts_search_for_training_with_reuse(
         evaluate_and_expand_node(root_node.clone(), move_gen, pesto_eval, &mut stats, &config, None);
     }
 
+    // Apply Dirichlet noise to root priors for training exploration
+    if config.dirichlet_alpha > 0.0 {
+        // Ensure root has move_priorities populated (uniform if no NN)
+        if !root_node.borrow().policy_evaluated {
+            let moves: Vec<Move> = root_node.borrow().children.iter()
+                .filter_map(|c| c.borrow().action)
+                .collect();
+            if !moves.is_empty() {
+                let uniform = 1.0 / moves.len() as f64;
+                let mut node = root_node.borrow_mut();
+                for mv in &moves {
+                    node.move_priorities.entry(*mv).or_insert(uniform);
+                }
+                node.policy_evaluated = true;
+            }
+        }
+        apply_dirichlet_noise(&root_node, config.dirichlet_alpha, config.dirichlet_epsilon);
+    }
+
     for iteration in 0..config.max_iterations {
         if start_time.elapsed() > config.time_limit { break; }
         let leaf = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats, None);
@@ -687,6 +716,34 @@ pub fn reuse_subtree(
     child.borrow_mut().parent = None;
 
     Some(child)
+}
+
+/// Apply Dirichlet noise to root node's move priors (AlphaZero-style exploration).
+/// Mixes: prior = (1 - epsilon) * prior + epsilon * noise
+/// where noise ~ Dir(alpha, alpha, ..., alpha).
+pub fn apply_dirichlet_noise(root: &Rc<RefCell<MctsNode>>, alpha: f64, epsilon: f64) {
+    let mut node = root.borrow_mut();
+    let moves: Vec<Move> = node.move_priorities.keys().cloned().collect();
+    if moves.is_empty() {
+        return;
+    }
+
+    // Generate Dirichlet noise via Gamma(alpha, 1) draws + normalization
+    let mut rng = rand::thread_rng();
+    let gamma = Gamma::new(alpha, 1.0).unwrap();
+    let raw: Vec<f64> = (0..moves.len()).map(|_| gamma.sample(&mut rng)).collect();
+    let sum: f64 = raw.iter().sum();
+    if sum == 0.0 {
+        return;
+    }
+    let noise: Vec<f64> = raw.iter().map(|x| x / sum).collect();
+
+    // Mix noise into priors
+    for (i, mv) in moves.iter().enumerate() {
+        let prior = node.move_priorities.get(mv).copied().unwrap_or(0.0);
+        let noisy = (1.0 - epsilon) * prior + epsilon * noise[i];
+        node.move_priorities.insert(*mv, noisy);
+    }
 }
 
 pub fn print_search_stats(stats: &TacticalMctsStats, best_move: Option<Move>) {

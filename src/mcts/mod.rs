@@ -25,7 +25,7 @@ pub use self::node::{MctsNode, MoveCategory, NodeOrigin, select_leaf_for_expansi
 pub use self::tactical_mcts::{
     tactical_mcts_search, tactical_mcts_search_for_training,
     tactical_mcts_search_for_training_with_reuse, tactical_mcts_search_with_tt,
-    reuse_subtree, TacticalMctsConfig, TacticalMctsStats, MctsTrainingResult,
+    reuse_subtree, apply_dirichlet_noise, TacticalMctsConfig, TacticalMctsStats, MctsTrainingResult,
 };
 pub use self::neural_mcts::neural_mcts_search;
 pub use self::inference_server::InferenceServer;

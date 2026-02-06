@@ -99,29 +99,35 @@ Caissawary is designed for high learning efficiency, making it feasible to train
 - **Efficient Reinforcement Learning**: The built-in tactical search (Tiers 1 and 2) acts as a powerful inductive bias during self-play, preventing simple tactical blunders and providing a cleaner training signal for the neural networks.
 
 ## Configuration
-The node budgets for the tactical searches and other key parameters are designed to be configurable.
+The search behavior is controlled by `TacticalMctsConfig`, which supports ablation flags for research experiments and training-specific parameters:
 
 ```rust
-pub struct CaissawaryConfig {
+pub struct TacticalMctsConfig {
     pub max_iterations: u32,
     pub time_limit: Duration,
+    pub mate_search_depth: i32,
     pub exploration_constant: f64,
 
-    // Node budget for the parallel mate search at each node
-    pub mate_search_nodes: u32,
+    // Ablation flags for paper experiments
+    pub enable_tier1_gate: bool,    // Safety Gates (Mate Search + KOTH)
+    pub enable_tier2_graft: bool,   // Tactical Grafting from QS
+    pub enable_tier3_neural: bool,  // Neural Network Policy
+    pub enable_q_init: bool,        // Q-init from tactical values
+    pub enable_koth: bool,          // KOTH variant (off for standard chess)
 
-    // Node budget for the quiescence search at each leaf
-    pub quiescence_nodes: u32,
+    // Training exploration (AlphaZero-style)
+    pub dirichlet_alpha: f64,       // 0.0 = disabled, 0.3 for chess
+    pub dirichlet_epsilon: f64,     // 0.0 = disabled, 0.25 for chess
 }
 ```
 
 ## Technical Stack
-- **Core Logic**: Rust (~17k LOC), for performance, memory safety, and concurrency.
+- **Core Logic**: Rust (~10k LOC), for performance, memory safety, and concurrency.
 - **Board Representation**: Bitboards with magic bitboard move generation.
 - **Evaluation**: Pesto-style tapered evaluation with Texel-tuned weights.
 - **Search**: Alpha-beta with iterative deepening, transposition tables, history heuristic, null move pruning, and quiescence search.
 - **MCTS**: Tactical-first MCTS with lazy policy evaluation, UCB/PUCT selection, tree reuse, and clone-free check detection.
-- **Parallelism**: **Rayon** for data parallelism in the mate search portfolio.
+- **Parallelism**: **Rayon** for data parallelism in self-play game generation.
 - **Neural Networks** (optional): **PyTorch** for training; **tch-rs** (LibTorch) for Rust inference.
 - **Endgame Tablebases**: Syzygy support via **shakmaty-syzygy**.
 
@@ -160,7 +166,12 @@ The primary binary is a UCI-compliant engine, suitable for use in any standard c
 (Type `uci` to verify connection)
 
 ### Self-Play Data Generation
-The self-play pipeline includes MCTS tree reuse between moves, a shared transposition table, and proper draw detection (3-fold repetition, 50-move rule).
+The self-play pipeline follows AlphaZero-style training practices:
+- **Dirichlet noise** at the root node ($\alpha=0.3$, $\epsilon=0.25$) for exploration
+- **Proportional move sampling** from visit counts (temperature = 1) for game diversity
+- **MCTS tree reuse** between moves for search efficiency
+- **Shared transposition table** across moves within a game
+- **Draw detection**: 3-fold repetition, 50-move rule, and move limit
 
 ```bash
 # Generate 100 games with 800 simulations per move, saving to 'data/'
@@ -169,13 +180,13 @@ cargo run --release --bin self_play -- 100 800 data
 
 ## Testing
 
-The project has a comprehensive test suite with **355+ tests** organized across four categories. For detailed documentation, see [TESTING.md](TESTING.md).
+The project has a comprehensive test suite with **357+ tests** organized across four categories. For detailed documentation, see [TESTING.md](TESTING.md).
 
 ```bash
 # Run the full test suite
 cargo test
 
-# Run unit tests only (210 tests)
+# Run unit tests only (233 tests across 30 modules)
 cargo test --test unit_tests
 
 # Run integration, property, or regression tests
@@ -212,6 +223,7 @@ The unit test suite covers all core modules:
 | History heuristic | history_tests | Scoring, accumulation, saturation |
 | Visualization | graphviz_tests, search_logger_tests | DOT export, verbosity, node coloring |
 | KOTH variant | koth_tests | Center square detection, king proximity |
+| Training diversity | training_diversity_tests | Dirichlet noise, KOTH gating, game diversity |
 
 ## Visualization & Debugging
 Caissawary includes a powerful **MCTS Inspector** tool to visualize the search tree and debug its state-dependent logic. This tool generates Graphviz DOT files that color-code nodes based on their origin (Tier 1, 2, or 3).

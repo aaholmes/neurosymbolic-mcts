@@ -78,9 +78,10 @@ fn test_mcts_finds_koth_win() {
         max_iterations: 100,
         time_limit: Duration::from_secs(10),
         inference_server: Some(Arc::new(server)),
+        enable_koth: true,
         ..Default::default()
     };
-    
+
     let (best_move, _, _) = tactical_mcts_search(
         board,
         &move_gen,
@@ -88,7 +89,7 @@ fn test_mcts_finds_koth_win() {
         &mut None,
         config,
     );
-    
+
     // Should find Kd5 or Ke5 (moves to center)
     let to_sq = best_move.unwrap().to;
     let center_squares = [27, 28, 35, 36]; // d4, e4, d5, e5

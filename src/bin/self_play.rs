@@ -12,9 +12,11 @@ use kingfisher::mcts::{
     TacticalMctsConfig,
 };
 use kingfisher::neural_net::NeuralNetPolicy;
+use kingfisher::move_types::Move;
 use kingfisher::piece_types::{WHITE, BLACK};
 use kingfisher::tensor::move_to_index;
 use kingfisher::transposition::TranspositionTable;
+use rand::Rng;
 use std::fs::File;
 use std::io::Write;
 use std::sync::Mutex;
@@ -91,6 +93,8 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>) -> 
         use_neural_policy: false,
         inference_server: None,
         logger: None,
+        dirichlet_alpha: 0.3,
+        dirichlet_epsilon: 0.25,
         ..Default::default()
     };
     let mut transposition_table = TranspositionTable::new();
@@ -142,8 +146,9 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>) -> 
             material_scalar,
         });
 
-        // Play Move
-        let selected_move = result.best_move.unwrap();
+        // Play Move — sample proportionally from visit counts for exploration
+        let selected_move = sample_proportional(&result.root_policy)
+            .unwrap_or_else(|| result.best_move.unwrap());
 
         // Reuse the subtree for the opponent's next move
         previous_root = reuse_subtree(result.root_node, selected_move);
@@ -199,6 +204,23 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>) -> 
     }
 
     samples
+}
+
+/// Sample a move proportionally from visit counts (temperature = 1).
+fn sample_proportional(policy: &[(Move, u32)]) -> Option<Move> {
+    let total: u32 = policy.iter().map(|(_, v)| *v).sum();
+    if total == 0 {
+        return None;
+    }
+    let threshold = rand::thread_rng().gen_range(0..total);
+    let mut cumulative = 0u32;
+    for (mv, visits) in policy {
+        cumulative += visits;
+        if cumulative > threshold {
+            return Some(*mv);
+        }
+    }
+    policy.last().map(|(mv, _)| *mv)
 }
 
 fn save_binary_data(filename: &str, samples: &[TrainingSample]) -> std::io::Result<()> {

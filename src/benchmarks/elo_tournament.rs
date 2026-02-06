@@ -325,6 +325,7 @@ impl EloTournament {
                     enable_tier2_graft: false,
                     enable_tier3_neural: false,
                     enable_q_init: false,
+                    ..Default::default()
                 };
                 let (best, _, _) = tactical_mcts_search(
                     board_stack.current_state().clone(),
@@ -348,6 +349,7 @@ impl EloTournament {
                     enable_tier2_graft: false,
                     enable_tier3_neural: false,
                     enable_q_init: false,
+                    ..Default::default()
                 };
                 let (best, _, _) = tactical_mcts_search(
                     board_stack.current_state().clone(),
@@ -371,6 +373,7 @@ impl EloTournament {
                     enable_tier2_graft: true,
                     enable_tier3_neural: false,
                     enable_q_init: true,
+                    ..Default::default()
                 };
                 let (best, _, _) = tactical_mcts_search(
                     board_stack.current_state().clone(),
@@ -395,6 +398,7 @@ impl EloTournament {
                     enable_tier2_graft: true,
                     enable_tier3_neural: true,
                     enable_q_init: true,
+                    ..Default::default()
                 };
                 let (best, _, _) = tactical_mcts_search(
                     board_stack.current_state().clone(),

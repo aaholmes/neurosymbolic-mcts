@@ -37,6 +37,7 @@ path = "src/bin/self_play.rs"
 
 [dependencies]
 rand = "0.8.5" # Added for MCTS random playouts
+rand_distr = "0.4" # Dirichlet noise for self-play exploration
 lazy_static = "1.5.0"
 shakmaty = "0.25" # Dependency for shakmaty-syzygy
 shakmaty-syzygy = "0.15.0"
