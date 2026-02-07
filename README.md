@@ -364,6 +364,32 @@ cargo run --release --bin verbose_game
 cargo run --release --bin verbose_game -- --iterations 50 --max-moves 100 --no-emoji
 ```
 
+**Example: Material-aware evaluation with no trained network.** After White plays 1.b4 (100 iterations, classical fallback only), Black's root children show:
+
+```
+  +-----------------+
+8 | r n b q k b n r |
+7 | p p p p p p p p |
+6 | . . . . . . . . |
+5 | . . . . . . . . |
+4 | . P . . . . . . |
+3 | . . . . . . . . |
+2 | P . P P P P P P |
+1 | R N B Q K B N R |
+  +-----------------+
+    a b c d e f g h
+
+Move       Visits   Q-value
+e7e5           29    +0.239
+e7e6           27    +0.274
+b8a6            8    +0.289
+b8c6            5    +0.185
+...            ...      0.000
+c7c5            1    -0.462
+```
+
+With zero training, the engine already plays intelligently. All four of Black's top moves (e5, e6, Na6, Nc6) attack White's hanging b4 pawn — and it prefers the pawn moves over the knight moves, since advancing the pawn opens a bishop line to b4 while a knight on a6/c6 can be chased by b5. Meanwhile 1...c5 is correctly avoided (Q = -0.462) because bxc5 wins a pawn outright. This all emerges from the material-aware quiescence search in the value function — $\tanh(0.5 \cdot \Delta M)$ with no neural network.
+
 ## Binary Targets
 The crate produces several binaries for different tasks:
 
