@@ -6,6 +6,7 @@
 use kingfisher::board::Board;
 use kingfisher::boardstack::BoardStack;
 use kingfisher::move_generation::MoveGen;
+use kingfisher::move_types::Move;
 
 fn setup() -> MoveGen {
     MoveGen::new()
@@ -176,4 +177,115 @@ fn test_zobrist_multiple_moves() {
 
     // Should have collected unique hashes
     assert_eq!(seen_hashes.len(), 5, "Should have 5 unique positions");
+}
+
+#[test]
+fn test_incremental_hash_matches_full_recompute() {
+    // Verify the incremental Zobrist hash matches full recomputation after each move
+    let mut board_stack = BoardStack::new();
+    let move_gen = setup();
+
+    // Play several moves and verify hash consistency after each
+    let moves_to_make = vec![
+        (12, 28), // e2-e4
+        (52, 36), // e7-e5
+        (6, 21),  // g1-f3
+        (57, 42), // g8-f6
+        (5, 33),  // f1-b5 (bishop move)
+    ];
+
+    for (from, to) in moves_to_make {
+        let mv = Move::new(from, to, None);
+        board_stack.make_move(mv);
+        let board = board_stack.current_state();
+
+        let incremental = board.compute_zobrist_hash();
+        // The board's zobrist_hash field is set by apply_move_to_board (incremental)
+        // compute_zobrist_hash recomputes from scratch
+        // They must match
+        assert_eq!(
+            get_hash(board),
+            incremental,
+            "Incremental hash should match full recompute after move from {} to {}",
+            from, to
+        );
+    }
+}
+
+#[test]
+fn test_hash_unique_across_many_positions() {
+    // Generate hashes for many different FEN positions and verify they're all unique
+    let fens = vec![
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+        "r1bqkbnr/pppppppp/2n5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2",
+        "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq - 1 1",
+        "8/8/8/8/8/8/8/4K2k w - - 0 1",
+        "8/8/8/8/8/8/8/4K2k b - - 0 1",
+        "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
+        "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w - - 0 1",
+    ];
+
+    let mut hashes = std::collections::HashSet::new();
+    for fen in &fens {
+        let board = Board::new_from_fen(fen);
+        let hash = get_hash(&board);
+        assert!(
+            hashes.insert(hash),
+            "Hash collision for FEN: {}",
+            fen
+        );
+    }
+}
+
+#[test]
+fn test_hash_after_capture() {
+    // After a capture, hash should differ from pre-capture
+    let board = Board::new_from_fen("8/8/8/3q4/4N3/8/8/K6k w - - 0 1");
+    let hash_before = get_hash(&board);
+
+    let mv = Move::new(28, 35, None); // Nxd5
+    let board_after = board.apply_move_to_board(mv);
+    let hash_after = get_hash(&board_after);
+
+    assert_ne!(hash_before, hash_after, "Hash should change after capture");
+}
+
+#[test]
+fn test_hash_after_castling() {
+    let board = Board::new_from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1");
+    let hash_before = get_hash(&board);
+
+    // Kingside castling
+    let mv = Move::new(4, 6, None);
+    let board_after = board.apply_move_to_board(mv);
+    let hash_after = get_hash(&board_after);
+
+    assert_ne!(hash_before, hash_after, "Hash should change after castling");
+}
+
+#[test]
+fn test_hash_after_en_passant() {
+    let board = Board::new_from_fen("8/8/8/pP6/8/8/8/K6k w - a6 0 1");
+    let hash_before = get_hash(&board);
+
+    // b5xa6 en passant
+    let mv = Move::new(33, 40, None);
+    let board_after = board.apply_move_to_board(mv);
+    let hash_after = get_hash(&board_after);
+
+    assert_ne!(hash_before, hash_after, "Hash should change after en passant");
+}
+
+#[test]
+fn test_hash_after_promotion() {
+    let board = Board::new_from_fen("8/P7/8/8/8/8/8/K6k w - - 0 1");
+    let hash_before = get_hash(&board);
+
+    let mv = Move::new(48, 56, Some(kingfisher::piece_types::QUEEN));
+    let board_after = board.apply_move_to_board(mv);
+    let hash_after = get_hash(&board_after);
+
+    assert_ne!(hash_before, hash_after, "Hash should change after promotion");
 }

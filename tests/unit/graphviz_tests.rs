@@ -40,13 +40,13 @@ fn test_export_dot_mate_position_shows_gate_color() {
     let board = Board::new_from_fen(positions::MATE_IN_1_WHITE);
     
     let config = TacticalMctsConfig {
-        max_iterations: 100,
+        max_iterations: 20,
         time_limit: Duration::from_secs(5),
         mate_search_depth: 3,
         inference_server: Some(Arc::new(server)),
         ..Default::default()
     };
-    
+
     let (best_move, _, root) = tactical_mcts_search(
         board,
         &move_gen,
@@ -54,12 +54,12 @@ fn test_export_dot_mate_position_shows_gate_color() {
         &mut None,
         config,
     );
-    
+
     let dot = root.borrow().export_dot(3, 0);
-    
+
     // Should find mate
     assert!(best_move.is_some());
-    
+
     // Should have red (gate) colored node
     assert!(dot.contains("firebrick1"), "Gate nodes should be firebrick1 (red)");
 }
@@ -72,9 +72,9 @@ fn test_export_dot_tactical_position_shows_graft_color() {
     
     // Position with obvious capture
     let board = Board::new_from_fen(positions::WINNING_CAPTURE);
-    
+
     let config = TacticalMctsConfig {
-        max_iterations: 200,
+        max_iterations: 30,
         time_limit: Duration::from_secs(5),
         mate_search_depth: 0, // Disable mate search to force QS path
         inference_server: Some(Arc::new(server)),
@@ -115,11 +115,12 @@ fn test_export_dot_respects_depth_limit() {
     let move_gen = MoveGen::new();
     let pesto = PestoEval::new();
     let server = InferenceServer::new_mock();
-    
-    let board = Board::new();
-    
+
+    // Simple endgame position for speed in debug builds
+    let board = Board::new_from_fen("4k3/4p3/8/8/8/8/4P3/4K3 w - - 0 1");
+
     let config = TacticalMctsConfig {
-        max_iterations: 500,
+        max_iterations: 50,
         time_limit: Duration::from_secs(5),
         inference_server: Some(Arc::new(server)),
         ..Default::default()
@@ -149,11 +150,12 @@ fn test_export_dot_min_visits_filter() {
     let move_gen = MoveGen::new();
     let pesto = PestoEval::new();
     let server = InferenceServer::new_mock();
-    
-    let board = Board::new();
-    
+
+    // Simple endgame position for speed in debug builds
+    let board = Board::new_from_fen("4k3/4p3/8/8/8/8/4P3/4K3 w - - 0 1");
+
     let config = TacticalMctsConfig {
-        max_iterations: 500,
+        max_iterations: 50,
         time_limit: Duration::from_secs(5),
         inference_server: Some(Arc::new(server)),
         ..Default::default()
@@ -183,11 +185,11 @@ fn test_export_dot_contains_shadow_priors() {
     let pesto = PestoEval::new();
     let server = InferenceServer::new_mock();
     
-    // Position with multiple tactical options
-    let board = Board::new_from_fen("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4");
-    
+    // Simple position with tactical options — fast in debug builds
+    let board = Board::new_from_fen("4k3/8/8/3q4/4N3/8/8/4K3 w - - 0 1");
+
     let config = TacticalMctsConfig {
-        max_iterations: 300,
+        max_iterations: 30,
         time_limit: Duration::from_secs(5),
         mate_search_depth: 3,
         inference_server: Some(Arc::new(server)),

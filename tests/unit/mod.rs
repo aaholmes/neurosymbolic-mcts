@@ -28,6 +28,11 @@ mod self_play_loop_tests;
 mod incremental_hash_tests;
 mod legality_check_tests;
 mod training_diversity_tests;
+mod agent_tests;
+mod utils_tests;
+mod magic_bitboard_tests;
+mod tensor_extended_tests;
+mod training_tests;
 
 // Re-export common utilities
 mod common {
