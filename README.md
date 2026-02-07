@@ -92,14 +92,64 @@ Where $\Delta M$ is the material imbalance. This architecture allows the network
 
 > **Note:** Neural network support is optional. Compile with `cargo build --features neural` to enable it. You must have a compatible LibTorch installed or let `tch-rs` download one.
 
-## Training Philosophy
-Caissawary is designed for high learning efficiency, making it feasible to train without nation-state-level resources.
+## Training Pipeline
 
-- **Supervised Pre-training**: Begin with supervised learning on a large corpus of high-quality human games to bootstrap strategic and positional knowledge.
-- **Efficient Reinforcement Learning**: The built-in tactical search (Tiers 1 and 2) acts as a powerful inductive bias during self-play, preventing simple tactical blunders and providing a cleaner training signal for the neural networks.
+Caissawary includes a full **AlphaGo Zero-style training loop** designed for single-machine training. The hypothesis is that the 3-tier symbolic system converges on much less compute than standard AGZ.
+
+### AGZ Training Loop
+
+The orchestrator (`python/orchestrate.py`) runs a config-driven loop:
+
+1. **Self-Play** -- Generate games with the current best model via the Rust `self_play` binary
+2. **Replay Buffer** -- Add games to a disk-backed FIFO buffer (`python/replay_buffer.py`), evict oldest when over capacity
+3. **Train** -- Sample minibatches from the buffer, update the network
+4. **Export** -- Trace model to TorchScript for Rust inference
+5. **Evaluate** -- Play head-to-head games between candidate and current best (`evaluate_models` binary)
+6. **Gate** -- Accept candidate only if win rate exceeds threshold (default 55%)
+
+```bash
+# Run the full AGZ loop with default settings
+python python/orchestrate.py
+
+# Customize for faster iteration
+python python/orchestrate.py \
+  --games-per-generation 500 \
+  --simulations-per-move 800 \
+  --minibatches-per-gen 1000 \
+  --eval-games 100 \
+  --optimizer muon \
+  --buffer-capacity 500000
+
+# Smoke test (tiny settings)
+python python/orchestrate.py \
+  --games-per-generation 2 \
+  --simulations-per-move 50 \
+  --minibatches-per-gen 10 \
+  --eval-games 4 \
+  --buffer-capacity 1000
+```
+
+The orchestrator auto-resumes from `orchestrator_state.json` on restart and logs per-generation metrics to `training_log.jsonl`.
+
+### Training Script
+
+The training script (`python/train.py`) supports both epoch-based and minibatch-count modes:
+
+```bash
+# Epoch mode (original)
+python python/train.py data/training output.pth --optimizer muon --epochs 20
+
+# Minibatch-count mode (AGZ-style, samples with replacement from replay buffer)
+python python/train.py --buffer-dir data/buffer output.pth --minibatches 1000 --optimizer muon
+
+# With LR scheduling (drop LR at minibatch boundaries)
+python python/train.py --buffer-dir data/buffer output.pth \
+  --minibatches 5000 --lr-schedule "2000:0.01,4000:0.001"
+```
+
+Checkpoints save full training state (model weights, optimizer state, global minibatch count) for seamless resumption.
 
 ### Optimizer Selection
-The training script supports three optimizers via `--optimizer`:
 
 | Optimizer | Flag | Default LR | Notes |
 |-----------|------|-----------|-------|
@@ -109,13 +159,16 @@ The training script supports three optimizers via `--optimizer`:
 
 [Muon](https://github.com/KellerJordan/modded-nanogpt) applies Newton-Schulz orthogonalization to gradient updates for 2D+ weight tensors (linear, conv layers), falling back to AdamW for 1D parameters (biases, norms). It typically converges faster than Adam on ResNet-style architectures like LogosNet.
 
-```bash
-# Train with Muon optimizer
-python python/train.py data/training python/models/latest.pt --optimizer muon --epochs 20
+### Model Evaluation
 
-# Compare all three optimizers (generates CSV + plots)
-python python/compare_optimizers.py data/training --epochs 20 --runs 3
+The `evaluate_models` binary plays head-to-head matches between two TorchScript models:
+
+```bash
+cargo run --release --features neural --bin evaluate_models -- \
+  weights/candidate.pt weights/current_best.pt 100 800 --threshold 0.55
 ```
+
+Output: `WINS=X LOSSES=Y DRAWS=Z WINRATE=0.XX ACCEPTED=true/false`
 
 ## Configuration
 The search behavior is controlled by `TacticalMctsConfig`, which supports ablation flags for research experiments and training-specific parameters:
@@ -202,13 +255,13 @@ cargo run --release --features neural --bin self_play -- 100 800 data models/lat
 
 ## Testing
 
-The project has a comprehensive test suite with **357+ tests** organized across four categories. For detailed documentation, see [TESTING.md](TESTING.md).
+The project has a comprehensive test suite with **380+ tests** organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
 
 ```bash
-# Run the full test suite
+# Run the full Rust test suite
 cargo test
 
-# Run unit tests only (233 tests across 30 modules)
+# Run unit tests only
 cargo test --test unit_tests
 
 # Run integration, property, or regression tests
@@ -218,6 +271,9 @@ cargo test --test regression_tests
 
 # Run perft tests (move generation correctness)
 cargo test --test perft_tests
+
+# Run Python training pipeline tests (22 tests)
+cd python && python -m pytest test_replay_buffer.py test_train.py test_orchestrate.py -v
 ```
 
 ### Test Coverage
@@ -246,6 +302,7 @@ The unit test suite covers all core modules:
 | Visualization | graphviz_tests, search_logger_tests | DOT export, verbosity, node coloring |
 | KOTH variant | koth_tests | Center square detection, king proximity |
 | Training diversity | training_diversity_tests | Dirichlet noise, KOTH gating, game diversity |
+| Model evaluation | evaluate_models_tests | Game termination, color alternation, win rate, acceptance |
 
 ## Visualization & Debugging
 Caissawary includes a powerful **MCTS Inspector** tool to visualize the search tree and debug its state-dependent logic. This tool generates Graphviz DOT files that color-code nodes based on their origin (Tier 1, 2, or 3).
@@ -294,6 +351,7 @@ The crate produces several binaries for different tasks:
 | `mcts_inspector` | MCTS search tree visualization (Graphviz DOT output) |
 | `verbose_search` | Real-time search narration with configurable verbosity |
 | `self_play` | Self-play data generation for neural network training |
+| `evaluate_models` | Head-to-head model evaluation for AGZ gatekeeper |
 | `run_experiments` | Ablation studies and experimental framework |
 | `elo_tournament` | Elo rating estimation via engine tournaments |
 | `texel_tune` | Texel tuning for evaluation weight optimization |

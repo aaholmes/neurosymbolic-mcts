@@ -33,6 +33,7 @@ mod utils_tests;
 mod magic_bitboard_tests;
 mod tensor_extended_tests;
 mod training_tests;
+mod evaluate_models_tests;
 
 // Re-export common utilities
 mod common {
