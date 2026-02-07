@@ -283,11 +283,34 @@ pub fn tactical_mcts_search_with_tt(
         }
 
         if iteration % 100 == 0 && start_time.elapsed() > config.time_limit { break; }
+
+        // Early termination on forced KOTH win
+        if config.enable_koth {
+            let root_ref = root_node.borrow();
+            let has_win_in_1 = root_ref.children.iter().any(|c| {
+                c.borrow().terminal_or_mate_value.map_or(false, |v| v < -0.5)
+            });
+            if has_win_in_1 {
+                drop(root_ref);
+                break;
+            }
+            let has_forced_win = root_ref.children.iter().any(|c| {
+                let cr = c.borrow();
+                cr.visits > 0 && (cr.total_value / cr.visits as f64) > 0.99
+            });
+            if has_forced_win {
+                let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
+                if all_visited {
+                    drop(root_ref);
+                    break;
+                }
+            }
+        }
     }
 
     stats.search_time = start_time.elapsed();
     let best_move = select_best_move_from_root(root_node.clone(), move_gen);
-    
+
     if let Some(log) = logger {
         log.log_search_complete(
             best_move,
@@ -362,6 +385,17 @@ fn evaluate_leaf_node(
     }
 
     if config.enable_koth && config.enable_tier1_gate {
+        // Opponent already on center = STM loses (KOTH terminal)
+        let (w_won, b_won) = board.is_koth_win();
+        let opponent_won = (board.w_to_move && b_won) || (!board.w_to_move && w_won);
+        if opponent_won {
+            node_ref.terminal_or_mate_value = Some(-1.0);
+            node_ref.is_terminal = true;
+            stats.nn_saved_by_tier1 += 1;
+            stats.tier1_solutions += 1;
+            return -1.0;
+        }
+
         if let Some(dist) = koth_center_in_3(board, move_gen) {
             let win_val = 1.0; // StM wins
             if let Some(log) = logger {
@@ -576,6 +610,15 @@ fn select_best_move_from_root(
     move_gen: &MoveGen,
 ) -> Option<Move> {
     let root_ref = root.borrow();
+
+    // Prefer win-in-1: terminal child where child's STM loses (opponent just won)
+    for child in &root_ref.children {
+        let cr = child.borrow();
+        if cr.terminal_or_mate_value.map_or(false, |v| v < -0.5) {
+            return cr.action;
+        }
+    }
+
     if let Some(mate_move) = root_ref.mate_move {
         // Validation check
         if root_ref.state.is_pseudo_legal(mate_move, move_gen)
@@ -584,10 +627,10 @@ fn select_best_move_from_root(
             return Some(mate_move);
         }
     }
-    
+
     let mut best_move = None;
     let mut best_visits = 0;
-    
+
     for child in &root_ref.children {
         let child_ref = child.borrow();
         if child_ref.visits > best_visits {
@@ -646,8 +689,31 @@ pub fn tactical_mcts_search_for_training(
             let best = select_best_move_from_root(root_node.clone(), move_gen);
             log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
         }
+
+        // Early termination on forced KOTH win
+        if config.enable_koth {
+            let root_ref = root_node.borrow();
+            let has_win_in_1 = root_ref.children.iter().any(|c| {
+                c.borrow().terminal_or_mate_value.map_or(false, |v| v < -0.5)
+            });
+            if has_win_in_1 {
+                drop(root_ref);
+                break;
+            }
+            let has_forced_win = root_ref.children.iter().any(|c| {
+                let cr = c.borrow();
+                cr.visits > 0 && (cr.total_value / cr.visits as f64) > 0.99
+            });
+            if has_forced_win {
+                let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
+                if all_visited {
+                    drop(root_ref);
+                    break;
+                }
+            }
+        }
     }
-    
+
     let (policy, root_val) = {
         let root = root_node.borrow();
         let mut policy = Vec::new();
@@ -733,6 +799,29 @@ pub fn tactical_mcts_search_for_training_with_reuse(
         if let Some(log) = logger {
             let best = select_best_move_from_root(root_node.clone(), move_gen);
             log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
+        }
+
+        // Early termination on forced KOTH win
+        if config.enable_koth {
+            let root_ref = root_node.borrow();
+            let has_win_in_1 = root_ref.children.iter().any(|c| {
+                c.borrow().terminal_or_mate_value.map_or(false, |v| v < -0.5)
+            });
+            if has_win_in_1 {
+                drop(root_ref);
+                break;
+            }
+            let has_forced_win = root_ref.children.iter().any(|c| {
+                let cr = c.borrow();
+                cr.visits > 0 && (cr.total_value / cr.visits as f64) > 0.99
+            });
+            if has_forced_win {
+                let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
+                if all_visited {
+                    drop(root_ref);
+                    break;
+                }
+            }
         }
     }
 

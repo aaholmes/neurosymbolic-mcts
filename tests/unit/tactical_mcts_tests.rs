@@ -383,3 +383,68 @@ fn test_proven_loss_children_get_minimal_visits() {
     assert!(proven_loss_count > 0, "Expected some proven-loss children in this KOTH position");
     assert!(non_loss_count > 0, "Expected some non-loss children with visits");
 }
+
+#[test]
+fn test_koth_opponent_on_center_is_terminal() {
+    // Position where White king is already on e4 (center), Black to move.
+    // Black should see this as a terminal loss (opponent already won KOTH).
+    let move_gen = MoveGen::new();
+    // White king on e4 (center square), Black king on a7
+    let board = Board::new_from_fen("8/k7/8/8/4K3/8/8/8 b - - 0 1");
+
+    let config = TacticalMctsConfig {
+        max_iterations: 100,
+        time_limit: Duration::from_secs(10),
+        enable_koth: true,
+        ..Default::default()
+    };
+
+    let (_best_move, _stats, root) = tactical_mcts_search(
+        board,
+        &move_gen,
+        &mut None,
+        config,
+    );
+
+    // Root should be terminal: opponent (White) already occupies center
+    let root_ref = root.borrow();
+    assert!(root_ref.terminal_or_mate_value.is_some(),
+        "Position with opponent on center should have terminal value");
+    assert_eq!(root_ref.terminal_or_mate_value, Some(-1.0),
+        "STM (Black) should lose: opponent king on center");
+}
+
+#[test]
+fn test_koth_win_in_1_selected_and_search_aborts() {
+    // Position: White king on d3, can step to d4 or e4 (KOTH center) for instant win.
+    // d3c3 captures a rook but is slower. Search should pick d3d4 or d3e4 and abort early.
+    let move_gen = MoveGen::new();
+    let board = Board::new_from_fen("3N4/k6p/p6P/2P1R3/2n3P1/P1rK4/8/5B2 w - - 4 47");
+
+    let config = TacticalMctsConfig {
+        max_iterations: 1000,
+        time_limit: Duration::from_secs(30),
+        enable_koth: true,
+        ..Default::default()
+    };
+
+    let (best_move, stats, _root) = tactical_mcts_search(
+        board,
+        &move_gen,
+        &mut None,
+        config,
+    );
+
+    assert!(best_move.is_some(), "Should find a move");
+    let mv = best_move.unwrap();
+
+    // d3=19, d4=27, e4=28 in LERF
+    let is_koth_win_move = (mv.from == 19 && mv.to == 27) || (mv.from == 19 && mv.to == 28);
+    assert!(is_koth_win_move,
+        "Should select KOTH win-in-1 (d3d4 or d3e4), got {}",
+        mv.to_uci());
+
+    // Early termination: should use far fewer than 1000 iterations
+    assert!(stats.iterations < 100,
+        "Search should abort early with win-in-1, used {} iterations", stats.iterations);
+}
