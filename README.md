@@ -1,22 +1,22 @@
-# Caissawary Chess Engine (formerly Kingfisher)
-## A Tactics-Enhanced Hybrid MCTS Engine with State-Dependent Search Logic
+# Caissawary
+## Sample-Efficient MCTS via Provably Correct Subgame Solving
 
-Caissawary is a chess engine that combines the strategic guidance of a modern Monte Carlo Tree Search (MCTS) with the ruthless tactical precision of classical search. Its unique, state-dependent search algorithm prioritizes forcing moves and minimizes expensive neural network computations to create a brutally efficient and tactically sharp engine.
+Caissawary is a research chess engine that decomposes positions into **tractable tactical subgames** solved exactly by classical search and **uncertain strategic residuals** evaluated by a neural network. When a subproblem is tractable, the engine proves the answer rather than learning it -- injecting ground-truth values directly into the MCTS tree. This reduces the sample complexity of self-play reinforcement learning by reserving neural network queries for positions where exact analysis is infeasible. The engine includes a full AlphaZero-style training pipeline and is applied to **King of the Hill** (KOTH) chess, a variant where either checkmate or moving your king to a central square wins the game.
 
 ![Caissawary Logo](Caissawary.png)
 
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange)](https://rustup.rs/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## The Name: Caissawary
-Like the engine itself, the name Caissawary is also a hybrid:
+### The Name
+Like the engine itself, the name Caissawary is a hybrid:
 
 - **Caissa**: The mythical goddess of chess, representing the engine's strategic intelligence and artistry.
 - **Cassowary**: A large, formidable, and famously aggressive bird, representing the engine's raw tactical power and speed.
 
-## Research: Safe & Sample-Efficient RL
+## Research: Sample-Efficient RL via Subgame Decomposition
 
-Caissawary is designed as a research platform exploring **how structured inductive biases improve reinforcement learning**. Our key insight: many RL domains contain tractable subproblems where exact analysis outperforms learned approximations.
+Caissawary explores **how provably correct subroutines reduce the sample complexity of reinforcement learning**. The key insight: many RL domains contain tractable subproblems where exact analysis outperforms learned approximations.
 
 ### The Three-Tier Hypothesis
 
@@ -94,9 +94,9 @@ Where $\Delta M$ is the material imbalance. This architecture allows the network
 
 ## Training Pipeline
 
-Caissawary includes a full **AlphaGo Zero-style training loop** designed for single-machine training. The hypothesis is that the 3-tier symbolic system converges on much less compute than standard AGZ.
+Caissawary includes a full **AlphaZero-style training loop** designed for single-machine training. The hypothesis is that the 3-tier symbolic system converges on much less compute than standard AlphaZero.
 
-### AGZ Training Loop
+### AlphaZero Training Loop
 
 The orchestrator (`python/orchestrate.py`) runs a config-driven loop:
 
@@ -108,7 +108,7 @@ The orchestrator (`python/orchestrate.py`) runs a config-driven loop:
 6. **Gate** -- Accept candidate only if win rate exceeds threshold (default 55%)
 
 ```bash
-# Run the full AGZ loop with default settings
+# Run the full AlphaZero loop with default settings
 python python/orchestrate.py
 
 # Customize for faster iteration
@@ -139,7 +139,7 @@ The training script (`python/train.py`) supports both epoch-based and minibatch-
 # Epoch mode (original)
 python python/train.py data/training output.pth --optimizer muon --epochs 20
 
-# Minibatch-count mode (AGZ-style, samples with replacement from replay buffer)
+# Minibatch-count mode (AlphaZero-style, samples with replacement from replay buffer)
 python python/train.py --buffer-dir data/buffer output.pth --minibatches 1000 --optimizer muon
 
 # With LR scheduling (drop LR at minibatch boundaries)
@@ -354,7 +354,7 @@ The crate produces several binaries for different tasks:
 | `mcts_inspector` | MCTS search tree visualization (Graphviz DOT output) |
 | `verbose_search` | Real-time search narration with configurable verbosity |
 | `self_play` | Self-play data generation for neural network training |
-| `evaluate_models` | Head-to-head model evaluation for AGZ gatekeeper |
+| `evaluate_models` | Head-to-head model evaluation for AlphaZero gatekeeper |
 | `run_experiments` | Ablation studies and experimental framework |
 | `elo_tournament` | Elo rating estimation via engine tournaments |
 | `texel_tune` | Texel tuning for evaluation weight optimization |
