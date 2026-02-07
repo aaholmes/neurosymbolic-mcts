@@ -343,3 +343,43 @@ fn test_gate_resolved_nodes_not_expanded() {
     }
     assert!(gate_resolved_count > 0, "Some children should have gate-resolved values in this KOTH position");
 }
+
+#[test]
+fn test_proven_loss_children_get_minimal_visits() {
+    // Position: White to move, every move except c3c4 loses to Black's KOTH-in-1.
+    // After the fix, proven-loss children (terminal_or_mate_value > 0 from child's STM)
+    // should get only 1 visit (the initial root-exploration visit), not 40+ from UCB.
+    let move_gen = MoveGen::new();
+    let board = Board::new_from_fen("r1b4r/ppp1k2p/n3pq1n/5pp1/8/1PP1K3/P3PPPP/RNQ2BNR w - - 0 11");
+
+    let config = TacticalMctsConfig {
+        max_iterations: 200,
+        time_limit: Duration::from_secs(30),
+        enable_koth: true,
+        ..Default::default()
+    };
+
+    let (_, _, root) = tactical_mcts_search(board, &move_gen, &mut None, config);
+
+    let root_ref = root.borrow();
+    let mut proven_loss_count = 0;
+    let mut non_loss_count = 0;
+
+    for child in &root_ref.children {
+        let c = child.borrow();
+        let mv_str = c.action.map(|m| m.to_uci()).unwrap_or_default();
+
+        if c.terminal_or_mate_value.map_or(false, |v| v > 0.0) {
+            // Proven loss for the parent: child's STM wins
+            proven_loss_count += 1;
+            assert_eq!(c.visits, 1,
+                "Proven-loss child {} should have exactly 1 visit, got {}",
+                mv_str, c.visits);
+        } else if c.visits > 0 {
+            non_loss_count += 1;
+        }
+    }
+
+    assert!(proven_loss_count > 0, "Expected some proven-loss children in this KOTH position");
+    assert!(non_loss_count > 0, "Expected some non-loss children with visits");
+}

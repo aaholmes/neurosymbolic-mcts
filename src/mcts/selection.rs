@@ -168,7 +168,14 @@ fn select_ucb_with_policy(
     
     for child in &node_ref.children {
         let child_ref = child.borrow();
-        
+
+        // Skip proven losses — child's STM wins means parent loses
+        // (defensive guard; gate-resolved nodes already get Q=-1.0 and aren't expanded)
+        #[cfg(debug_assertions)]
+        if child_ref.terminal_or_mate_value.map_or(false, |v| v > 0.0) {
+            continue;
+        }
+
         let (prior_prob, q_init) = if let Some(mv) = child_ref.action {
             let p = node_ref.move_priorities.get(&mv).copied().unwrap_or(1.0 / num_legal_moves as f64);
             let q = node_ref.tactical_values.get(&mv).copied().unwrap_or(0.0);
