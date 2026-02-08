@@ -7,9 +7,13 @@
 
 use kingfisher::boardstack::BoardStack;
 use kingfisher::move_generation::MoveGen;
-use kingfisher::mcts::{tactical_mcts_search_with_tt, TacticalMctsConfig, InferenceServer};
+use kingfisher::move_types::Move;
+use kingfisher::mcts::{tactical_mcts_search_with_tt, MctsNode, TacticalMctsConfig, InferenceServer};
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::transposition::TranspositionTable;
+use rand::Rng;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +45,64 @@ impl EvalResults {
     pub fn accepted(&self, threshold: f64) -> bool {
         self.win_rate() >= threshold
     }
+}
+
+/// Select a move for evaluation: deterministic for forced wins, (counts-1) sampling otherwise.
+fn select_eval_move(root: &Rc<RefCell<MctsNode>>) -> Option<Move> {
+    let root_ref = root.borrow();
+
+    // 1. If any child is a forced win (terminal_or_mate_value < -0.5 from child's STM = we win),
+    //    pick it deterministically. If multiple, prefer the one with the strongest signal.
+    let mut best_win: Option<(Move, f64)> = None;
+    for child in &root_ref.children {
+        let cr = child.borrow();
+        if let Some(v) = cr.terminal_or_mate_value {
+            if v < -0.5 {
+                // This is a forced win for us; lower value = more decisive
+                if let Some(mv) = cr.action {
+                    if best_win.is_none() || v < best_win.unwrap().1 {
+                        best_win = Some((mv, v));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((mv, _)) = best_win {
+        return Some(mv);
+    }
+
+    // 2. Check root mate_move (from mate search gate)
+    if let Some(mate_mv) = root_ref.mate_move {
+        return Some(mate_mv);
+    }
+
+    // 3. Otherwise, sample proportionally from (visits - 1)
+    let visit_pairs: Vec<(Move, u32)> = root_ref.children.iter()
+        .filter_map(|c| {
+            let cr = c.borrow();
+            cr.action.map(|mv| (mv, cr.visits))
+        })
+        .collect();
+
+    sample_proportional(&visit_pairs)
+}
+
+/// Sample a move proportionally from visit counts (temperature = 1, counts-1).
+fn sample_proportional(policy: &[(Move, u32)]) -> Option<Move> {
+    let total: u32 = policy.iter().map(|(_, v)| v.saturating_sub(1)).sum();
+    if total == 0 {
+        // All moves have 0 or 1 visit — fall back to most-visited
+        return policy.iter().max_by_key(|(_, v)| *v).map(|(mv, _)| *mv);
+    }
+    let threshold = rand::thread_rng().gen_range(0..total);
+    let mut cumulative = 0u32;
+    for (mv, visits) in policy {
+        cumulative += visits.saturating_sub(1);
+        if cumulative > threshold {
+            return Some(*mv);
+        }
+    }
+    policy.last().map(|(mv, _)| *mv)
 }
 
 /// Play a single evaluation game between two models.
@@ -121,7 +183,7 @@ pub fn play_evaluation_game_koth(
         let candidate_turn = (white_to_move && candidate_is_white)
             || (!white_to_move && !candidate_is_white);
 
-        let (best_move, _stats, _root) = if candidate_turn {
+        let (_best_move, _stats, root) = if candidate_turn {
             tactical_mcts_search_with_tt(
                 board.clone(),
                 &move_gen,
@@ -139,7 +201,9 @@ pub fn play_evaluation_game_koth(
             )
         };
 
-        match best_move {
+        // Use (counts-1) sampling for variety, but play forced wins deterministically
+        let selected_move = select_eval_move(&root);
+        match selected_move {
             None => break,
             Some(mv) => {
                 board_stack.make_move(mv);
