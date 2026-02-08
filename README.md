@@ -258,7 +258,7 @@ cargo run --release --features neural --bin self_play -- 100 800 data models/lat
 
 ## Testing
 
-The project has a comprehensive test suite with **620+ tests** (540 Rust + 86 Python) organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
+The project has a comprehensive test suite with **~630 tests** (540 Rust + 86 Python) organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
 
 ```bash
 # Run the fast Rust test suite (<60s, skips perft/property/slow tests)
@@ -298,7 +298,7 @@ The unit test suite covers all core modules:
 | MCTS selection | selection_optimization_tests | Redundancy-free selection, UCB correctness |
 | Tree reuse | tree_reuse_tests | Subtree extraction, visit preservation |
 | Tactical MCTS | tactical_mcts_tests | Mate-in-1, time/iteration limits, MVV-LVA Q-init, KOTH terminal detection, early termination |
-| Tactical detection | tactical_detection_tests | Fork/check/capture detection, MVV-LVA, cache eviction, filtering |
+| Tactical detection | tactical_detection_tests | Capture/promotion detection, MVV-LVA scoring, cache eviction |
 | Mate search | mate_search_tests | Mate-in-1/2, depth, node budgets |
 | Check detection | gives_check_tests | Direct/discovered check, property testing |
 | Self-play loop | self_play_loop_tests | Repetition, 50-move rule, shared TT |
@@ -337,9 +337,8 @@ dot -Tsvg mcts_tree.dot -o tree.svg
 ### Interpreting the Tree
 Nodes are color-coded to reveal how the engine solved or evaluated them:
 - **Red (Tier 1 Gate):** Solved immediately by "Safety Gates" (Mate Search or KOTH logic) without expansion.
-- **Lightblue (Tier 3 Neural):** A node evaluated by the neural network or classical fallback.
-- **Blue (Tier 3 Neural):** A standard node evaluated by the neural network (or material-only fallback in classical mode).
-- **Grey (Shadow Prior):** A tactical move that was considered but refuted/pruned by the engine.
+- **Lightblue (Tier 3 Neural):** Evaluated by the neural network or material-only classical fallback.
+- **White (Unknown):** Not yet evaluated.
 
 ### Stream of Consciousness Logger
 For real-time insight into the engine's "thought process," use the **Stream of Consciousness Logger**. This tool narrates the search as it happens, explaining why specific moves are being prioritized.
