@@ -683,6 +683,18 @@ pub fn tactical_mcts_search_for_training_with_reuse(
 
     // Use reused root if available, otherwise create new
     let root_node = if let Some(reused) = reused_root {
+        // Clear stale heuristic values from previous search.
+        // terminal_or_mate_value may have been set by mate_search or koth_center_in_3
+        // on a leaf deep in a previous tree. If this node is not truly terminal
+        // (checkmate/stalemate), the cached value would cause select_leaf_node to
+        // always return the root as a leaf, preventing any child from being visited.
+        {
+            let mut node = reused.borrow_mut();
+            if !node.is_terminal {
+                node.terminal_or_mate_value = None;
+                node.mate_move = None;
+            }
+        }
         reused
     } else {
         MctsNode::new_root(board, move_gen)

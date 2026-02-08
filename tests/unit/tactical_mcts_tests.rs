@@ -921,6 +921,65 @@ fn test_biased_mock_changes_evaluation() {
         "Different biases should produce different Q-values: pos={:.4}, neg={:.4}", q_pos, q_neg);
 }
 
+// === Subtree reuse edge cases ===
+
+#[test]
+fn test_reused_root_with_stale_terminal_value_still_finds_move() {
+    // Regression test: when a node with terminal_or_mate_value (from mate search
+    // or KOTH center_in_3) is reused as root, select_leaf_node would immediately
+    // return the root as a leaf (because terminal_or_mate_value.is_some()), so no
+    // child ever got visited and best_move was None — ending the game as "move limit".
+    //
+    // The fix: reuse_subtree clears terminal_or_mate_value on non-terminal nodes.
+    use kingfisher::mcts::tactical_mcts::{tactical_mcts_search_for_training_with_reuse, reuse_subtree};
+    use kingfisher::mcts::node::MctsNode;
+    use kingfisher::transposition::TranspositionTable;
+
+    let move_gen = MoveGen::new();
+    let board = Board::new();
+    let mut tt = TranspositionTable::new();
+
+    let config = TacticalMctsConfig {
+        max_iterations: 30,
+        time_limit: Duration::from_secs(10),
+        ..Default::default()
+    };
+
+    // Do an initial search to build a tree
+    let result1 = tactical_mcts_search_for_training_with_reuse(
+        board.clone(), &move_gen, &mut None, config.clone(), None, &mut tt,
+    );
+    assert!(result1.best_move.is_some());
+    let move1 = result1.best_move.unwrap();
+
+    // Get the reused subtree (the child for the played move)
+    let reused = reuse_subtree(result1.root_node, move1);
+    assert!(reused.is_some());
+    let reused_root = reused.unwrap();
+
+    // Simulate the bug: artificially set terminal_or_mate_value and clear children
+    // on the reused root, mimicking what happens when a leaf node deep in a previous
+    // search gets flagged by mate_search or koth_center_in_3 and is later reused as root.
+    {
+        let mut node = reused_root.borrow_mut();
+        assert!(!node.is_terminal, "Reused root should not be truly terminal");
+        node.terminal_or_mate_value = Some(1.0); // Stale mate search value
+        node.children.clear(); // Was a leaf in previous search (never expanded)
+    }
+
+    // The fix should clear terminal_or_mate_value since is_terminal is false
+    let next_board = board.apply_move_to_board(move1);
+    let result2 = tactical_mcts_search_for_training_with_reuse(
+        next_board, &move_gen, &mut None, config, Some(reused_root), &mut tt,
+    );
+
+    // Before the fix, best_move would be None here
+    assert!(result2.best_move.is_some(),
+        "Reused root with stale terminal_or_mate_value must still find a move");
+    assert!(!result2.root_policy.is_empty(),
+        "Should have non-empty policy");
+}
+
 // === Edge cases ===
 
 #[test]
