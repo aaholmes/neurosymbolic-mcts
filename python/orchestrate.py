@@ -45,6 +45,7 @@ class TrainingConfig:
     data_dir: str = "data"
     log_file: str = "training_log.jsonl"
     resume: bool = True
+    max_generations: int = 0  # 0 = unlimited
 
     @classmethod
     def from_args(cls):
@@ -67,6 +68,8 @@ class TrainingConfig:
         parser.add_argument("--data-dir", type=str, default="data")
         parser.add_argument("--log-file", type=str, default="training_log.jsonl")
         parser.add_argument("--no-resume", action="store_true")
+        parser.add_argument("--max-generations", type=int, default=0,
+                            help="Max generations to run (0 = unlimited)")
 
         args = parser.parse_args()
         return cls(
@@ -87,6 +90,7 @@ class TrainingConfig:
             data_dir=args.data_dir,
             log_file=args.log_file,
             resume=not args.no_resume,
+            max_generations=args.max_generations,
         )
 
 
@@ -323,7 +327,7 @@ class Orchestrator:
             self.save_state()
 
         generation = start_gen
-        while True:
+        while self.config.max_generations == 0 or generation <= start_gen + self.config.max_generations - 1:
             print(f"\n{'='*60}")
             print(f"=== Generation {generation} ===")
             print(f"{'='*60}")

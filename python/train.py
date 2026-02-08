@@ -71,26 +71,39 @@ class ChessDataset(Dataset):
 
 
 class BufferDataset(Dataset):
-    """Dataset that samples from a replay buffer directory."""
+    """Dataset that samples from a replay buffer directory.
 
-    def __init__(self, buffer_dir):
+    Pre-samples chunks into memory to avoid per-item file opens.
+    """
+
+    def __init__(self, buffer_dir, chunk_size=4096):
         from replay_buffer import ReplayBuffer
         self.buffer = ReplayBuffer(capacity_positions=10**9, buffer_dir=buffer_dir)
         self.buffer.load_manifest()
         self._total = self.buffer.total_positions()
+        self.chunk_size = chunk_size
+        self._chunk = None
+        self._chunk_idx = 0
+        self._refresh_chunk()
         print(f"Buffer dataset: {self._total} positions from {len(self.buffer.entries)} files")
+
+    def _refresh_chunk(self):
+        boards, materials, values, policies = self.buffer.sample_batch(self.chunk_size)
+        self._chunk = (boards, materials, values, policies)
+        self._chunk_idx = 0
 
     def __len__(self):
         return self._total
 
     def __getitem__(self, idx):
-        # Sample one random position from buffer (ignore idx, always random)
-        boards, materials, values, policies = self.buffer.sample_batch(1)
-        board_tensor = torch.from_numpy(boards[0])
-        material_scalar = torch.tensor(materials[0])
-        value_target = torch.tensor(values[0])
-        policy_target = torch.from_numpy(policies[0])
-        return board_tensor, material_scalar, value_target, policy_target
+        if self._chunk_idx >= self.chunk_size:
+            self._refresh_chunk()
+        i = self._chunk_idx
+        self._chunk_idx += 1
+        return (torch.from_numpy(self._chunk[0][i]),
+                torch.tensor(self._chunk[1][i]),
+                torch.tensor(self._chunk[2][i]),
+                torch.from_numpy(self._chunk[3][i]))
 
 
 def parse_lr_schedule(schedule_str):
@@ -225,6 +238,20 @@ def train_with_config(
 
             global_minibatch += 1
             steps_this_run += 1
+
+            # Loss logging every 100 minibatches
+            if steps_this_run % 100 == 0:
+                print(f"  Step {steps_this_run}/{minibatches} (global {global_minibatch}): "
+                      f"Loss={loss.item():.4f} P={policy_loss.item():.4f} "
+                      f"V={value_loss.item():.4f} K={k.mean().item():.4f} LR={current_lr}")
+
+            # Mid-training checkpoint every 200 minibatches
+            if steps_this_run > 0 and steps_this_run % 200 == 0:
+                torch.save({
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "global_minibatch": global_minibatch,
+                }, output_path)
     else:
         # Epoch mode (original behavior)
         for epoch in range(epochs):

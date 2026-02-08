@@ -27,6 +27,7 @@ struct TrainingSample {
     policy: Vec<(u16, f32)>, // (Move Index, Probability)
     value_target: f32,       // +1 (Win), -1 (Loss), 0 (Draw)
     material_scalar: f32,
+    w_to_move: bool,         // Side to move when sample was taken
 }
 
 fn main() {
@@ -150,6 +151,7 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>, ena
             policy: policy_dist,
             value_target: 0.0, // Placeholder
             material_scalar,
+            w_to_move: board.w_to_move,
         });
 
         // Play Move — sample proportionally from visit counts for exploration
@@ -216,10 +218,8 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>, ena
     };
 
     // Backpropagate Z (Value Target)
-    for (i, sample) in samples.iter_mut().enumerate() {
-        let white_to_move_at_sample = i % 2 == 0;
-
-        if white_to_move_at_sample {
+    for sample in samples.iter_mut() {
+        if sample.w_to_move {
             sample.value_target = final_score_white;
         } else {
             sample.value_target = -final_score_white;
