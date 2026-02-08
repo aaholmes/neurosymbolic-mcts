@@ -216,6 +216,7 @@ class Orchestrator:
             "true" if self.config.enable_koth else "false",
             str(self.config.enable_tier1).lower(),
             str(self.config.enable_material_value).lower(),
+            "first",  # log first game per generation
         ]
 
         print(f"Self-play: {self.config.games_per_generation} games, "

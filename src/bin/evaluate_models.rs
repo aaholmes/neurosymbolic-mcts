@@ -176,6 +176,7 @@ pub fn play_evaluation_game_koth(
 
     let mut board_stack = BoardStack::new();
     let mut move_count = 0;
+    let mut game_moves: Vec<String> = Vec::new();
     let mut tt_candidate = TranspositionTable::new();
     let mut tt_current = TranspositionTable::new();
 
@@ -210,6 +211,7 @@ pub fn play_evaluation_game_koth(
         match selected_move {
             None => break,
             Some(mv) => {
+                game_moves.push(mv.to_uci());
                 board_stack.make_move(mv);
                 move_count += 1;
             }
@@ -251,28 +253,52 @@ pub fn play_evaluation_game_koth(
         (false, false)
     };
 
-    if koth_white || koth_black {
-        // KOTH win: determine which side won
+    let (result, result_str) = if koth_white || koth_black {
         let white_wins = koth_white;
-        if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
+        let r = if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
             GameResult::CandidateWin
         } else {
             GameResult::CurrentWin
-        }
+        };
+        let s = if white_wins { "White wins (KOTH)" } else { "Black wins (KOTH)" };
+        (r, s)
     } else if mate {
-        // Side to move is in checkmate, so the other side won
         let white_wins = !final_board.w_to_move;
-        if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
+        let r = if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
             GameResult::CandidateWin
         } else {
             GameResult::CurrentWin
-        }
-    } else if stalemate || is_repetition || is_50_move || move_count > 200 {
-        GameResult::Draw
+        };
+        let s = if white_wins { "White wins (checkmate)" } else { "Black wins (checkmate)" };
+        (r, s)
+    } else if stalemate {
+        (GameResult::Draw, "Draw (stalemate)")
+    } else if is_repetition {
+        (GameResult::Draw, "Draw (repetition)")
+    } else if is_50_move {
+        (GameResult::Draw, "Draw (50-move rule)")
+    } else if move_count > 200 {
+        (GameResult::Draw, "Draw (move limit)")
     } else {
-        // No legal moves but not mate/stalemate — treat as draw
-        GameResult::Draw
+        (GameResult::Draw, "Draw")
+    };
+
+    // Print game moves
+    let mut move_str = String::new();
+    for (i, uci) in game_moves.iter().enumerate() {
+        if i % 2 == 0 {
+            if !move_str.is_empty() { move_str.push(' '); }
+            move_str.push_str(&format!("{}.", i / 2 + 1));
+        }
+        move_str.push(' ');
+        move_str.push_str(uci);
     }
+    let cand_color = if candidate_is_white { "White" } else { "Black" };
+    eprintln!("  [seed={}] Candidate={} | {} moves | {} -> {:?}",
+              game_seed, cand_color, game_moves.len(), result_str, result);
+    eprintln!("  {}", move_str);
+
+    result
 }
 
 /// Run a full evaluation match between two models.

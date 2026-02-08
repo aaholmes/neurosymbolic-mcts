@@ -45,6 +45,10 @@ fn main() {
     };
     let enable_tier1 = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(true);
     let enable_material = args.get(7).and_then(|s| s.parse().ok()).unwrap_or(true);
+    // "all" = log every game, "first" (default) = log game 0 only, "none" = no game logs
+    let log_games = args.get(8).map(|s| s.as_str()).unwrap_or("first");
+    let log_all = log_games == "all";
+    let log_first = log_games == "first";
 
     println!("Self-Play Generator Starting...");
     println!("   Games: {}", num_games);
@@ -54,6 +58,7 @@ fn main() {
     println!("   KOTH Mode: {}", enable_koth);
     println!("   Tier1 Gate: {}", enable_tier1);
     println!("   Material Value: {}", enable_material);
+    println!("   Log Games: {}", log_games);
 
     std::fs::create_dir_all(output_dir).unwrap();
 
@@ -61,7 +66,8 @@ fn main() {
 
     // Run games in parallel
     (0..num_games).into_par_iter().for_each(|i| {
-        let samples = play_game(i, simulations, model_path.clone(), enable_koth, enable_tier1, enable_material);
+        let verbose = log_all || (log_first && i == 0);
+        let samples = play_game(i, simulations, model_path.clone(), enable_koth, enable_tier1, enable_material, verbose);
 
         if !samples.is_empty() {
             // Save binary data
@@ -78,9 +84,10 @@ fn main() {
     });
 }
 
-fn play_game(game_num: usize, simulations: u32, model_path: Option<String>, enable_koth: bool, enable_tier1: bool, enable_material: bool) -> Vec<TrainingSample> {
+fn play_game(game_num: usize, simulations: u32, model_path: Option<String>, enable_koth: bool, enable_tier1: bool, enable_material: bool, verbose: bool) -> Vec<TrainingSample> {
     let mut rng = StdRng::seed_from_u64(game_num as u64);
     let move_gen = MoveGen::new();
+    let mut game_moves: Vec<String> = Vec::new();
 
     // Each thread gets its own NN instance, wrapped in an InferenceServer
     let inference_server: Option<Arc<InferenceServer>> = if let Some(path) = model_path {
@@ -167,6 +174,10 @@ fn play_game(game_num: usize, simulations: u32, model_path: Option<String>, enab
         let selected_move = sample_proportional(&result.root_policy, &mut rng)
             .unwrap_or_else(|| result.best_move.unwrap());
 
+        if verbose {
+            game_moves.push(selected_move.to_uci());
+        }
+
         // Reuse the subtree for the opponent's next move
         previous_root = reuse_subtree(result.root_node, selected_move);
 
@@ -233,6 +244,39 @@ fn play_game(game_num: usize, simulations: u32, model_path: Option<String>, enab
         } else {
             sample.value_target = -final_score_white;
         }
+    }
+
+    if verbose {
+        let result_str = if koth_white {
+            "White wins (KOTH)"
+        } else if koth_black {
+            "Black wins (KOTH)"
+        } else if mate {
+            if final_board.w_to_move { "Black wins (checkmate)" } else { "White wins (checkmate)" }
+        } else if is_repetition {
+            "Draw (repetition)"
+        } else if is_50_move {
+            "Draw (50-move rule)"
+        } else if _stalemate {
+            "Draw (stalemate)"
+        } else {
+            "Draw (move limit)"
+        };
+
+        // Format as numbered move pairs
+        let mut move_str = String::new();
+        for (i, uci) in game_moves.iter().enumerate() {
+            if i % 2 == 0 {
+                if !move_str.is_empty() { move_str.push(' '); }
+                move_str.push_str(&format!("{}.", i / 2 + 1));
+            }
+            move_str.push(' ');
+            move_str.push_str(uci);
+        }
+        println!("\n--- Game {} ({} moves) -> {} ---", game_num, game_moves.len(), result_str);
+        println!("{}", move_str);
+        println!("Final FEN: {}", final_board.to_fen().unwrap_or_default());
+        println!();
     }
 
     samples
