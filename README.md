@@ -28,15 +28,26 @@ Caissawary explores **how provably correct subroutines reduce the sample complex
 
 ### Running Experiments
 
-```bash
-# Full ablation study
-cargo run --release --bin run_experiments -- --config ablation
+The orchestrator supports ablation flags to selectively disable tiers, enabling controlled comparisons between pure AlphaZero and the 3-tier system:
 
-# Generate publication figures
-python scripts/analyze_results.py results/ablation_results.json
+```bash
+# Full 3-tier system (default)
+python python/orchestrate.py --max-generations 60 --enable-koth
+
+# Ablation: disable Tier 1 safety gates
+python python/orchestrate.py --max-generations 60 --disable-tier1
+
+# Ablation: disable material-aware evaluation (pure NN value)
+python python/orchestrate.py --max-generations 60 --disable-material
+
+# Overnight comparison: baseline vs. Caissawary back-to-back
+bash run_overnight.sh
+
+# Generate comparison plots from training logs
+python python/plot_training.py baseline/training_log.jsonl caissawary/training_log.jsonl
 ```
 
-See [RESEARCH.md](RESEARCH.md) for full methodology and analysis.
+Per-generation metrics (eval winrate, losses, timing) are logged to `training_log.jsonl` for analysis. See [RESEARCH.md](RESEARCH.md) for full methodology.
 
 ## Architecture
 Caissawary's intelligence stems from how it handles each node during an MCTS traversal. Instead of a single, uniform approach, its behavior adapts based on the node's state, ensuring that cheap, powerful analysis is always performed before expensive strategic evaluation.
@@ -75,6 +86,7 @@ Instead of treating all new children as equal, Caissawary injects capture orderi
 ## Tier 3: LogosNet Architecture (Optional)
 The engine supports a **Neurosymbolic** mode using the LogosNet architecture.
 
+- **Board Encoding:** 17×8×8 tensor in **side-to-move (STM) perspective**. Planes 0-5 are STM pieces (P, N, B, R, Q, K), planes 6-11 are opponent pieces, plane 12 is en passant, planes 13-16 are castling rights (STM-relative). When Black is to move, ranks are flipped so STM pieces are always at the "bottom" of the tensor. Implemented in `src/tensor.rs`, usable without the `neural` feature.
 - **Architecture:** A 6-block SE-ResNet backbone with a standard Policy head and a **Symbolic Residual Value Head**.
 - **Dynamic K:** The network learns how much to trust material imbalance. At initialization ($K_{net} = 0$), $k$ is exactly $0.5$. During training, the network adjusts $k$ to prioritize material or strategic compensation.
 - **Inference:** Uses **tch-rs** (LibTorch) for high-performance inference. At inference time, the model returns raw $V_{logit}$ (unbounded) and $k$, leaving the Rust engine to compute $\Delta M$ via material Q-search and apply the final $\tanh$.
@@ -250,6 +262,8 @@ The self-play pipeline follows AlphaZero-style training practices:
 - **MCTS tree reuse** between moves for search efficiency
 - **Shared transposition table** across moves within a game
 - **Draw detection**: 3-fold repetition, 50-move rule, and move limit
+- **Per-game RNG seeding** for deterministic replay and reproducibility
+- **Move-by-move game logging** (configurable: all/first/none) for debugging and analysis
 
 ```bash
 # Generate 100 games with 800 simulations per move, saving to 'data/'
@@ -261,7 +275,7 @@ cargo run --release --features neural --bin self_play -- 100 800 data models/lat
 
 ## Testing
 
-The project has a comprehensive test suite with **~670 tests** (570 Rust + 100 Python) organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
+The project has a comprehensive test suite with **~700 tests** (600 Rust + 100 Python) organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
 
 ```bash
 # Run the fast Rust test suite (<60s, skips perft/property/slow tests)
@@ -313,6 +327,7 @@ The unit test suite covers all core modules:
 | Training diversity | training_diversity_tests | Dirichlet noise, KOTH gating, game diversity |
 | Inference server | inference_server_tests | Mock servers, v_logit returns, batching |
 | Model evaluation | evaluate_models_tests | Game termination, color alternation, win rate, acceptance |
+| Board encoding | board_encoding_tests | STM-perspective planes, rank flipping, castling, en passant, move indexing |
 | Replay buffer | test_replay_buffer.py | FIFO eviction, manifest persistence, sampling, edge cases |
 | Training pipeline | test_train.py | Minibatch mode, LR scheduling, checkpoints, buffer chunking, loss logging |
 | Orchestrator | test_orchestrate.py | Config, state persistence, resumability, max generations, subprocess mocking |
