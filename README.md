@@ -124,6 +124,9 @@ python python/orchestrate.py \
   --optimizer muon \
   --buffer-capacity 500000
 
+# Run exactly 5 generations then stop
+python python/orchestrate.py --max-generations 5 --enable-koth
+
 # Smoke test (tiny settings)
 python python/orchestrate.py \
   --games-per-generation 2 \
@@ -151,7 +154,7 @@ python python/train.py --buffer-dir data/buffer output.pth \
   --minibatches 5000 --lr-schedule "2000:0.01,4000:0.001"
 ```
 
-Checkpoints save full training state (model weights, optimizer state, global minibatch count) for seamless resumption.
+Checkpoints save full training state (model weights, optimizer state, global minibatch count) for seamless resumption. In minibatch mode, intermediate checkpoints are saved every 200 steps and loss metrics are logged every 100 steps.
 
 ### Optimizer Selection
 
@@ -258,7 +261,7 @@ cargo run --release --features neural --bin self_play -- 100 800 data models/lat
 
 ## Testing
 
-The project has a comprehensive test suite with **~630 tests** (540 Rust + 86 Python) organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
+The project has a comprehensive test suite with **~670 tests** (570 Rust + 100 Python) organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
 
 ```bash
 # Run the fast Rust test suite (<60s, skips perft/property/slow tests)
@@ -274,7 +277,7 @@ cargo test --test unit_tests
 cargo test --test integration_tests
 cargo test --test regression_tests
 
-# Run Python training pipeline tests (86 tests)
+# Run Python training pipeline tests (100 tests)
 cd python && python -m pytest test_replay_buffer.py test_train.py test_orchestrate.py -v
 ```
 
@@ -302,6 +305,7 @@ The unit test suite covers all core modules:
 | Mate search | mate_search_tests | Mate-in-1/2, depth, node budgets |
 | Check detection | gives_check_tests | Direct/discovered check, property testing |
 | Self-play loop | self_play_loop_tests | Repetition, 50-move rule, shared TT |
+| Value targets | value_target_tests | STM perspective, checkmate/KOTH/draw outcomes, w_to_move correctness |
 | Transposition table | transposition_tests, hash_tests | Store/probe, depth replacement, Zobrist hashing |
 | History heuristic | history_tests | Scoring, accumulation, saturation |
 | Visualization | graphviz_tests, search_logger_tests | DOT export, verbosity, node coloring |
@@ -310,8 +314,8 @@ The unit test suite covers all core modules:
 | Inference server | inference_server_tests | Mock servers, v_logit returns, batching |
 | Model evaluation | evaluate_models_tests | Game termination, color alternation, win rate, acceptance |
 | Replay buffer | test_replay_buffer.py | FIFO eviction, manifest persistence, sampling, edge cases |
-| Training pipeline | test_train.py | Minibatch mode, LR scheduling, checkpoints, buffer loading |
-| Orchestrator | test_orchestrate.py | Config, state persistence, resumability, subprocess mocking |
+| Training pipeline | test_train.py | Minibatch mode, LR scheduling, checkpoints, buffer chunking, loss logging |
+| Orchestrator | test_orchestrate.py | Config, state persistence, resumability, max generations, subprocess mocking |
 
 ## Visualization & Debugging
 Caissawary includes a powerful **MCTS Inspector** tool to visualize the search tree and debug its state-dependent logic. This tool generates Graphviz DOT files that color-code nodes based on their origin (Tier 1, 2, or 3).

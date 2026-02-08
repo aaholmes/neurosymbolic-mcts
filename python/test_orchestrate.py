@@ -495,5 +495,103 @@ class TestOrchestratorExtended:
         assert results["draws"] == 0
 
 
+class TestMaxGenerations:
+    def test_config_default_max_generations_is_zero(self):
+        cfg = TrainingConfig()
+        assert cfg.max_generations == 0
+
+    def test_config_from_args_max_generations(self):
+        test_args = ["orchestrate.py", "--max-generations", "5"]
+        with patch("sys.argv", test_args):
+            cfg = TrainingConfig.from_args()
+        assert cfg.max_generations == 5
+
+    def test_config_from_args_max_generations_default(self):
+        test_args = ["orchestrate.py"]
+        with patch("sys.argv", test_args):
+            cfg = TrainingConfig.from_args()
+        assert cfg.max_generations == 0
+
+    def test_loop_terminates_at_max_generations(self, tmp_workspace):
+        """Orchestrator should run exactly max_generations iterations."""
+        cfg = TrainingConfig(
+            weights_dir=os.path.join(tmp_workspace, "weights"),
+            data_dir=os.path.join(tmp_workspace, "data"),
+            buffer_dir=os.path.join(tmp_workspace, "buffer"),
+            log_file=os.path.join(tmp_workspace, "log.jsonl"),
+            max_generations=3,
+            games_per_generation=2,
+            simulations_per_move=10,
+            eval_games=2,
+            eval_simulations=10,
+        )
+        orch = Orchestrator(cfg)
+        generations_run = []
+
+        # Mock all subprocess calls and track generations
+        with patch.object(orch, 'run_self_play', return_value=tmp_workspace) as mock_sp, \
+             patch.object(orch, 'update_buffer', return_value=100) as mock_buf, \
+             patch.object(orch, 'run_training', return_value=("c.pth", "c.pt")) as mock_train, \
+             patch.object(orch, 'run_evaluation', return_value=(False, {"wins": 0, "losses": 0, "draws": 0, "winrate": 0.0})) as mock_eval:
+
+            orch.initialize_gen0()
+            orch.save_state()
+
+            # Run the main loop
+            orch.run()
+
+            # Should have run exactly 3 generations
+            assert mock_sp.call_count == 3
+            assert mock_train.call_count == 3
+            assert mock_eval.call_count == 3
+
+    def test_loop_runs_one_generation(self, tmp_workspace):
+        """max_generations=1 should run exactly one iteration."""
+        cfg = TrainingConfig(
+            weights_dir=os.path.join(tmp_workspace, "weights"),
+            data_dir=os.path.join(tmp_workspace, "data"),
+            buffer_dir=os.path.join(tmp_workspace, "buffer"),
+            log_file=os.path.join(tmp_workspace, "log.jsonl"),
+            max_generations=1,
+        )
+        orch = Orchestrator(cfg)
+
+        with patch.object(orch, 'run_self_play', return_value=tmp_workspace), \
+             patch.object(orch, 'update_buffer', return_value=100), \
+             patch.object(orch, 'run_training', return_value=("c.pth", "c.pt")), \
+             patch.object(orch, 'run_evaluation', return_value=(False, {"wins": 0, "losses": 0, "draws": 0, "winrate": 0.0})) as mock_eval:
+
+            orch.initialize_gen0()
+            orch.save_state()
+            orch.run()
+            assert mock_eval.call_count == 1
+
+    def test_loop_respects_resume_with_max_generations(self, tmp_workspace):
+        """When resuming, max_generations counts from the resume point."""
+        cfg = TrainingConfig(
+            weights_dir=os.path.join(tmp_workspace, "weights"),
+            data_dir=os.path.join(tmp_workspace, "data"),
+            buffer_dir=os.path.join(tmp_workspace, "buffer"),
+            log_file=os.path.join(tmp_workspace, "log.jsonl"),
+            max_generations=2,
+            resume=True,
+        )
+        orch = Orchestrator(cfg)
+
+        # Pre-seed state as if generation 5 already completed
+        orch.initialize_gen0()
+        orch.state.generation = 5
+        orch.save_state()
+
+        with patch.object(orch, 'run_self_play', return_value=tmp_workspace), \
+             patch.object(orch, 'update_buffer', return_value=100), \
+             patch.object(orch, 'run_training', return_value=("c.pth", "c.pt")), \
+             patch.object(orch, 'run_evaluation', return_value=(False, {"wins": 0, "losses": 0, "draws": 0, "winrate": 0.0})) as mock_eval:
+
+            orch.run()
+            # Should run generations 6 and 7 (2 total)
+            assert mock_eval.call_count == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

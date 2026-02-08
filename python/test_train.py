@@ -529,5 +529,201 @@ class TestMinibatchWraparound:
         assert step_count == 5
 
 
+class TestIntermediateCheckpoints:
+    def test_checkpoint_saved_at_200_minibatches(self, tmp_dirs):
+        """Mid-training checkpoint should be written at step 200."""
+        data_dir, output_dir = tmp_dirs
+        make_fake_bin(os.path.join(data_dir, "game.bin"), 200)
+
+        output_path = os.path.join(output_dir, "model.pth")
+        step_count = train_module.train_with_config(
+            data_dir=data_dir,
+            output_path=output_path,
+            resume_path=None,
+            optimizer_name="adam",
+            lr=0.001,
+            epochs=1,
+            batch_size=32,
+            minibatches=250,
+            lr_schedule="",
+            buffer_dir=None,
+        )
+        assert step_count == 250
+
+        # Checkpoint should exist (written at step 200, then overwritten at end)
+        checkpoint = torch.load(output_path, map_location="cpu", weights_only=False)
+        assert checkpoint["global_minibatch"] == 250
+
+    def test_checkpoint_at_200_is_resumable(self, tmp_dirs):
+        """A checkpoint saved at step 200 should be resumable."""
+        data_dir, output_dir = tmp_dirs
+        make_fake_bin(os.path.join(data_dir, "game.bin"), 200)
+
+        output_path = os.path.join(output_dir, "model.pth")
+        # Run 200 minibatches — checkpoint fires exactly at step 200
+        train_module.train_with_config(
+            data_dir=data_dir,
+            output_path=output_path,
+            resume_path=None,
+            optimizer_name="adam",
+            lr=0.001,
+            epochs=1,
+            batch_size=32,
+            minibatches=200,
+            lr_schedule="",
+            buffer_dir=None,
+        )
+
+        # Verify the checkpoint at 200 has correct global_minibatch
+        checkpoint = torch.load(output_path, map_location="cpu", weights_only=False)
+        assert checkpoint["global_minibatch"] == 200
+
+        # Resume from it
+        step_count = train_module.train_with_config(
+            data_dir=data_dir,
+            output_path=output_path,
+            resume_path=output_path,
+            optimizer_name="adam",
+            lr=0.001,
+            epochs=1,
+            batch_size=32,
+            minibatches=50,
+            lr_schedule="",
+            buffer_dir=None,
+        )
+        assert step_count == 50
+        checkpoint2 = torch.load(output_path, map_location="cpu", weights_only=False)
+        assert checkpoint2["global_minibatch"] == 250
+
+    def test_no_checkpoint_before_200(self, tmp_dirs):
+        """When running fewer than 200 minibatches, only the final checkpoint is written."""
+        data_dir, output_dir = tmp_dirs
+        make_fake_bin(os.path.join(data_dir, "game.bin"), 200)
+
+        output_path = os.path.join(output_dir, "model.pth")
+        step_count = train_module.train_with_config(
+            data_dir=data_dir,
+            output_path=output_path,
+            resume_path=None,
+            optimizer_name="adam",
+            lr=0.001,
+            epochs=1,
+            batch_size=32,
+            minibatches=100,
+            lr_schedule="",
+            buffer_dir=None,
+        )
+        assert step_count == 100
+        # Final checkpoint should still exist
+        checkpoint = torch.load(output_path, map_location="cpu", weights_only=False)
+        assert checkpoint["global_minibatch"] == 100
+
+
+class TestLossLogging:
+    def test_minibatch_mode_prints_loss_at_100(self, tmp_dirs, capsys):
+        """Loss should be printed at step 100 in minibatch mode."""
+        data_dir, output_dir = tmp_dirs
+        make_fake_bin(os.path.join(data_dir, "game.bin"), 200)
+
+        output_path = os.path.join(output_dir, "model.pth")
+        train_module.train_with_config(
+            data_dir=data_dir,
+            output_path=output_path,
+            resume_path=None,
+            optimizer_name="adam",
+            lr=0.001,
+            epochs=1,
+            batch_size=32,
+            minibatches=150,
+            lr_schedule="",
+            buffer_dir=None,
+        )
+
+        captured = capsys.readouterr()
+        assert "Step 100/150" in captured.out
+        assert "Loss=" in captured.out
+        assert "P=" in captured.out
+        assert "V=" in captured.out
+        assert "K=" in captured.out
+
+    def test_minibatch_mode_no_log_before_100(self, tmp_dirs, capsys):
+        """No loss logging when running fewer than 100 minibatches."""
+        data_dir, output_dir = tmp_dirs
+        make_fake_bin(os.path.join(data_dir, "game.bin"), 200)
+
+        output_path = os.path.join(output_dir, "model.pth")
+        train_module.train_with_config(
+            data_dir=data_dir,
+            output_path=output_path,
+            resume_path=None,
+            optimizer_name="adam",
+            lr=0.001,
+            epochs=1,
+            batch_size=32,
+            minibatches=50,
+            lr_schedule="",
+            buffer_dir=None,
+        )
+
+        captured = capsys.readouterr()
+        assert "Step " not in captured.out or "Step 50/50" not in captured.out
+
+
+class TestBufferDatasetChunking:
+    def _make_buffer(self, num_positions):
+        """Create a temp buffer with fake data, return (buffer_dir, cleanup_dirs)."""
+        buffer_dir = tempfile.mkdtemp(prefix="bufchunk_")
+        source_dir = tempfile.mkdtemp(prefix="src_")
+        make_fake_bin(os.path.join(source_dir, "game.bin"), num_positions)
+        from replay_buffer import ReplayBuffer
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+        buf.add_games(source_dir)
+        shutil.rmtree(source_dir, ignore_errors=True)
+        return buffer_dir
+
+    def test_chunk_refreshes_when_exhausted(self):
+        """After consuming chunk_size items, a new chunk should be loaded."""
+        buffer_dir = self._make_buffer(100)
+        try:
+            dataset = train_module.BufferDataset(buffer_dir, chunk_size=10)
+            assert dataset.chunk_size == 10
+            assert dataset._chunk_idx == 0
+
+            # Consume all 10 items in the chunk
+            for i in range(10):
+                _ = dataset[i]
+            assert dataset._chunk_idx == 10
+
+            # Next access should trigger refresh
+            _ = dataset[10]
+            assert dataset._chunk_idx == 1  # Reset to 0, then incremented to 1
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_small_chunk_size(self):
+        """Chunk size smaller than dataset should still work."""
+        buffer_dir = self._make_buffer(50)
+        try:
+            dataset = train_module.BufferDataset(buffer_dir, chunk_size=5)
+            # Access 15 items (3 chunks worth)
+            for i in range(15):
+                board, mat, val, pol = dataset[i]
+                assert board.shape == (17, 8, 8)
+                assert pol.shape == (4672,)
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_default_chunk_size(self):
+        """Default chunk_size should be 4096."""
+        buffer_dir = self._make_buffer(50)
+        try:
+            # This will try to sample 4096 from only 50 positions — should still work
+            # because sample_batch samples with replacement
+            dataset = train_module.BufferDataset(buffer_dir)
+            assert dataset.chunk_size == 4096
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

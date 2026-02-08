@@ -37,6 +37,7 @@ mod evaluate_models_tests;
 mod inference_server_tests;
 mod tactical_detection_tests;
 mod board_encoding_tests;
+mod value_target_tests;
 
 // Re-export common utilities
 mod common {
