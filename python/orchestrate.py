@@ -247,8 +247,9 @@ class Orchestrator:
         cmd = [
             "python3", "python/train.py",
             "--buffer-dir", self.config.buffer_dir,
-            candidate_pth,
-            self.state.current_best_pth,
+            self.config.buffer_dir,   # data_dir (ignored when --buffer-dir set)
+            candidate_pth,             # output_path
+            self.state.current_best_pth,  # resume_path
             "--optimizer", self.config.optimizer,
             "--lr", str(lr),
             "--batch-size", str(self.config.batch_size),
