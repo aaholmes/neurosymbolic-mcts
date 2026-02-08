@@ -784,6 +784,143 @@ fn test_all_tiers_disabled() {
     assert_eq!(stats.nn_evaluations, 0);
 }
 
+// === InferenceServer integration tests ===
+
+#[test]
+fn test_mock_inference_server_used_in_search() {
+    use kingfisher::mcts::InferenceServer;
+    use std::sync::Arc;
+
+    let move_gen = MoveGen::new();
+    let board = Board::new();
+
+    let server = InferenceServer::new_mock_uniform();
+    let config = TacticalMctsConfig {
+        max_iterations: 50,
+        time_limit: Duration::from_secs(10),
+        inference_server: Some(Arc::new(server)),
+        enable_tier3_neural: true,
+        use_neural_policy: true,
+        ..Default::default()
+    };
+
+    let (best_move, stats, _) = tactical_mcts_search(board, &move_gen, &mut None, config);
+
+    assert!(best_move.is_some(), "Should return a move with mock inference server");
+    assert!(stats.nn_evaluations > 0,
+        "Should have NN evaluations when inference server is provided, got {}", stats.nn_evaluations);
+}
+
+#[test]
+fn test_mock_uniform_matches_classical() {
+    use kingfisher::mcts::InferenceServer;
+    use std::sync::Arc;
+
+    let move_gen = MoveGen::new();
+    // Use a position with clear material advantage so Q-values are deterministic
+    let board = Board::new_from_fen("4k3/8/8/3Q4/8/8/8/4K3 w - - 0 1");
+
+    // Classical fallback (no server)
+    let config_classical = TacticalMctsConfig {
+        max_iterations: 100,
+        time_limit: Duration::from_secs(10),
+        enable_tier3_neural: false,
+        ..Default::default()
+    };
+
+    let (move_classical, _, root_classical) = tactical_mcts_search(
+        board.clone(), &move_gen, &mut None, config_classical,
+    );
+
+    // Mock uniform server (v_logit=0, k=0.5 — identical to classical fallback)
+    let server = InferenceServer::new_mock_uniform();
+    let config_nn = TacticalMctsConfig {
+        max_iterations: 100,
+        time_limit: Duration::from_secs(10),
+        inference_server: Some(Arc::new(server)),
+        enable_tier3_neural: true,
+        use_neural_policy: true,
+        ..Default::default()
+    };
+
+    let (move_nn, stats_nn, root_nn) = tactical_mcts_search(
+        board, &move_gen, &mut None, config_nn,
+    );
+
+    // Both should produce the same best move (same evaluation)
+    assert_eq!(move_classical, move_nn,
+        "Uniform mock (v_logit=0) should match classical fallback best move");
+
+    // Q-values should be similar
+    let q_classical = {
+        let r = root_classical.borrow();
+        if r.visits > 0 { -(r.total_value / r.visits as f64) } else { 0.0 }
+    };
+    let q_nn = {
+        let r = root_nn.borrow();
+        if r.visits > 0 { -(r.total_value / r.visits as f64) } else { 0.0 }
+    };
+
+    assert!((q_classical - q_nn).abs() < 0.15,
+        "Q-values should be similar: classical={:.4}, nn={:.4}", q_classical, q_nn);
+
+    // NN path should have nn_evaluations > 0
+    assert!(stats_nn.nn_evaluations > 0, "NN path should track evaluations");
+}
+
+#[test]
+fn test_biased_mock_changes_evaluation() {
+    use kingfisher::mcts::InferenceServer;
+    use std::sync::Arc;
+
+    let move_gen = MoveGen::new();
+    // Equal material position where bias should shift evaluation
+    let board = Board::new_from_fen("4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1");
+
+    // Strongly positive bias (thinks position is great for STM)
+    let server_pos = InferenceServer::new_mock_biased(2.0);
+    let config_pos = TacticalMctsConfig {
+        max_iterations: 50,
+        time_limit: Duration::from_secs(10),
+        inference_server: Some(Arc::new(server_pos)),
+        enable_tier3_neural: true,
+        use_neural_policy: true,
+        ..Default::default()
+    };
+
+    let (_, _, root_pos) = tactical_mcts_search(
+        board.clone(), &move_gen, &mut None, config_pos,
+    );
+
+    // Strongly negative bias (thinks position is terrible for STM)
+    let server_neg = InferenceServer::new_mock_biased(-2.0);
+    let config_neg = TacticalMctsConfig {
+        max_iterations: 50,
+        time_limit: Duration::from_secs(10),
+        inference_server: Some(Arc::new(server_neg)),
+        enable_tier3_neural: true,
+        use_neural_policy: true,
+        ..Default::default()
+    };
+
+    let (_, _, root_neg) = tactical_mcts_search(
+        board, &move_gen, &mut None, config_neg,
+    );
+
+    let q_pos = {
+        let r = root_pos.borrow();
+        if r.visits > 0 { -(r.total_value / r.visits as f64) } else { 0.0 }
+    };
+    let q_neg = {
+        let r = root_neg.borrow();
+        if r.visits > 0 { -(r.total_value / r.visits as f64) } else { 0.0 }
+    };
+
+    // Different biases should produce different Q-values, proving the NN is queried
+    assert!((q_pos - q_neg).abs() > 0.05,
+        "Different biases should produce different Q-values: pos={:.4}, neg={:.4}", q_pos, q_neg);
+}
+
 // === Edge cases ===
 
 #[test]

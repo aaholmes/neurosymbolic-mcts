@@ -21,6 +21,11 @@ fn play_test_game(simulations: u32) -> GameResult {
 
 /// Play a game from a custom starting position.
 fn play_test_game_fen(simulations: u32, fen: &str) -> GameResult {
+    play_test_game_fen_koth(simulations, fen, false)
+}
+
+/// Play a game from a custom starting position with optional KOTH mode.
+fn play_test_game_fen_koth(simulations: u32, fen: &str, enable_koth: bool) -> GameResult {
     let move_gen = MoveGen::new();
 
     let config = TacticalMctsConfig {
@@ -33,6 +38,7 @@ fn play_test_game_fen(simulations: u32, fen: &str) -> GameResult {
         logger: None,
         dirichlet_alpha: 0.0,
         dirichlet_epsilon: 0.0,
+        enable_koth,
         ..Default::default()
     };
 
@@ -40,6 +46,7 @@ fn play_test_game_fen(simulations: u32, fen: &str) -> GameResult {
     let mut move_count = 0;
     let mut nn: Option<NeuralNetPolicy> = None;
     let mut tt = TranspositionTable::new();
+    let mut koth_winner: Option<bool> = None; // Some(true) = white won, Some(false) = black won
 
     loop {
         let board = board_stack.current_state().clone();
@@ -60,6 +67,19 @@ fn play_test_game_fen(simulations: u32, fen: &str) -> GameResult {
             }
         }
 
+        // Check KOTH win after each move
+        if enable_koth {
+            let (white_won, black_won) = board_stack.current_state().is_koth_win();
+            if white_won {
+                koth_winner = Some(true);
+                break;
+            }
+            if black_won {
+                koth_winner = Some(false);
+                break;
+            }
+        }
+
         if board_stack.is_draw_by_repetition() {
             break;
         }
@@ -74,6 +94,11 @@ fn play_test_game_fen(simulations: u32, fen: &str) -> GameResult {
         if mate || stalemate {
             break;
         }
+    }
+
+    // Check KOTH winner first
+    if let Some(white_won) = koth_winner {
+        return if white_won { GameResult::WhiteWin } else { GameResult::BlackWin };
     }
 
     let final_board = board_stack.current_state();
@@ -353,4 +378,47 @@ fn test_two_engine_game_with_different_tt() {
         board.clone(), &move_gen, &mut nn2, config.clone(), &mut tt2,
     );
     assert!(move2.is_some());
+}
+
+// ---- KOTH game termination tests ----
+
+#[test]
+fn test_koth_win_terminates_game() {
+    // White king on d3, one move from center (d4). With KOTH enabled and enough
+    // simulations, MCTS should move king to center and the game should end as WhiteWin.
+    // Position: White king on d3, Black king on a7 (far from center).
+    let result = play_test_game_fen_koth(
+        100,
+        "3N4/k6p/p6P/2P1R3/2n3P1/P1rK4/8/5B2 w - - 4 47",
+        true,
+    );
+    assert_eq!(result, GameResult::WhiteWin,
+        "KOTH win-in-1 should terminate as WhiteWin, got {:?}", result);
+}
+
+#[test]
+fn test_koth_win_correct_outcome_black() {
+    // Black king on e5, one move from center (d4/d5/e4). White king far away.
+    // Black to move should win immediately.
+    let result = play_test_game_fen_koth(
+        100,
+        "8/8/8/4k3/8/8/8/K7 b - - 0 1",
+        true,
+    );
+    assert_eq!(result, GameResult::BlackWin,
+        "Black king near center should win KOTH, got {:?}", result);
+}
+
+#[test]
+fn test_koth_disabled_no_early_termination() {
+    // Same position as above but with KOTH disabled - should NOT end as KOTH win
+    // (will end as draw due to move limit or 50-move rule since it's KvK)
+    let result = play_test_game_fen_koth(
+        50,
+        "8/8/8/4k3/8/8/8/K7 b - - 0 1",
+        false,
+    );
+    // Without KOTH, KvK is a draw (insufficient material or will hit move/50-move limit)
+    assert_ne!(result, GameResult::BlackWin,
+        "Without KOTH, king reaching center should not be a win");
 }

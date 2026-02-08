@@ -8,7 +8,7 @@ use kingfisher::boardstack::BoardStack;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::mcts::{
     tactical_mcts_search_for_training_with_reuse, reuse_subtree,
-    TacticalMctsConfig,
+    TacticalMctsConfig, InferenceServer,
 };
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::move_types::Move;
@@ -18,7 +18,7 @@ use kingfisher::transposition::TranspositionTable;
 use rand::Rng;
 use std::fs::File;
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rayon::prelude::*;
 
@@ -75,18 +75,20 @@ fn main() {
 fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>, enable_koth: bool) -> Vec<TrainingSample> {
     let move_gen = MoveGen::new();
 
-    // Each thread gets its own NN instance
-    let mut nn_policy = if let Some(path) = model_path {
+    // Each thread gets its own NN instance, wrapped in an InferenceServer
+    let inference_server: Option<Arc<InferenceServer>> = if let Some(path) = model_path {
         let mut nn = NeuralNetPolicy::new();
         if let Err(e) = nn.load(&path) {
             eprintln!("Failed to load model from {}: {}", path, e);
             None
         } else {
-            Some(nn)
+            Some(Arc::new(InferenceServer::new(nn, 1)))
         }
     } else {
         None
     };
+
+    let has_nn = inference_server.is_some();
 
     // Shared config and transposition table across moves (Phase 2/3 optimization)
     let config = TacticalMctsConfig {
@@ -94,12 +96,13 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>, ena
         time_limit: Duration::from_secs(60),
         mate_search_depth: 5,
         exploration_constant: 1.414,
-        use_neural_policy: false,
-        inference_server: None,
+        use_neural_policy: has_nn,
+        inference_server,
         logger: None,
         dirichlet_alpha: 0.3,
         dirichlet_epsilon: 0.25,
         enable_koth,
+        enable_tier3_neural: has_nn,
         ..Default::default()
     };
     let mut transposition_table = TranspositionTable::new();
@@ -119,7 +122,7 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>, ena
         let result = tactical_mcts_search_for_training_with_reuse(
             board.clone(),
             &move_gen,
-            &mut nn_policy,
+            &mut None,
             config.clone(),
             reused_root,
             &mut transposition_table,
@@ -161,6 +164,14 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>, ena
         board_stack.make_move(selected_move);
         move_count += 1;
 
+        // Check KOTH win after each move
+        if enable_koth {
+            let (white_won, black_won) = board_stack.current_state().is_koth_win();
+            if white_won || black_won {
+                break;
+            }
+        }
+
         // Check for draws (Phase 3: repetition + 50-move rule)
         if board_stack.is_draw_by_repetition() {
             break; // 3-fold repetition draw
@@ -183,8 +194,17 @@ fn play_game(_game_num: usize, simulations: u32, model_path: Option<String>, ena
     let (mate, _stalemate) = final_board.is_checkmate_or_stalemate(&move_gen);
     let is_repetition = board_stack.is_draw_by_repetition();
     let is_50_move = final_board.halfmove_clock() >= 100;
+    let (koth_white, koth_black) = if enable_koth {
+        final_board.is_koth_win()
+    } else {
+        (false, false)
+    };
 
-    let final_score_white = if mate {
+    let final_score_white = if koth_white {
+        1.0 // White wins by KOTH
+    } else if koth_black {
+        -1.0 // Black wins by KOTH
+    } else if mate {
         if final_board.w_to_move {
             -1.0 // Black wins
         } else {

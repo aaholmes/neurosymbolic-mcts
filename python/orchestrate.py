@@ -268,6 +268,8 @@ class Orchestrator:
             str(self.config.eval_simulations),
             "--threshold", str(self.config.acceptance_threshold),
         ]
+        if self.config.enable_koth:
+            cmd.append("--enable-koth")
 
         print(f"Evaluating: {self.config.eval_games} games, "
               f"threshold={self.config.acceptance_threshold}")

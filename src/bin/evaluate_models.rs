@@ -7,9 +7,10 @@
 
 use kingfisher::boardstack::BoardStack;
 use kingfisher::move_generation::MoveGen;
-use kingfisher::mcts::{tactical_mcts_search_with_tt, TacticalMctsConfig};
+use kingfisher::mcts::{tactical_mcts_search_with_tt, TacticalMctsConfig, InferenceServer};
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::transposition::TranspositionTable;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Result of a single evaluation game.
@@ -50,19 +51,54 @@ pub fn play_evaluation_game(
     candidate_is_white: bool,
     simulations: u32,
 ) -> GameResult {
+    play_evaluation_game_koth(candidate_nn, current_nn, candidate_is_white, simulations, false)
+}
+
+pub fn play_evaluation_game_koth(
+    candidate_nn: &mut Option<NeuralNetPolicy>,
+    current_nn: &mut Option<NeuralNetPolicy>,
+    candidate_is_white: bool,
+    simulations: u32,
+    enable_koth: bool,
+) -> GameResult {
     let move_gen = MoveGen::new();
 
-    let config = TacticalMctsConfig {
+    // Create InferenceServers from NNs (takes ownership via .take())
+    let candidate_server: Option<Arc<InferenceServer>> = candidate_nn.take()
+        .map(|nn| Arc::new(InferenceServer::new(nn, 1)));
+    let current_server: Option<Arc<InferenceServer>> = current_nn.take()
+        .map(|nn| Arc::new(InferenceServer::new(nn, 1)));
+
+    let candidate_has_nn = candidate_server.is_some();
+    let current_has_nn = current_server.is_some();
+
+    let config_candidate = TacticalMctsConfig {
         max_iterations: simulations,
         time_limit: Duration::from_secs(120),
         mate_search_depth: 5,
         exploration_constant: 1.414,
-        use_neural_policy: false,
-        inference_server: None,
+        use_neural_policy: candidate_has_nn,
+        inference_server: candidate_server,
         logger: None,
-        // No noise for evaluation
         dirichlet_alpha: 0.0,
         dirichlet_epsilon: 0.0,
+        enable_koth,
+        enable_tier3_neural: candidate_has_nn,
+        ..Default::default()
+    };
+
+    let config_current = TacticalMctsConfig {
+        max_iterations: simulations,
+        time_limit: Duration::from_secs(120),
+        mate_search_depth: 5,
+        exploration_constant: 1.414,
+        use_neural_policy: current_has_nn,
+        inference_server: current_server,
+        logger: None,
+        dirichlet_alpha: 0.0,
+        dirichlet_epsilon: 0.0,
+        enable_koth,
+        enable_tier3_neural: current_has_nn,
         ..Default::default()
     };
 
@@ -83,16 +119,16 @@ pub fn play_evaluation_game(
             tactical_mcts_search_with_tt(
                 board.clone(),
                 &move_gen,
-                candidate_nn,
-                config.clone(),
+                &mut None,
+                config_candidate.clone(),
                 &mut tt_candidate,
             )
         } else {
             tactical_mcts_search_with_tt(
                 board.clone(),
                 &move_gen,
-                current_nn,
-                config.clone(),
+                &mut None,
+                config_current.clone(),
                 &mut tt_current,
             )
         };
@@ -102,6 +138,14 @@ pub fn play_evaluation_game(
             Some(mv) => {
                 board_stack.make_move(mv);
                 move_count += 1;
+            }
+        }
+
+        // Check KOTH win after each move
+        if enable_koth {
+            let (white_won, black_won) = board_stack.current_state().is_koth_win();
+            if white_won || black_won {
+                break;
             }
         }
 
@@ -127,8 +171,21 @@ pub fn play_evaluation_game(
     let (mate, stalemate) = final_board.is_checkmate_or_stalemate(&move_gen);
     let is_repetition = board_stack.is_draw_by_repetition();
     let is_50_move = final_board.halfmove_clock() >= 100;
+    let (koth_white, koth_black) = if enable_koth {
+        final_board.is_koth_win()
+    } else {
+        (false, false)
+    };
 
-    if mate {
+    if koth_white || koth_black {
+        // KOTH win: determine which side won
+        let white_wins = koth_white;
+        if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
+            GameResult::CandidateWin
+        } else {
+            GameResult::CurrentWin
+        }
+    } else if mate {
         // Side to move is in checkmate, so the other side won
         let white_wins = !final_board.w_to_move;
         if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
@@ -150,6 +207,17 @@ pub fn evaluate_models(
     current_path: &str,
     num_games: u32,
     simulations: u32,
+) -> EvalResults {
+    evaluate_models_koth(candidate_path, current_path, num_games, simulations, false)
+}
+
+/// Run a full evaluation match between two models with optional KOTH mode.
+pub fn evaluate_models_koth(
+    candidate_path: &str,
+    current_path: &str,
+    num_games: u32,
+    simulations: u32,
+    enable_koth: bool,
 ) -> EvalResults {
     let mut results = EvalResults {
         wins: 0,
@@ -180,11 +248,12 @@ pub fn evaluate_models(
             Some(nn)
         };
 
-        let result = play_evaluation_game(
+        let result = play_evaluation_game_koth(
             &mut candidate_nn,
             &mut current_nn,
             candidate_is_white,
             simulations,
+            enable_koth,
         );
 
         match result {
@@ -229,10 +298,12 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.55);
 
-    eprintln!("Evaluating: {} vs {}", candidate_path, current_path);
-    eprintln!("Games: {}, Sims: {}, Threshold: {}", num_games, simulations, threshold);
+    let enable_koth = args.iter().any(|a| a == "--enable-koth");
 
-    let results = evaluate_models(candidate_path, current_path, num_games, simulations);
+    eprintln!("Evaluating: {} vs {}", candidate_path, current_path);
+    eprintln!("Games: {}, Sims: {}, Threshold: {}, KOTH: {}", num_games, simulations, threshold, enable_koth);
+
+    let results = evaluate_models_koth(candidate_path, current_path, num_games, simulations, enable_koth);
     let win_rate = results.win_rate();
     let accepted = results.accepted(threshold);
 
