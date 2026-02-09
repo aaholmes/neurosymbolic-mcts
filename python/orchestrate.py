@@ -29,8 +29,9 @@ class TrainingConfig:
     enable_material_value: bool = True
     log_games: str = "first"
 
-    # Replay buffer
-    buffer_capacity: int = 500_000
+    # Replay buffer (sliding window — old data evicted FIFO)
+    # Default ~5 generations at 100 games/gen × ~55 positions/game
+    buffer_capacity: int = 30_000
     buffer_dir: str = "data/buffer"
 
     # Training
@@ -225,10 +226,6 @@ class Orchestrator:
             self.state.current_best_pt = gen_pt
             self.state.current_best_pth = gen_pth
 
-            # Clear buffer so next generations train only on data from the new best model
-            self.clear_buffer()
-            self.state.reset_optimizer_next = True
-
             # Update latest symlink
             latest_pt = os.path.join(self.config.weights_dir, "latest.pt")
             if os.path.exists(latest_pt) or os.path.islink(latest_pt):
@@ -338,18 +335,7 @@ class Orchestrator:
         else:
             minibatches = self.config.minibatches_per_generation
 
-        # Scale LR by buffer fullness to reduce cumulative exposure of early data.
-        # After a buffer clear, the buffer is small and each position will be
-        # revisited in many future generations. A lower LR limits how much the
-        # model over-fits to this small, repeatedly-seen dataset.
-        base_lr = self.config.initial_lr
-        full_buffer_target = self.config.minibatches_per_generation * self.config.batch_size
-        if buffer_positions is not None and buffer_positions > 0:
-            lr_scale = min(1.0, buffer_positions / full_buffer_target)
-            lr_scale = max(0.1, lr_scale)  # floor at 10% of base LR
-        else:
-            lr_scale = 1.0
-        lr = base_lr * lr_scale
+        lr = self.config.initial_lr
 
         cmd = [
             "python3", "python/train.py",
@@ -368,14 +354,8 @@ class Orchestrator:
         if not self.config.enable_material_value:
             cmd.append("--disable-material")
 
-        resetting_optimizer = self.state.reset_optimizer_next
-        if resetting_optimizer:
-            cmd.append("--reset-optimizer")
-            self.state.reset_optimizer_next = False
-
         print(f"Training: {minibatches} minibatches, "
-              f"optimizer={self.config.optimizer}, lr={lr:.4f}"
-              + (" (optimizer reset)" if resetting_optimizer else ""))
+              f"optimizer={self.config.optimizer}, lr={lr}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         # Save full training output
@@ -385,8 +365,8 @@ class Orchestrator:
         with open(stats_path, "w") as f:
             f.write(result.stdout)
 
-        # Store actual minibatches and LR used for logging
-        self._last_training_losses = {"actual_minibatches": minibatches, "lr": lr}
+        # Store actual minibatches used for logging
+        self._last_training_losses = {"actual_minibatches": minibatches}
         for line in reversed(result.stdout.splitlines()):
             if "Loss=" in line and "P=" in line and "V=" in line:
                 import re
@@ -593,7 +573,6 @@ class Orchestrator:
                 log["training_value_loss"] = self._last_training_losses.get("value_loss")
                 log["training_k_mean"] = self._last_training_losses.get("k_mean")
                 log["actual_minibatches"] = self._last_training_losses.get("actual_minibatches")
-                log["training_lr"] = self._last_training_losses.get("lr")
             self.log_entry(log)
 
             # 7. Write overview file
