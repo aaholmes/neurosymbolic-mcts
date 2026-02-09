@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -99,6 +100,42 @@ def plot_k_evolution(ax, baseline, caissawary):
     ax.legend(fontsize=8)
 
 
+def compute_cumulative_elo(entries):
+    """Track best model's Elo over generations.
+    Gen 0 = Elo 0. Each eval match gives an Elo diff vs current best.
+    On acceptance, best Elo jumps up. On rejection, stays flat."""
+    elos = [0.0]  # gen 0
+    current_best_elo = 0.0
+    for e in entries:
+        wins, losses, draws = e["eval_wins"], e["eval_losses"], e["eval_draws"]
+        total = wins + losses + draws
+        score = (wins + 0.5 * draws) / total
+        score = max(0.01, min(0.99, score))  # clamp to avoid log(0)
+        elo_diff = 400 * math.log10(score / (1 - score))
+        if e["accepted"]:
+            current_best_elo += elo_diff
+        elos.append(current_best_elo)
+    return elos
+
+
+def plot_elo(ax, baseline, caissawary):
+    for data, label, color in [(baseline, "Baseline", "tab:blue"), (caissawary, "Caissawary", "tab:orange")]:
+        if not data:
+            continue
+        elos = compute_cumulative_elo(data)
+        gens = list(range(len(elos)))
+        ax.step(gens, elos, where="post", label=label, color=color, linewidth=1.5)
+        # Mark accepted gens with dots
+        for i, e in enumerate(data):
+            if e["accepted"]:
+                ax.plot(i + 1, elos[i + 1], "o", color=color, markersize=4)
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("Cumulative Elo")
+    ax.set_title("Self-Play Elo (Cumulative)")
+    ax.legend(fontsize=8)
+    ax.axhline(y=0, color="lightgray", linestyle=":", alpha=0.5)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Plot training comparison")
     parser.add_argument("--baseline", type=str, default=None, help="Baseline log JSONL")
@@ -115,13 +152,15 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(14, 15))
     fig.suptitle("Training Comparison: Pure AlphaZero vs Caissawary", fontsize=14)
 
     plot_winrate(axes[0, 0], baseline, caissawary)
     plot_loss(axes[0, 1], baseline, caissawary)
     plot_acceptance_rate(axes[1, 0], baseline, caissawary)
     plot_k_evolution(axes[1, 1], baseline, caissawary)
+    plot_elo(axes[2, 0], baseline, caissawary)
+    axes[2, 1].axis("off")
 
     plt.tight_layout()
     out_path = os.path.join(args.output, "training_comparison.png")
@@ -130,7 +169,8 @@ def main():
 
     # Also save individual plots
     for name, plot_fn in [("winrate", plot_winrate), ("loss", plot_loss),
-                           ("acceptance", plot_acceptance_rate), ("k_evolution", plot_k_evolution)]:
+                           ("acceptance", plot_acceptance_rate), ("k_evolution", plot_k_evolution),
+                           ("elo", plot_elo)]:
         fig2, ax2 = plt.subplots(figsize=(8, 5))
         if name == "winrate":
             plot_fn(ax2, baseline, caissawary)
