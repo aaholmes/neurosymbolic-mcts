@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from orchestrate import (
     TrainingConfig, OrchestratorState, Orchestrator,
-    compute_acceptance_threshold, _norm_ppf,
 )
 from replay_buffer import ReplayBuffer
 from replay_buffer import SAMPLE_SIZE_FLOATS
@@ -45,9 +44,12 @@ class TestTrainingConfig:
         assert cfg.batch_size == 64
         assert cfg.optimizer == "muon"
         assert cfg.initial_lr == 0.02
-        assert cfg.eval_games == 100
+        assert cfg.eval_max_games == 400
         assert cfg.eval_simulations == 800
-        assert cfg.acceptance_alpha == 0.05
+        assert cfg.sprt_elo0 == 0.0
+        assert cfg.sprt_elo1 == 10.0
+        assert cfg.sprt_alpha == 0.05
+        assert cfg.sprt_beta == 0.05
         assert cfg.resume is True
 
     def test_config_from_args(self):
@@ -55,16 +57,14 @@ class TestTrainingConfig:
             "orchestrate.py",
             "--games-per-generation", "500",
             "--optimizer", "adam",
-            "--eval-games", "200",
-            "--acceptance-alpha", "0.01",
+            "--eval-max-games", "200",
             "--buffer-capacity", "1000000",
         ]
         with patch("sys.argv", test_args):
             cfg = TrainingConfig.from_args()
         assert cfg.games_per_generation == 500
         assert cfg.optimizer == "adam"
-        assert cfg.eval_games == 200
-        assert cfg.acceptance_alpha == 0.01
+        assert cfg.eval_max_games == 200
         assert cfg.buffer_capacity == 1000000
 
 
@@ -453,7 +453,10 @@ class TestOrchestratorExtended:
         orch.state.current_best_pt = "current.pt"
 
         mock_result = MagicMock()
-        mock_result.stdout = "WINS=60 LOSSES=30 DRAWS=10 WINRATE=0.6500 ACCEPTED=true\n"
+        mock_result.stdout = (
+            "WINS=60 LOSSES=30 DRAWS=10 WINRATE=0.6500 ACCEPTED=true "
+            "GAMES_PLAYED=100 LLR=3.50 SPRT_RESULT=H1\n"
+        )
         mock_result.stderr = ""
         mock_result.returncode = 0
 
@@ -472,7 +475,10 @@ class TestOrchestratorExtended:
         orch.state.current_best_pt = "current.pt"
 
         mock_result = MagicMock()
-        mock_result.stdout = "WINS=40 LOSSES=50 DRAWS=10 WINRATE=0.4500 ACCEPTED=false\n"
+        mock_result.stdout = (
+            "WINS=40 LOSSES=50 DRAWS=10 WINRATE=0.4500 ACCEPTED=false "
+            "GAMES_PLAYED=100 LLR=-3.00 SPRT_RESULT=H0\n"
+        )
         mock_result.stderr = ""
         mock_result.returncode = 1
 
@@ -733,7 +739,7 @@ class TestMaxGenerations:
             max_generations=3,
             games_per_generation=2,
             simulations_per_move=10,
-            eval_games=2,
+            eval_max_games=2,
             eval_simulations=10,
         )
         orch = Orchestrator(cfg)
@@ -804,100 +810,136 @@ class TestMaxGenerations:
             assert mock_eval.call_count == 2
 
 
-class TestStatisticalAcceptance:
-    def test_norm_ppf_known_values(self):
-        """Check inverse normal CDF against known z-scores."""
-        # z for alpha=0.05 (one-sided) → ppf(0.95) ≈ 1.645
-        assert _norm_ppf(0.95) == pytest.approx(1.645, abs=0.002)
-        # z for alpha=0.01 → ppf(0.99) ≈ 2.326
-        assert _norm_ppf(0.99) == pytest.approx(2.326, abs=0.002)
-        # ppf(0.5) = 0
-        assert _norm_ppf(0.5) == pytest.approx(0.0, abs=0.001)
-        # Symmetry: ppf(0.05) ≈ -1.645
-        assert _norm_ppf(0.05) == pytest.approx(-1.645, abs=0.002)
-
-    def test_threshold_40_games(self):
-        """40 games at alpha=0.05 should require ~63% win rate."""
-        t = compute_acceptance_threshold(40, 0.05)
-        assert t == pytest.approx(0.630, abs=0.005)
-
-    def test_threshold_100_games(self):
-        """100 games at alpha=0.05 should require ~58.2% win rate."""
-        t = compute_acceptance_threshold(100, 0.05)
-        assert t == pytest.approx(0.582, abs=0.005)
-
-    def test_threshold_200_games(self):
-        """200 games at alpha=0.05 should require ~55.8% win rate."""
-        t = compute_acceptance_threshold(200, 0.05)
-        assert t == pytest.approx(0.558, abs=0.005)
-
-    def test_threshold_decreases_with_more_games(self):
-        """More eval games → lower threshold (smaller margin needed)."""
-        t40 = compute_acceptance_threshold(40)
-        t100 = compute_acceptance_threshold(100)
-        t200 = compute_acceptance_threshold(200)
-        assert t40 > t100 > t200
-
-    def test_stricter_alpha_raises_threshold(self):
-        """Smaller alpha → higher threshold (harder to accept)."""
-        t_05 = compute_acceptance_threshold(100, 0.05)
-        t_01 = compute_acceptance_threshold(100, 0.01)
-        assert t_01 > t_05
-
-    def test_run_evaluation_uses_statistical_threshold(self, tmp_workspace):
-        """run_evaluation should compute threshold from alpha, not use a fixed value."""
+class TestSPRT:
+    def _make_orch(self, tmp_workspace, **overrides):
         cfg = TrainingConfig(
             weights_dir=os.path.join(tmp_workspace, "weights"),
             data_dir=os.path.join(tmp_workspace, "data"),
             buffer_dir=os.path.join(tmp_workspace, "buffer"),
             log_file=os.path.join(tmp_workspace, "log.jsonl"),
-            eval_games=100,
-            acceptance_alpha=0.05,
+            **overrides,
         )
-        orch = Orchestrator(cfg)
-        orch.state.current_best_pt = "current.pt"
+        return Orchestrator(cfg)
 
-        expected_threshold = compute_acceptance_threshold(100, 0.05)
+    def test_sprt_config_defaults(self):
+        """Verify new SPRT config defaults."""
+        cfg = TrainingConfig()
+        assert cfg.sprt_elo0 == 0.0
+        assert cfg.sprt_elo1 == 10.0
+        assert cfg.sprt_alpha == 0.05
+        assert cfg.sprt_beta == 0.05
+        assert cfg.eval_max_games == 400
 
-        mock_result = MagicMock()
-        # Win rate 0.57 < threshold ~0.582 → should be rejected
-        mock_result.stdout = "WINS=47 LOSSES=33 DRAWS=20 WINRATE=0.5700 ACCEPTED=false\n"
-        mock_result.stderr = ""
+    def test_sprt_config_from_args(self):
+        """Verify CLI parsing of SPRT args."""
+        test_args = [
+            "orchestrate.py",
+            "--sprt-elo0", "5.0",
+            "--sprt-elo1", "15.0",
+            "--sprt-alpha", "0.01",
+            "--sprt-beta", "0.10",
+            "--eval-max-games", "200",
+        ]
+        with patch("sys.argv", test_args):
+            cfg = TrainingConfig.from_args()
+        assert cfg.sprt_elo0 == 5.0
+        assert cfg.sprt_elo1 == 15.0
+        assert cfg.sprt_alpha == 0.01
+        assert cfg.sprt_beta == 0.10
+        assert cfg.eval_max_games == 200
 
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
-            accepted, results = orch.run_evaluation("candidate.pt")
-
-        # Should be rejected since 0.57 < 0.582
-        assert accepted is False
-
-        # Verify the threshold was passed to Rust binary
-        cmd = mock_run.call_args[0][0]
-        thresh_idx = cmd.index("--threshold")
-        passed_threshold = float(cmd[thresh_idx + 1])
-        assert passed_threshold == pytest.approx(expected_threshold, abs=0.001)
-
-    def test_run_evaluation_accepts_above_threshold(self, tmp_workspace):
-        """Win rate above statistical threshold should be accepted."""
-        cfg = TrainingConfig(
-            weights_dir=os.path.join(tmp_workspace, "weights"),
-            data_dir=os.path.join(tmp_workspace, "data"),
-            buffer_dir=os.path.join(tmp_workspace, "buffer"),
-            log_file=os.path.join(tmp_workspace, "log.jsonl"),
-            eval_games=100,
-            acceptance_alpha=0.05,
-        )
-        orch = Orchestrator(cfg)
+    def test_run_evaluation_parses_h1(self, tmp_workspace):
+        """SPRT_RESULT=H1 → accepted=True."""
+        orch = self._make_orch(tmp_workspace)
         orch.state.current_best_pt = "current.pt"
 
         mock_result = MagicMock()
-        # Win rate 0.60 > threshold ~0.582 → should be accepted
-        mock_result.stdout = "WINS=55 LOSSES=25 DRAWS=20 WINRATE=0.6500 ACCEPTED=true\n"
+        mock_result.stdout = (
+            "WINS=60 LOSSES=30 DRAWS=10 WINRATE=0.6500 ACCEPTED=true "
+            "GAMES_PLAYED=100 LLR=3.50 SPRT_RESULT=H1\n"
+        )
         mock_result.stderr = ""
+        mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result):
             accepted, results = orch.run_evaluation("candidate.pt")
 
         assert accepted is True
+        assert results["sprt_result"] == "H1"
+        assert results["llr"] == pytest.approx(3.50)
+        assert results["games_played"] == 100
+
+    def test_run_evaluation_parses_h0(self, tmp_workspace):
+        """SPRT_RESULT=H0 → accepted=False."""
+        orch = self._make_orch(tmp_workspace)
+        orch.state.current_best_pt = "current.pt"
+
+        mock_result = MagicMock()
+        mock_result.stdout = (
+            "WINS=30 LOSSES=60 DRAWS=10 WINRATE=0.3500 ACCEPTED=false "
+            "GAMES_PLAYED=100 LLR=-3.50 SPRT_RESULT=H0\n"
+        )
+        mock_result.stderr = ""
+        mock_result.returncode = 1
+
+        with patch("subprocess.run", return_value=mock_result):
+            accepted, results = orch.run_evaluation("candidate.pt")
+
+        assert accepted is False
+        assert results["sprt_result"] == "H0"
+
+    def test_run_evaluation_parses_inconclusive(self, tmp_workspace):
+        """SPRT_RESULT=inconclusive → accepted=False."""
+        orch = self._make_orch(tmp_workspace)
+        orch.state.current_best_pt = "current.pt"
+
+        mock_result = MagicMock()
+        mock_result.stdout = (
+            "WINS=50 LOSSES=50 DRAWS=300 WINRATE=0.5000 ACCEPTED=false "
+            "GAMES_PLAYED=400 LLR=0.10 SPRT_RESULT=inconclusive\n"
+        )
+        mock_result.stderr = ""
+        mock_result.returncode = 1
+
+        with patch("subprocess.run", return_value=mock_result):
+            accepted, results = orch.run_evaluation("candidate.pt")
+
+        assert accepted is False
+        assert results["sprt_result"] == "inconclusive"
+
+    def test_run_evaluation_passes_sprt_args(self, tmp_workspace):
+        """Verify SPRT CLI args are passed to the Rust binary."""
+        orch = self._make_orch(
+            tmp_workspace,
+            sprt_elo0=0.0,
+            sprt_elo1=10.0,
+            sprt_alpha=0.05,
+            sprt_beta=0.05,
+            eval_max_games=400,
+        )
+        orch.state.current_best_pt = "current.pt"
+
+        mock_result = MagicMock()
+        mock_result.stdout = (
+            "WINS=60 LOSSES=30 DRAWS=10 WINRATE=0.6500 ACCEPTED=true "
+            "GAMES_PLAYED=50 LLR=3.00 SPRT_RESULT=H1\n"
+        )
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            orch.run_evaluation("candidate.pt")
+
+        cmd = mock_run.call_args[0][0]
+        assert "--sprt" in cmd
+        elo0_idx = cmd.index("--elo0")
+        assert cmd[elo0_idx + 1] == "0.0"
+        elo1_idx = cmd.index("--elo1")
+        assert cmd[elo1_idx + 1] == "10.0"
+        alpha_idx = cmd.index("--sprt-alpha")
+        assert cmd[alpha_idx + 1] == "0.05"
+        beta_idx = cmd.index("--sprt-beta")
+        assert cmd[beta_idx + 1] == "0.05"
 
 
 if __name__ == "__main__":

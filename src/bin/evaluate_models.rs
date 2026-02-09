@@ -9,6 +9,7 @@ use kingfisher::boardstack::BoardStack;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::mcts::{tactical_mcts_search_with_tt, MctsNode, TacticalMctsConfig, InferenceServer};
+use kingfisher::mcts::sprt::{SprtConfig, SprtState, SprtResult};
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::transposition::TranspositionTable;
 use rand::Rng;
@@ -17,6 +18,7 @@ use rand::rngs::StdRng;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use rayon::prelude::*;
 
@@ -557,11 +559,122 @@ pub fn evaluate_models_koth(
     results.into_inner().unwrap()
 }
 
+/// Run an SPRT-based evaluation match with early stopping.
+///
+/// Returns (results, final_llr, sprt_decision).
+pub fn evaluate_models_koth_sprt(
+    candidate_path: &str,
+    current_path: &str,
+    max_games: u32,
+    simulations: u32,
+    enable_koth: bool,
+    enable_tier1: bool,
+    enable_material: bool,
+    inference_batch_size: usize,
+    sprt_config: &SprtConfig,
+) -> (EvalResults, Option<f64>, SprtResult) {
+    // Load each model once, create shared InferenceServers
+    let candidate_server: Option<Arc<InferenceServer>> = {
+        let mut nn = NeuralNetPolicy::new();
+        if let Err(e) = nn.load(candidate_path) {
+            eprintln!("Failed to load candidate model: {}", e);
+            return (EvalResults { wins: 0, losses: 0, draws: 0 }, None, SprtResult::Inconclusive);
+        }
+        Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
+    };
+
+    let current_server: Option<Arc<InferenceServer>> = {
+        let mut nn = NeuralNetPolicy::new();
+        if let Err(e) = nn.load(current_path) {
+            eprintln!("Failed to load current model: {}", e);
+            return (EvalResults { wins: 0, losses: 0, draws: 0 }, None, SprtResult::Inconclusive);
+        }
+        Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
+    };
+
+    let sprt_state = Arc::new(Mutex::new(SprtState::new()));
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let games_completed = Arc::new(Mutex::new(0u32));
+
+    (0..max_games).into_par_iter().for_each(|game_idx| {
+        if stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let candidate_is_white = game_idx % 2 == 0;
+
+        let result = play_evaluation_game_with_servers(
+            &candidate_server,
+            &current_server,
+            candidate_is_white,
+            simulations,
+            enable_koth,
+            enable_tier1,
+            enable_material,
+            game_idx as u64,
+        );
+
+        let mut state = sprt_state.lock().unwrap();
+        match result {
+            GameResult::CandidateWin => state.wins += 1,
+            GameResult::CurrentWin => state.losses += 1,
+            GameResult::Draw => state.draws += 1,
+        }
+
+        let mut completed = games_completed.lock().unwrap();
+        *completed += 1;
+
+        let color_str = if candidate_is_white { "White" } else { "Black" };
+        let decision = state.check_decision(sprt_config);
+        let llr_str = state.compute_llr(sprt_config)
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_else(|| "N/A".to_string());
+        eprintln!(
+            "Game {}/{}: Candidate ({}) -> {:?} [W:{} L:{} D:{}] LLR={} {:?}",
+            *completed,
+            max_games,
+            color_str,
+            result,
+            state.wins,
+            state.losses,
+            state.draws,
+            llr_str,
+            decision,
+        );
+
+        match decision {
+            SprtResult::AcceptH1 | SprtResult::AcceptH0 => {
+                stop_flag.store(true, Ordering::Relaxed);
+            }
+            SprtResult::Inconclusive => {}
+        }
+    });
+
+    let final_state = sprt_state.lock().unwrap();
+    let llr = final_state.compute_llr(sprt_config);
+    let decision = final_state.check_decision(sprt_config);
+    let results = EvalResults {
+        wins: final_state.wins,
+        losses: final_state.losses,
+        draws: final_state.draws,
+    };
+
+    (results, llr, decision)
+}
+
+fn parse_arg_f64(args: &[String], flag: &str, default: f64) -> f64 {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 5 {
-        eprintln!("Usage: evaluate_models <candidate.pt> <current.pt> <num_games> <simulations> [--threshold 0.55]");
+        eprintln!("Usage: evaluate_models <candidate.pt> <current.pt> <num_games> <simulations> [--sprt --elo0 0 --elo1 10 --sprt-alpha 0.05 --sprt-beta 0.05] [--threshold 0.55]");
         std::process::exit(2);
     }
 
@@ -570,12 +683,9 @@ fn main() {
     let num_games: u32 = args[3].parse().expect("num_games must be a number");
     let simulations: u32 = args[4].parse().expect("simulations must be a number");
 
-    let threshold: f64 = args
-        .iter()
-        .position(|a| a == "--threshold")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.55);
+    let use_sprt = args.iter().any(|a| a == "--sprt");
+
+    let threshold: f64 = parse_arg_f64(&args, "--threshold", 0.55);
 
     let enable_koth = args.iter().any(|a| a == "--enable-koth");
     let enable_tier1 = !args.iter().any(|a| a == "--disable-tier1");
@@ -600,23 +710,69 @@ fn main() {
     }
 
     eprintln!("Evaluating: {} vs {}", candidate_path, current_path);
-    eprintln!("Games: {}, Sims: {}, Threshold: {}, KOTH: {}, Tier1: {}, Material: {}",
-              num_games, simulations, threshold, enable_koth, enable_tier1, enable_material);
 
-    let results = evaluate_models_koth(candidate_path, current_path, num_games, simulations, enable_koth, enable_tier1, enable_material, inference_batch_size);
-    let win_rate = results.win_rate();
-    let accepted = results.accepted(threshold);
+    if use_sprt {
+        let sprt_config = SprtConfig {
+            elo0: parse_arg_f64(&args, "--elo0", 0.0),
+            elo1: parse_arg_f64(&args, "--elo1", 10.0),
+            alpha: parse_arg_f64(&args, "--sprt-alpha", 0.05),
+            beta: parse_arg_f64(&args, "--sprt-beta", 0.05),
+        };
 
-    // Machine-readable output on stdout
-    println!(
-        "WINS={} LOSSES={} DRAWS={} WINRATE={:.4} ACCEPTED={}",
-        results.wins,
-        results.losses,
-        results.draws,
-        win_rate,
-        accepted
-    );
+        let (lower, upper) = sprt_config.bounds();
+        eprintln!("SPRT: elo0={}, elo1={}, alpha={}, beta={}, bounds=[{:.3}, {:.3}]",
+                  sprt_config.elo0, sprt_config.elo1, sprt_config.alpha, sprt_config.beta, lower, upper);
+        eprintln!("Max games: {}, Sims: {}, KOTH: {}, Tier1: {}, Material: {}",
+                  num_games, simulations, enable_koth, enable_tier1, enable_material);
 
-    // Exit code: 0 = accepted, 1 = rejected
-    std::process::exit(if accepted { 0 } else { 1 });
+        let (results, llr, decision) = evaluate_models_koth_sprt(
+            candidate_path, current_path, num_games, simulations,
+            enable_koth, enable_tier1, enable_material, inference_batch_size,
+            &sprt_config,
+        );
+
+        let win_rate = results.win_rate();
+        let games_played = results.wins + results.losses + results.draws;
+        let accepted = decision == SprtResult::AcceptH1;
+        let llr_str = llr.map(|v| format!("{:.2}", v)).unwrap_or_else(|| "N/A".to_string());
+
+        // Machine-readable output on stdout (backward-compatible + SPRT fields)
+        println!(
+            "WINS={} LOSSES={} DRAWS={} WINRATE={:.4} ACCEPTED={} GAMES_PLAYED={} LLR={} SPRT_RESULT={}",
+            results.wins,
+            results.losses,
+            results.draws,
+            win_rate,
+            accepted,
+            games_played,
+            llr_str,
+            decision,
+        );
+
+        std::process::exit(if accepted { 0 } else { 1 });
+    } else {
+        // Legacy fixed-threshold mode
+        eprintln!("Games: {}, Sims: {}, Threshold: {}, KOTH: {}, Tier1: {}, Material: {}",
+                  num_games, simulations, threshold, enable_koth, enable_tier1, enable_material);
+
+        let results = evaluate_models_koth(
+            candidate_path, current_path, num_games, simulations,
+            enable_koth, enable_tier1, enable_material, inference_batch_size,
+        );
+        let win_rate = results.win_rate();
+        let games_played = results.wins + results.losses + results.draws;
+        let accepted = results.accepted(threshold);
+
+        println!(
+            "WINS={} LOSSES={} DRAWS={} WINRATE={:.4} ACCEPTED={} GAMES_PLAYED={} LLR=N/A SPRT_RESULT=inconclusive",
+            results.wins,
+            results.losses,
+            results.draws,
+            win_rate,
+            accepted,
+            games_played,
+        );
+
+        std::process::exit(if accepted { 0 } else { 1 });
+    }
 }

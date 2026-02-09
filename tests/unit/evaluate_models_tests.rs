@@ -2,6 +2,7 @@ use kingfisher::board::Board;
 use kingfisher::boardstack::BoardStack;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::mcts::{tactical_mcts_search_with_tt, TacticalMctsConfig};
+use kingfisher::mcts::sprt::{SprtConfig, SprtState, SprtResult};
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::transposition::TranspositionTable;
 use std::time::Duration;
@@ -421,4 +422,93 @@ fn test_koth_disabled_no_early_termination() {
     // Without KOTH, KvK is a draw (insufficient material or will hit move/50-move limit)
     assert_ne!(result, GameResult::BlackWin,
         "Without KOTH, king reaching center should not be a win");
+}
+
+// ---- SPRT tests ----
+
+fn default_sprt_config() -> SprtConfig {
+    SprtConfig {
+        elo0: 0.0,
+        elo1: 10.0,
+        alpha: 0.05,
+        beta: 0.05,
+    }
+}
+
+#[test]
+fn test_sprt_llr_winning() {
+    let config = default_sprt_config();
+    let state = SprtState { wins: 60, losses: 30, draws: 10 };
+    let llr = state.compute_llr(&config);
+    assert!(llr.is_some(), "LLR should be computable with 100 games");
+    assert!(llr.unwrap() > 0.0, "Winning record should have positive LLR, got {}", llr.unwrap());
+}
+
+#[test]
+fn test_sprt_llr_losing() {
+    let config = default_sprt_config();
+    let state = SprtState { wins: 30, losses: 60, draws: 10 };
+    let llr = state.compute_llr(&config);
+    assert!(llr.is_some());
+    assert!(llr.unwrap() < 0.0, "Losing record should have negative LLR, got {}", llr.unwrap());
+}
+
+#[test]
+fn test_sprt_llr_all_draws() {
+    let config = default_sprt_config();
+    let state = SprtState { wins: 0, losses: 0, draws: 100 };
+    let llr = state.compute_llr(&config);
+    // All draws → var = (0 + 100/4)/100 - 0.25 = 0, so LLR is None (zero variance)
+    assert!(llr.is_none(), "All draws should have zero variance → None");
+
+    // With a mix that's mostly draws, LLR should be computable and near 0
+    let state2 = SprtState { wins: 2, losses: 2, draws: 96 };
+    let llr2 = state2.compute_llr(&config);
+    assert!(llr2.is_some());
+    assert!(llr2.unwrap().abs() < 2.0, "Mostly draws LLR should be near 0, got {}", llr2.unwrap());
+}
+
+#[test]
+fn test_sprt_llr_too_few_games() {
+    let config = default_sprt_config();
+    let state = SprtState { wins: 1, losses: 0, draws: 0 };
+    let llr = state.compute_llr(&config);
+    assert!(llr.is_none(), "LLR should be None for <2 games");
+}
+
+#[test]
+fn test_sprt_decision_h1() {
+    let config = default_sprt_config();
+    let state = SprtState { wins: 80, losses: 10, draws: 10 };
+    let result = state.check_decision(&config);
+    assert_eq!(result, SprtResult::AcceptH1, "Dominant winning record should accept H1");
+}
+
+#[test]
+fn test_sprt_decision_h0() {
+    let config = default_sprt_config();
+    let state = SprtState { wins: 10, losses: 80, draws: 10 };
+    let result = state.check_decision(&config);
+    assert_eq!(result, SprtResult::AcceptH0, "Dominant losing record should accept H0");
+}
+
+#[test]
+fn test_sprt_decision_inconclusive() {
+    let config = default_sprt_config();
+    let state = SprtState { wins: 26, losses: 24, draws: 50 };
+    let result = state.check_decision(&config);
+    assert_eq!(result, SprtResult::Inconclusive, "Close results should be inconclusive");
+}
+
+#[test]
+fn test_sprt_bounds_symmetric() {
+    let config = SprtConfig {
+        elo0: 0.0,
+        elo1: 10.0,
+        alpha: 0.05,
+        beta: 0.05,
+    };
+    let (lower, upper) = config.bounds();
+    assert!((lower.abs() - upper.abs()).abs() < 1e-9,
+        "Symmetric alpha/beta should give |A| == |B|, got A={} B={}", lower, upper);
 }

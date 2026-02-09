@@ -6,7 +6,6 @@ Config-driven loop: self-play -> buffer -> train -> evaluate -> accept/reject.
 import os
 import sys
 import json
-import math
 import shutil
 import subprocess
 import time
@@ -16,29 +15,6 @@ from dataclasses import dataclass, field, asdict
 import torch
 from model import LogosNet
 from replay_buffer import ReplayBuffer
-
-
-def _norm_ppf(p):
-    """Inverse standard normal CDF via rational approximation.
-
-    Abramowitz & Stegun 26.2.23. Accurate to ~4.5e-4.
-    """
-    if p < 0.5:
-        return -_norm_ppf(1 - p)
-    t = math.sqrt(-2 * math.log(1 - p))
-    c0, c1, c2 = 2.515517, 0.802853, 0.010328
-    d1, d2, d3 = 1.432788, 0.189269, 0.001308
-    return t - (c0 + c1 * t + c2 * t * t) / (1 + d1 * t + d2 * t * t + d3 * t * t * t)
-
-
-def compute_acceptance_threshold(n_games: int, alpha: float = 0.05) -> float:
-    """Minimum win rate for one-sided binomial test at significance level alpha.
-
-    Under H0 (candidate = current best), win rate ~ N(0.5, 0.25/n).
-    Returns threshold = 0.5 + z_alpha * 0.5 / sqrt(n).
-    """
-    z = _norm_ppf(1 - alpha)
-    return 0.5 + z * 0.5 / math.sqrt(n_games)
 
 
 @dataclass
@@ -65,10 +41,13 @@ class TrainingConfig:
     lr_schedule: str = ""
     initial_lr: float = 0.02
 
-    # Evaluation
-    eval_games: int = 100
+    # Evaluation (SPRT)
+    eval_max_games: int = 400
     eval_simulations: int = 800
-    acceptance_alpha: float = 0.05  # one-sided binomial test significance level
+    sprt_elo0: float = 0.0
+    sprt_elo1: float = 10.0
+    sprt_alpha: float = 0.05
+    sprt_beta: float = 0.05
 
     # Parallelism
     inference_batch_size: int = 16
@@ -95,10 +74,17 @@ class TrainingConfig:
                             choices=["adam", "adamw", "muon"])
         parser.add_argument("--lr-schedule", type=str, default="")
         parser.add_argument("--initial-lr", type=float, default=0.02)
-        parser.add_argument("--eval-games", type=int, default=100)
+        parser.add_argument("--eval-max-games", type=int, default=400,
+                            help="Max games for SPRT evaluation (default: 400)")
         parser.add_argument("--eval-simulations", type=int, default=800)
-        parser.add_argument("--acceptance-alpha", type=float, default=0.05,
-                            help="Significance level for one-sided binomial test (default: 0.05)")
+        parser.add_argument("--sprt-elo0", type=float, default=0.0,
+                            help="SPRT H0 elo (default: 0.0)")
+        parser.add_argument("--sprt-elo1", type=float, default=10.0,
+                            help="SPRT H1 elo (default: 10.0)")
+        parser.add_argument("--sprt-alpha", type=float, default=0.05,
+                            help="SPRT type I error rate (default: 0.05)")
+        parser.add_argument("--sprt-beta", type=float, default=0.05,
+                            help="SPRT type II error rate (default: 0.05)")
         parser.add_argument("--weights-dir", type=str, default="weights")
         parser.add_argument("--data-dir", type=str, default="data")
         parser.add_argument("--log-file", type=str, default="training_log.jsonl")
@@ -131,9 +117,12 @@ class TrainingConfig:
             optimizer=args.optimizer,
             lr_schedule=args.lr_schedule,
             initial_lr=args.initial_lr,
-            eval_games=args.eval_games,
+            eval_max_games=args.eval_max_games,
             eval_simulations=args.eval_simulations,
-            acceptance_alpha=args.acceptance_alpha,
+            sprt_elo0=args.sprt_elo0,
+            sprt_elo1=args.sprt_elo1,
+            sprt_alpha=args.sprt_alpha,
+            sprt_beta=args.sprt_beta,
             weights_dir=args.weights_dir,
             data_dir=args.data_dir,
             log_file=args.log_file,
@@ -425,20 +414,19 @@ class Orchestrator:
         return candidate_pth, candidate_pt
 
     def run_evaluation(self, candidate_pt):
-        """Evaluate candidate vs current best. Returns (accepted, results_dict)."""
-        # Compute acceptance threshold from one-sided binomial test
-        threshold = compute_acceptance_threshold(
-            self.config.eval_games, self.config.acceptance_alpha
-        )
-
+        """Evaluate candidate vs current best using SPRT. Returns (accepted, results_dict)."""
         cmd = [
             "cargo", "run", "--release", "--features", "neural",
             "--bin", "evaluate_models", "--",
             candidate_pt,
             self.state.current_best_pt,
-            str(self.config.eval_games),
+            str(self.config.eval_max_games),
             str(self.config.eval_simulations),
-            "--threshold", str(threshold),
+            "--sprt",
+            "--elo0", str(self.config.sprt_elo0),
+            "--elo1", str(self.config.sprt_elo1),
+            "--sprt-alpha", str(self.config.sprt_alpha),
+            "--sprt-beta", str(self.config.sprt_beta),
         ]
         if self.config.enable_koth:
             cmd.append("--enable-koth")
@@ -450,8 +438,9 @@ class Orchestrator:
         if self.config.game_threads > 0:
             cmd.extend(["--threads", str(self.config.game_threads)])
 
-        print(f"Evaluating: {self.config.eval_games} games, "
-              f"threshold={threshold:.4f} (alpha={self.config.acceptance_alpha})")
+        print(f"Evaluating: up to {self.config.eval_max_games} games (SPRT "
+              f"elo0={self.config.sprt_elo0}, elo1={self.config.sprt_elo1}, "
+              f"alpha={self.config.sprt_alpha}, beta={self.config.sprt_beta})")
 
         result = subprocess.run(
             cmd, env=get_libtorch_env(),
@@ -468,7 +457,8 @@ class Orchestrator:
             f.write("\n--- RESULTS ---\n")
             f.write(result.stdout)
 
-        # Parse stdout: "WINS=X LOSSES=Y DRAWS=Z WINRATE=0.XX ACCEPTED=true/false"
+        # Parse stdout: "WINS=X LOSSES=Y DRAWS=Z WINRATE=0.XX ACCEPTED=true/false
+        #                 GAMES_PLAYED=N LLR=Y.YY SPRT_RESULT=H1/H0/inconclusive"
         output = result.stdout.strip()
         parts = {}
         for token in output.split():
@@ -480,14 +470,21 @@ class Orchestrator:
         losses = int(parts.get("LOSSES", 0))
         draws = int(parts.get("DRAWS", 0))
         winrate = float(parts.get("WINRATE", 0.0))
-        # Accept/reject based on our computed statistical threshold
-        accepted = winrate >= threshold
+        games_played = int(parts.get("GAMES_PLAYED", wins + losses + draws))
+        llr = float(parts.get("LLR", 0.0))
+        sprt_result = parts.get("SPRT_RESULT", "inconclusive")
+
+        # Accept only if SPRT decided H1
+        accepted = sprt_result == "H1"
 
         return accepted, {
             "wins": wins,
             "losses": losses,
             "draws": draws,
             "winrate": winrate,
+            "games_played": games_played,
+            "llr": llr,
+            "sprt_result": sprt_result,
         }
 
     def _write_overview(self, generation, buffer_size, accepted, eval_results):
@@ -595,6 +592,9 @@ class Orchestrator:
                 "eval_losses": eval_results["losses"],
                 "eval_draws": eval_results["draws"],
                 "eval_winrate": eval_results["winrate"],
+                "eval_games_played": eval_results.get("games_played"),
+                "eval_llr": eval_results.get("llr"),
+                "eval_sprt_result": eval_results.get("sprt_result"),
                 "accepted": accepted,
                 "current_best": self.state.current_best_pt,
             }

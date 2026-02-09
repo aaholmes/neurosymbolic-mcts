@@ -13,6 +13,7 @@ pub mod tactical_mcts;
 pub mod nn_counter;
 pub mod inference_server;
 pub mod search_logger;
+pub mod sprt;
 
 use crate::board::Board;
 use crate::move_generation::MoveGen;
