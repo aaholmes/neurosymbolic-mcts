@@ -275,7 +275,7 @@ cargo run --release --features neural --bin self_play -- 100 800 data models/lat
 
 ## Testing
 
-The project has a comprehensive test suite with **~700 tests** (600 Rust + 100 Python) organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
+The project has a comprehensive test suite with **~780 tests** (680 Rust + 100 Python) organized across Rust and Python. For detailed documentation, see [TESTING.md](TESTING.md).
 
 ```bash
 # Run the fast Rust test suite (<60s, skips perft/property/slow tests)
@@ -328,6 +328,12 @@ The unit test suite covers all core modules:
 | Inference server | inference_server_tests | Mock servers, v_logit returns, batching |
 | Model evaluation | evaluate_models_tests | Game termination, color alternation, win rate, acceptance |
 | Board encoding | board_encoding_tests | STM-perspective planes, rank flipping, castling, en passant, move indexing |
+| Experiment metrics | experiment_metrics_tests | NN reduction, NPS, selection confidence, aggregation, safety rates |
+| Experiment config | experiment_config_tests | Ablation presets, config generation, search settings |
+| Position classifier | position_classifier_tests | Classification logic, endgame/tactical/defensive, forced mate detection |
+| NN call counter | nn_counter_tests | Call counting, efficiency ratios, reset, comparison |
+| Neural MCTS | neural_mcts_tests | Wrapper search, mate-in-1, default settings |
+| Training pipeline | training_pipeline_tests | Game extraction, CSV roundtrip, tactical positions, edge cases |
 | Replay buffer | test_replay_buffer.py | FIFO eviction, manifest persistence, sampling, edge cases |
 | Training pipeline | test_train.py | Minibatch mode, LR scheduling, checkpoints, buffer chunking, loss logging |
 | Orchestrator | test_orchestrate.py | Config, state persistence, resumability, max generations, subprocess mocking |

@@ -38,6 +38,12 @@ mod inference_server_tests;
 mod tactical_detection_tests;
 mod board_encoding_tests;
 mod value_target_tests;
+mod experiment_metrics_tests;
+mod experiment_config_tests;
+mod position_classifier_tests;
+mod nn_counter_tests;
+mod neural_mcts_tests;
+mod training_pipeline_tests;
 
 // Re-export common utilities
 mod common {
