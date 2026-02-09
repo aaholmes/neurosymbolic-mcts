@@ -1,7 +1,7 @@
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-from model import LogosNet
+from model import OracleNet
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -51,18 +51,18 @@ def index_to_uci(idx):
     return f"idx{idx}"
 
 def test_model_shapes():
-    print(f"\nTesting LogosNet...")
+    print(f"\nTesting OracleNet...")
     batch_size = 4
     # Random chess board input: [Batch, Channels, Height, Width]
     dummy_input = torch.randn(batch_size, 17, 8, 8)
     dummy_material = torch.randn(batch_size, 1)
     
     try:
-        model = LogosNet()
+        model = OracleNet()
         policy, value, k = model(dummy_input, dummy_material)
         
         # Check Policy Shape
-        # LogosNet uses 4672 for policy output size
+        # OracleNet uses 4672 for policy output size
         assert policy.shape == (batch_size, 4672), f"Policy shape mismatch! Expected ({batch_size}, 4672), got {policy.shape}"
         
         # Check Value Shape
@@ -80,8 +80,8 @@ def test_model_shapes():
         return None
 
 def test_overfitting():
-    print(f"\nRunning Overfitting Test on LogosNet...")
-    model = LogosNet()
+    print(f"\nRunning Overfitting Test on OracleNet...")
+    model = OracleNet()
     model.train() # Explicitly set to train mode
     
     # Use Adam for faster convergence in overfitting test
@@ -106,7 +106,7 @@ def test_overfitting():
     for i in range(201):
         optimizer.zero_grad()
         
-        # Forward pass: LogosNet returns (policy, value, k)
+        # Forward pass: OracleNet returns (policy, value, k)
         pred_policy, pred_value, k = model(inputs, materials)
         
         # Loss = MSE(Value) + CrossEntropy(Policy)
@@ -200,7 +200,7 @@ def sample_output_demo():
     print(f"\nSample Inference Output")
     print("-" * 30)
     
-    model = LogosNet()
+    model = OracleNet()
     model.eval()
     
     # Use starting position
@@ -231,7 +231,7 @@ def sample_output_demo():
     print(f"Top moves: {', '.join(moves_str)}")
 
 if __name__ == "__main__":
-    print("=== Verifying LogosNet Architecture ===")
+    print("=== Verifying OracleNet Architecture ===")
     
     # 1. Test Shapes & Sizes
     test_model_shapes()

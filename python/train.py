@@ -8,7 +8,7 @@ import os
 import struct
 import glob
 import sys
-from model import LogosNet
+from model import OracleNet
 from augmentation import augment_sample
 
 # Configuration
@@ -211,7 +211,7 @@ def train_with_config(
     )
 
     # Model
-    model = LogosNet().to(DEVICE)
+    model = OracleNet().to(DEVICE)
     optimizer = make_optimizer(model, optimizer_name, lr)
 
     # Resume from checkpoint
@@ -367,7 +367,7 @@ def train_with_config(
 
 def parse_args():
     import argparse
-    parser = argparse.ArgumentParser(description="Train LogosNet chess model")
+    parser = argparse.ArgumentParser(description="Train OracleNet chess model")
     parser.add_argument('data_dir', type=str, nargs='?', default='data/training',
                         help='Directory containing .bin training data')
     parser.add_argument('output_path', type=str, nargs='?', default='python/models/latest.pt',

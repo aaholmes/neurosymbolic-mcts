@@ -426,10 +426,10 @@ class TestOrchestratorExtended:
 
     def test_export_model_for_rust(self, tmp_workspace):
         from orchestrate import export_model_for_rust
-        from model import LogosNet
+        from model import OracleNet
         import torch
 
-        model = LogosNet(num_blocks=1, hidden_dim=16)
+        model = OracleNet(num_blocks=1, hidden_dim=16)
         output_path = os.path.join(tmp_workspace, "test.pt")
         export_model_for_rust(model, output_path)
         assert os.path.exists(output_path)
@@ -569,7 +569,7 @@ class TestAdaptiveMinibatches:
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
              patch.object(orch, '_compute_adaptive_minibatches', return_value=162) as mock_adaptive, \
-             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("orchestrate.OracleNet") as mock_model_cls, \
              patch("torch.load", return_value={"model_state_dict": {}}), \
              patch("orchestrate.export_model_for_rust"):
             mock_model = MagicMock()
@@ -593,7 +593,7 @@ class TestAdaptiveMinibatches:
         mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
-             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("orchestrate.OracleNet") as mock_model_cls, \
              patch("torch.load", return_value={"model_state_dict": {}}), \
              patch("orchestrate.export_model_for_rust"):
             mock_model = MagicMock()
@@ -700,7 +700,7 @@ class TestSlidingWindowBuffer:
         mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
-             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("orchestrate.OracleNet") as mock_model_cls, \
              patch("torch.load", return_value={"model_state_dict": {}}), \
              patch("orchestrate.export_model_for_rust"):
             mock_model_cls.return_value = MagicMock()
@@ -978,7 +978,7 @@ class TestSamplingHalfLife:
         mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
-             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("orchestrate.OracleNet") as mock_model_cls, \
              patch("torch.load", return_value={"model_state_dict": {}}), \
              patch("orchestrate.export_model_for_rust"):
             mock_model_cls.return_value = MagicMock()
@@ -998,7 +998,7 @@ class TestSamplingHalfLife:
         mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
-             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("orchestrate.OracleNet") as mock_model_cls, \
              patch("torch.load", return_value={"model_state_dict": {}}), \
              patch("orchestrate.export_model_for_rust"):
             mock_model_cls.return_value = MagicMock()

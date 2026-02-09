@@ -50,8 +50,8 @@ class ResBlock(nn.Module):
         out += residual
         return F.relu(out)
 
-# --- 3. The Main Network (LogosNet) ---
-class LogosNet(nn.Module):
+# --- 3. The Main Network (OracleNet) ---
+class OracleNet(nn.Module):
     def __init__(self, num_blocks=6, hidden_dim=128, input_channels=17, policy_output_size=4672): 
         # Defaulting input_channels to 17 to match current Rust implementation
         # Defaulting hidden_dim to 128 to match previous capacity
@@ -83,9 +83,14 @@ class LogosNet(nn.Module):
         self.v_out = nn.Linear(256, 1) # V_net (Residual)
         
         # --- DYNAMIC K HEAD (Confidence) ---
-        # Parallel to Value Head
-        self.k_fc = nn.Linear(64, 64) 
-        self.k_out = nn.Linear(64, 1)  # K_net (Confidence)
+        # Separate shallow input network — k is a position-type property,
+        # not a position-specific one. Operating on raw input prevents
+        # overfitting k to specific positions via deep backbone features.
+        self.k_conv = nn.Conv2d(input_channels, 32, kernel_size=3, padding=1, bias=False)
+        self.k_bn = nn.BatchNorm2d(32)
+        self.k_pool = nn.AdaptiveAvgPool2d(1)  # [B, 32, 1, 1] -> [B, 32]
+        self.k_fc = nn.Linear(32, 16)
+        self.k_out = nn.Linear(16, 1)  # K_net (Confidence)
         
         # Denominator Constant: 2 * ln(2)
         self.k_scale = 2 * math.log(2)
@@ -97,33 +102,32 @@ class LogosNet(nn.Module):
         self._zero_init_heads()
 
     def forward(self, x, material_scalar):
+        # K path (from raw input, independent of backbone)
+        k_feat = F.relu(self.k_bn(self.k_conv(x)))       # [B, 32, 8, 8]
+        k_feat = self.k_pool(k_feat).view(x.size(0), -1) # [B, 32]
+        k_feat = F.relu(self.k_fc(k_feat))                # [B, 16]
+        k_logit = self.k_out(k_feat)                      # [B, 1]
+
         # Backbone
         x = F.relu(self.start_bn(self.start_conv(x)))
-        
+
         for block in self.res_blocks:
             x = block(x)
-            
+
         # Policy Path
         p = F.relu(self.p_bn(self.p_conv(x)))
         p = self.p_head(p) # [B, 73, 8, 8]
-        
+
         # Flatten correctly for AlphaZero mapping: [B, 8, 8, 73] -> [B, 4672]
         p = p.permute(0, 2, 3, 1) # [B, 8, 8, 73]
         p = p.contiguous().view(p.size(0), -1) # Flatten to [B, 4672]
         policy = F.log_softmax(p, dim=1)
-        
-        # Value/K Path
-        # Reduce to [B, 1, 8, 8] -> Flatten to [B, 64]
+
+        # Value Path (backbone-dependent)
         v_feat = F.relu(self.v_bn(self.v_conv(x)))
         v_feat = v_feat.view(v_feat.size(0), -1)
-        
-        # V_net (Residual Value)
         v = F.relu(self.v_fc(v_feat))
         v_logit = self.v_out(v) # Logits
-        
-        # K_net (Confidence)
-        k_feat = F.relu(self.k_fc(v_feat))
-        k_logit = self.k_out(k_feat) # Logits
         
         # Calculate k (Confidence Scalar)
         # k = Softplus(k_logit) / (2 * ln2)

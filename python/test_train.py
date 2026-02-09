@@ -11,7 +11,7 @@ import pytest
 # Ensure python/ is on path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from model import LogosNet
+from model import OracleNet
 from replay_buffer import ReplayBuffer, SAMPLE_SIZE_FLOATS, BYTES_PER_SAMPLE
 
 # Import training internals (we'll test functions directly)
@@ -26,7 +26,7 @@ def make_fake_bin(path, num_positions):
 
 def make_tiny_model():
     """Create a tiny model for fast testing."""
-    return LogosNet(num_blocks=1, hidden_dim=16)
+    return OracleNet(num_blocks=1, hidden_dim=16)
 
 
 @pytest.fixture
@@ -311,17 +311,17 @@ class TestGetLrForStep:
 
 class TestMakeOptimizer:
     def test_adam_optimizer(self):
-        model = LogosNet(num_blocks=1, hidden_dim=16)
+        model = OracleNet(num_blocks=1, hidden_dim=16)
         opt = train_module.make_optimizer(model, "adam", 0.001)
         assert isinstance(opt, torch.optim.Adam)
 
     def test_adamw_optimizer(self):
-        model = LogosNet(num_blocks=1, hidden_dim=16)
+        model = OracleNet(num_blocks=1, hidden_dim=16)
         opt = train_module.make_optimizer(model, "adamw", 0.001)
         assert isinstance(opt, torch.optim.AdamW)
 
     def test_unknown_optimizer_defaults_to_adam(self):
-        model = LogosNet(num_blocks=1, hidden_dim=16)
+        model = OracleNet(num_blocks=1, hidden_dim=16)
         opt = train_module.make_optimizer(model, "unknown", 0.001)
         assert isinstance(opt, torch.optim.Adam)
 
@@ -421,7 +421,7 @@ class TestResumeEdgeCases:
         make_fake_bin(os.path.join(data_dir, "game.bin"), 100)
 
         # Create legacy checkpoint (just state_dict)
-        model = LogosNet()
+        model = OracleNet()
         legacy_path = os.path.join(output_dir, "legacy.pth")
         torch.save(model.state_dict(), legacy_path)
 

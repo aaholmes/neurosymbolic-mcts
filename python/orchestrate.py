@@ -13,7 +13,7 @@ import argparse
 from dataclasses import dataclass, field, asdict
 
 import torch
-from model import LogosNet
+from model import OracleNet
 from replay_buffer import ReplayBuffer
 
 
@@ -214,7 +214,7 @@ class Orchestrator:
 
         if not os.path.exists(gen0_pt):
             print("Initializing Generation 0...")
-            model = LogosNet()
+            model = OracleNet()
             export_model_for_rust(model, gen0_pt)
             torch.save({
                 "model_state_dict": model.state_dict(),
@@ -408,7 +408,7 @@ class Orchestrator:
 
         # Export to TorchScript
         print("Exporting candidate model...")
-        model = LogosNet()
+        model = OracleNet()
         checkpoint = torch.load(candidate_pth, map_location="cpu", weights_only=False)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             model.load_state_dict(checkpoint["model_state_dict"])
