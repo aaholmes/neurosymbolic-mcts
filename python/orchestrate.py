@@ -30,9 +30,9 @@ class TrainingConfig:
     log_games: str = "first"
 
     # Replay buffer (sliding window — old data evicted FIFO)
-    # Default ~5 generations at 100 games/gen × ~55 positions/game
-    buffer_capacity: int = 30_000
+    buffer_capacity: int = 100_000
     buffer_dir: str = "data/buffer"
+    sampling_half_life: int = 20_000  # recency weighting; 0 = uniform sampling
 
     # Training
     minibatches_per_generation: int = 1000
@@ -66,8 +66,10 @@ class TrainingConfig:
         parser.add_argument("--games-per-generation", type=int, default=100)
         parser.add_argument("--simulations-per-move", type=int, default=800)
         parser.add_argument("--enable-koth", action="store_true")
-        parser.add_argument("--buffer-capacity", type=int, default=500_000)
+        parser.add_argument("--buffer-capacity", type=int, default=100_000)
         parser.add_argument("--buffer-dir", type=str, default="data/buffer")
+        parser.add_argument("--sampling-half-life", type=int, default=20_000,
+                            help="Recency sampling half-life in positions (0 = uniform)")
         parser.add_argument("--minibatches-per-gen", type=int, default=1000)
         parser.add_argument("--batch-size", type=int, default=64)
         parser.add_argument("--optimizer", type=str, default="muon",
@@ -112,6 +114,7 @@ class TrainingConfig:
             enable_material_value=not args.disable_material,
             buffer_capacity=args.buffer_capacity,
             buffer_dir=args.buffer_dir,
+            sampling_half_life=args.sampling_half_life,
             minibatches_per_generation=args.minibatches_per_gen,
             batch_size=args.batch_size,
             optimizer=args.optimizer,
@@ -364,6 +367,8 @@ class Orchestrator:
         ]
         if self.config.lr_schedule:
             cmd.extend(["--lr-schedule", self.config.lr_schedule])
+
+        cmd.extend(["--sampling-half-life", str(self.config.sampling_half_life)])
 
         if not self.config.enable_material_value:
             cmd.append("--disable-material")

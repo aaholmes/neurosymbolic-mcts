@@ -298,5 +298,104 @@ class TestReplayBuffer:
         assert np.all(np.isfinite(policies))
 
 
+class TestRecencyWeighting:
+    def test_recency_weighting_favors_recent(self, tmp_dirs):
+        """With small half_life, newer entries should be sampled much more often."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
+                           sampling_half_life=50)
+
+        # Add two batches of equal size, old then new
+        src1 = tempfile.mkdtemp(prefix="old_")
+        src2 = tempfile.mkdtemp(prefix="new_")
+        try:
+            make_fake_bin(os.path.join(src1, "old.bin"), 100)
+            buf.add_games(src1)
+            make_fake_bin(os.path.join(src2, "new.bin"), 100)
+            buf.add_games(src2)
+
+            # With half_life=50 and 100 positions newer:
+            # old weight = 100 * 0.5^(100/50) = 100 * 0.25 = 25
+            # new weight = 100 * 0.5^(0/50) = 100
+            # new fraction = 100/125 = 0.8
+            counts = np.array([e["num_positions"] for e in buf.entries], dtype=np.float64)
+            positions_newer = np.cumsum(counts[::-1])[::-1] - counts
+            recency = np.power(0.5, positions_newer / buf.sampling_half_life)
+            weights = counts * recency
+            weights /= weights.sum()
+
+            assert weights[1] > 0.7, f"Newer entry weight {weights[1]:.3f} should be > 0.7"
+        finally:
+            shutil.rmtree(src1, ignore_errors=True)
+            shutil.rmtree(src2, ignore_errors=True)
+
+    def test_recency_weighting_disabled_is_uniform(self, tmp_dirs):
+        """half_life=0 should give uniform weighting (proportional to file size)."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
+                           sampling_half_life=0)
+
+        src1 = tempfile.mkdtemp(prefix="a_")
+        src2 = tempfile.mkdtemp(prefix="b_")
+        try:
+            make_fake_bin(os.path.join(src1, "a.bin"), 100)
+            buf.add_games(src1)
+            make_fake_bin(os.path.join(src2, "b.bin"), 100)
+            buf.add_games(src2)
+
+            # With equal sizes and no recency, weights should be equal
+            counts = np.array([e["num_positions"] for e in buf.entries], dtype=np.float64)
+            weights = counts / counts.sum()
+
+            assert weights[0] == pytest.approx(0.5)
+            assert weights[1] == pytest.approx(0.5)
+        finally:
+            shutil.rmtree(src1, ignore_errors=True)
+            shutil.rmtree(src2, ignore_errors=True)
+
+    def test_recency_weighting_tiny_half_life(self, tmp_dirs):
+        """half_life=1 should almost exclusively sample from the newest entry."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
+                           sampling_half_life=1)
+
+        src1 = tempfile.mkdtemp(prefix="old_")
+        src2 = tempfile.mkdtemp(prefix="new_")
+        try:
+            make_fake_bin(os.path.join(src1, "old.bin"), 100)
+            buf.add_games(src1)
+            make_fake_bin(os.path.join(src2, "new.bin"), 100)
+            buf.add_games(src2)
+
+            counts = np.array([e["num_positions"] for e in buf.entries], dtype=np.float64)
+            positions_newer = np.cumsum(counts[::-1])[::-1] - counts
+            recency = np.power(0.5, positions_newer / buf.sampling_half_life)
+            weights = counts * recency
+            weights /= weights.sum()
+
+            # Old entry has 100 positions newer → weight = 0.5^(100/1) ≈ 0
+            assert weights[1] > 0.99, f"Newest weight {weights[1]:.6f} should be > 0.99"
+        finally:
+            shutil.rmtree(src1, ignore_errors=True)
+            shutil.rmtree(src2, ignore_errors=True)
+
+    def test_recency_weighting_sample_batch_integration(self, tmp_dirs):
+        """sample_batch with recency weighting returns valid data."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
+                           sampling_half_life=50)
+
+        src = tempfile.mkdtemp(prefix="data_")
+        try:
+            make_fake_bin(os.path.join(src, "game.bin"), 20)
+            buf.add_games(src)
+
+            boards, materials, values, policies = buf.sample_batch(8)
+            assert boards.shape == (8, INPUT_CHANNELS, 8, 8)
+            assert np.all(np.isfinite(boards))
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

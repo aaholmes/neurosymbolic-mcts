@@ -20,9 +20,10 @@ BYTES_PER_SAMPLE = SAMPLE_SIZE_FLOATS * 4
 
 
 class ReplayBuffer:
-    def __init__(self, capacity_positions: int, buffer_dir: str):
+    def __init__(self, capacity_positions: int, buffer_dir: str, sampling_half_life: int = 0):
         self.capacity = capacity_positions
         self.buffer_dir = buffer_dir
+        self.sampling_half_life = sampling_half_life  # 0 = uniform (disabled)
         self.entries = []  # [{path, num_positions, timestamp}] ordered by insertion
         os.makedirs(buffer_dir, exist_ok=True)
 
@@ -62,7 +63,17 @@ class ReplayBuffer:
             raise ValueError("Cannot sample from empty buffer")
 
         # Weight files by position count
-        weights = np.array([e["num_positions"] for e in self.entries], dtype=np.float64)
+        counts = np.array([e["num_positions"] for e in self.entries], dtype=np.float64)
+
+        # Apply recency weighting: weight = num_positions * 0.5^(positions_newer / half_life)
+        if self.sampling_half_life > 0:
+            # positions_newer[i] = total positions in entries i+1..N-1
+            positions_newer = np.cumsum(counts[::-1])[::-1] - counts
+            recency = np.power(0.5, positions_newer / self.sampling_half_life)
+            weights = counts * recency
+        else:
+            weights = counts
+
         weights /= weights.sum()
 
         boards = np.empty((batch_size, INPUT_CHANNELS, 8, 8), dtype=np.float32)

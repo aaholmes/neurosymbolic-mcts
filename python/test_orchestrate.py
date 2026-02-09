@@ -39,7 +39,8 @@ class TestTrainingConfig:
         assert cfg.games_per_generation == 100
         assert cfg.simulations_per_move == 800
         assert cfg.enable_koth is False
-        assert cfg.buffer_capacity == 30_000
+        assert cfg.buffer_capacity == 100_000
+        assert cfg.sampling_half_life == 20_000
         assert cfg.minibatches_per_generation == 1000
         assert cfg.batch_size == 64
         assert cfg.optimizer == "muon"
@@ -685,9 +686,9 @@ class TestSlidingWindowBuffer:
         assert buf2.total_positions() == positions_before
 
     def test_default_buffer_capacity(self):
-        """Default buffer capacity should be ~5 generations worth."""
+        """Default buffer capacity should be ~18 generations worth."""
         cfg = TrainingConfig()
-        assert cfg.buffer_capacity == 30_000
+        assert cfg.buffer_capacity == 100_000
 
     def test_training_uses_constant_lr(self, tmp_workspace):
         """LR should be constant regardless of buffer size."""
@@ -940,6 +941,72 @@ class TestSPRT:
         assert cmd[alpha_idx + 1] == "0.05"
         beta_idx = cmd.index("--sprt-beta")
         assert cmd[beta_idx + 1] == "0.05"
+
+
+class TestSamplingHalfLife:
+    def _make_orch(self, tmp_workspace, **overrides):
+        cfg = TrainingConfig(
+            weights_dir=os.path.join(tmp_workspace, "weights"),
+            data_dir=os.path.join(tmp_workspace, "data"),
+            buffer_dir=os.path.join(tmp_workspace, "buffer"),
+            log_file=os.path.join(tmp_workspace, "log.jsonl"),
+            **overrides,
+        )
+        return Orchestrator(cfg)
+
+    def test_sampling_half_life_config_from_args(self):
+        """Verify CLI parsing of --sampling-half-life."""
+        test_args = ["orchestrate.py", "--sampling-half-life", "50000"]
+        with patch("sys.argv", test_args):
+            cfg = TrainingConfig.from_args()
+        assert cfg.sampling_half_life == 50000
+
+    def test_sampling_half_life_default_from_args(self):
+        """Default --sampling-half-life should be 20000."""
+        test_args = ["orchestrate.py"]
+        with patch("sys.argv", test_args):
+            cfg = TrainingConfig.from_args()
+        assert cfg.sampling_half_life == 20_000
+
+    def test_run_training_passes_sampling_half_life(self, tmp_workspace):
+        """run_training should pass --sampling-half-life to the subprocess."""
+        orch = self._make_orch(tmp_workspace, sampling_half_life=30000)
+        orch.state.current_best_pth = "best.pth"
+
+        mock_result = MagicMock()
+        mock_result.stdout = "Step 100/100 (global 100): Loss=1.50 P=3.00 V=0.50 K=0.35\n"
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run, \
+             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("torch.load", return_value={"model_state_dict": {}}), \
+             patch("orchestrate.export_model_for_rust"):
+            mock_model_cls.return_value = MagicMock()
+            orch.run_training(1, buffer_positions=10000)
+
+            cmd = mock_run.call_args[0][0]
+            hl_idx = cmd.index("--sampling-half-life")
+            assert cmd[hl_idx + 1] == "30000"
+
+    def test_run_training_passes_zero_half_life(self, tmp_workspace):
+        """run_training with half_life=0 should still pass arg to subprocess."""
+        orch = self._make_orch(tmp_workspace, sampling_half_life=0)
+        orch.state.current_best_pth = "best.pth"
+
+        mock_result = MagicMock()
+        mock_result.stdout = "Step 100/100 (global 100): Loss=1.50 P=3.00 V=0.50 K=0.35\n"
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run, \
+             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("torch.load", return_value={"model_state_dict": {}}), \
+             patch("orchestrate.export_model_for_rust"):
+            mock_model_cls.return_value = MagicMock()
+            orch.run_training(1, buffer_positions=10000)
+
+            cmd = mock_run.call_args[0][0]
+            hl_idx = cmd.index("--sampling-half-life")
+            assert cmd[hl_idx + 1] == "0"
 
 
 if __name__ == "__main__":
