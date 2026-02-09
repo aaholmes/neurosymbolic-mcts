@@ -145,6 +145,9 @@ def get_libtorch_env():
     env["LD_LIBRARY_PATH"] = torch_lib_path + ":" + env.get("LD_LIBRARY_PATH", "")
     env["LIBTORCH_USE_PYTORCH"] = "1"
     env["LIBTORCH_BYPASS_VERSION_CHECK"] = "1"
+    # Ensure CUDA is visible to tch-rs (defaults to GPU 0 if not set)
+    if "CUDA_VISIBLE_DEVICES" not in env:
+        env["CUDA_VISIBLE_DEVICES"] = "0"
     # Leave 1 core for inference server thread + OS
     env["RAYON_NUM_THREADS"] = str(max(1, multiprocessing.cpu_count() // 2 - 1))
     return env
@@ -263,10 +266,30 @@ class Orchestrator:
         print(f"Buffer: +{added} positions, {total} total")
         return total
 
-    def run_training(self, generation):
+    def _compute_adaptive_minibatches(self, buffer_positions):
+        """Compute minibatches targeting ~1.5 epochs over the buffer.
+
+        Prevents overfitting by scaling training to buffer size rather than
+        using a fixed count. Early generations with small buffers get fewer
+        steps; later generations with large buffers get more.
+        """
+        target = max(100, int(1.5 * buffer_positions / self.config.batch_size))
+        actual = min(target, self.config.minibatches_per_generation)
+        return actual
+
+    def run_training(self, generation, buffer_positions=None):
         """Train on replay buffer, return (candidate_pth, candidate_pt)."""
         candidate_pth = os.path.join(self.config.weights_dir, f"candidate_{generation}.pth")
         candidate_pt = os.path.join(self.config.weights_dir, f"candidate_{generation}.pt")
+
+        # Adaptive minibatches: scale to buffer size to prevent overfitting
+        if buffer_positions is not None and buffer_positions > 0:
+            minibatches = self._compute_adaptive_minibatches(buffer_positions)
+            effective_epochs = (minibatches * self.config.batch_size) / buffer_positions
+            print(f"Adaptive training: {minibatches} minibatches "
+                  f"(~{effective_epochs:.1f} epochs over {buffer_positions} positions)")
+        else:
+            minibatches = self.config.minibatches_per_generation
 
         # Set default LR based on optimizer
         lr = self.config.initial_lr
@@ -280,7 +303,7 @@ class Orchestrator:
             "--optimizer", self.config.optimizer,
             "--lr", str(lr),
             "--batch-size", str(self.config.batch_size),
-            "--minibatches", str(self.config.minibatches_per_generation),
+            "--minibatches", str(minibatches),
         ]
         if self.config.lr_schedule:
             cmd.extend(["--lr-schedule", self.config.lr_schedule])
@@ -288,7 +311,7 @@ class Orchestrator:
         if not self.config.enable_material_value:
             cmd.append("--disable-material")
 
-        print(f"Training: {self.config.minibatches_per_generation} minibatches, "
+        print(f"Training: {minibatches} minibatches, "
               f"optimizer={self.config.optimizer}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
@@ -299,8 +322,8 @@ class Orchestrator:
         with open(stats_path, "w") as f:
             f.write(result.stdout)
 
-        # Parse last training loss line from stdout
-        self._last_training_losses = {}
+        # Store actual minibatches used for logging
+        self._last_training_losses = {"actual_minibatches": minibatches}
         for line in reversed(result.stdout.splitlines()):
             if "Loss=" in line and "P=" in line and "V=" in line:
                 import re
@@ -470,8 +493,8 @@ class Orchestrator:
             # 2. Buffer update
             buffer_size = self.update_buffer(game_data_dir)
 
-            # 3. Train
-            candidate_pth, candidate_pt = self.run_training(generation)
+            # 3. Train (adaptive minibatches based on buffer size)
+            candidate_pth, candidate_pt = self.run_training(generation, buffer_positions=buffer_size)
 
             # 4. Evaluate
             accepted, eval_results = self.run_evaluation(candidate_pt)
@@ -503,6 +526,7 @@ class Orchestrator:
                 log["training_policy_loss"] = self._last_training_losses.get("policy_loss")
                 log["training_value_loss"] = self._last_training_losses.get("value_loss")
                 log["training_k_mean"] = self._last_training_losses.get("k_mean")
+                log["actual_minibatches"] = self._last_training_losses.get("actual_minibatches")
             self.log_entry(log)
 
             # 7. Write overview file

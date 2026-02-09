@@ -450,6 +450,7 @@ class TestOrchestratorExtended:
 
         mock_result = MagicMock()
         mock_result.stdout = "WINS=60 LOSSES=30 DRAWS=10 WINRATE=0.6500 ACCEPTED=true\n"
+        mock_result.stderr = ""
         mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result):
@@ -468,6 +469,7 @@ class TestOrchestratorExtended:
 
         mock_result = MagicMock()
         mock_result.stdout = "WINS=40 LOSSES=50 DRAWS=10 WINRATE=0.4500 ACCEPTED=false\n"
+        mock_result.stderr = ""
         mock_result.returncode = 1
 
         with patch("subprocess.run", return_value=mock_result):
@@ -484,6 +486,7 @@ class TestOrchestratorExtended:
 
         mock_result = MagicMock()
         mock_result.stdout = ""
+        mock_result.stderr = ""
         mock_result.returncode = 1
 
         with patch("subprocess.run", return_value=mock_result):
@@ -493,6 +496,123 @@ class TestOrchestratorExtended:
         assert results["wins"] == 0
         assert results["losses"] == 0
         assert results["draws"] == 0
+
+
+class TestAdaptiveMinibatches:
+    def _make_orch(self, tmp_workspace, **overrides):
+        cfg = TrainingConfig(
+            weights_dir=os.path.join(tmp_workspace, "weights"),
+            data_dir=os.path.join(tmp_workspace, "data"),
+            buffer_dir=os.path.join(tmp_workspace, "buffer"),
+            log_file=os.path.join(tmp_workspace, "log.jsonl"),
+            **overrides,
+        )
+        return Orchestrator(cfg)
+
+    def test_small_buffer_gets_minimum_100_minibatches(self, tmp_workspace):
+        """With very few positions, floor of 100 minibatches applies."""
+        orch = self._make_orch(tmp_workspace)
+        # 100 positions / 64 batch_size * 1.5 = 2.3 → floored to 100
+        result = orch._compute_adaptive_minibatches(100)
+        assert result == 100
+
+    def test_gen1_buffer_gets_scaled_minibatches(self, tmp_workspace):
+        """~7000 positions (gen 1) should get ~162 minibatches, not 1000."""
+        orch = self._make_orch(tmp_workspace)
+        result = orch._compute_adaptive_minibatches(6914)
+        expected = int(1.5 * 6914 / 64)  # = 162
+        assert result == expected
+        assert result < 200  # Much less than the old default of 1000
+
+    def test_large_buffer_capped_at_config_max(self, tmp_workspace):
+        """With large buffer, minibatches capped at config maximum."""
+        orch = self._make_orch(tmp_workspace, minibatches_per_generation=1000)
+        # 100,000 positions * 1.5 / 64 = 2343 → capped at 1000
+        result = orch._compute_adaptive_minibatches(100_000)
+        assert result == 1000
+
+    def test_medium_buffer_scales_linearly(self, tmp_workspace):
+        """Buffer in the middle range scales proportionally."""
+        orch = self._make_orch(tmp_workspace)
+        result_20k = orch._compute_adaptive_minibatches(20_000)
+        result_40k = orch._compute_adaptive_minibatches(40_000)
+        # Both should be proportional (before hitting cap)
+        assert result_40k == pytest.approx(2 * result_20k, abs=2)
+
+    def test_effective_epochs_around_1_5(self, tmp_workspace):
+        """The adaptive calculation should produce ~1.5 effective epochs."""
+        orch = self._make_orch(tmp_workspace)
+        buffer_size = 12_920  # Gen 2 from the analysis
+        minibatches = orch._compute_adaptive_minibatches(buffer_size)
+        effective_epochs = (minibatches * 64) / buffer_size
+        assert 1.0 <= effective_epochs <= 2.0
+
+    def test_run_training_passes_buffer_positions(self, tmp_workspace):
+        """run_training uses adaptive minibatches when buffer_positions given."""
+        orch = self._make_orch(tmp_workspace)
+        orch.state.current_best_pth = "best.pth"
+
+        mock_result = MagicMock()
+        mock_result.stdout = "Step 162/162 (global 162): Loss=1.50 P=3.00 V=0.50 K=0.35\n"
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run, \
+             patch.object(orch, '_compute_adaptive_minibatches', return_value=162) as mock_adaptive, \
+             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("torch.load", return_value={"model_state_dict": {}}), \
+             patch("orchestrate.export_model_for_rust"):
+            mock_model = MagicMock()
+            mock_model_cls.return_value = mock_model
+
+            orch.run_training(1, buffer_positions=6914)
+
+            mock_adaptive.assert_called_once_with(6914)
+            # Check the --minibatches arg in the subprocess call
+            cmd = mock_run.call_args[0][0]
+            mb_idx = cmd.index("--minibatches")
+            assert cmd[mb_idx + 1] == "162"
+
+    def test_run_training_without_buffer_uses_config(self, tmp_workspace):
+        """run_training without buffer_positions uses config default."""
+        orch = self._make_orch(tmp_workspace, minibatches_per_generation=500)
+        orch.state.current_best_pth = "best.pth"
+
+        mock_result = MagicMock()
+        mock_result.stdout = "Step 500/500 (global 500): Loss=1.50 P=3.00 V=0.50 K=0.35\n"
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run, \
+             patch("orchestrate.LogosNet") as mock_model_cls, \
+             patch("torch.load", return_value={"model_state_dict": {}}), \
+             patch("orchestrate.export_model_for_rust"):
+            mock_model = MagicMock()
+            mock_model_cls.return_value = mock_model
+
+            orch.run_training(1)
+
+            cmd = mock_run.call_args[0][0]
+            mb_idx = cmd.index("--minibatches")
+            assert cmd[mb_idx + 1] == "500"
+
+
+class TestCudaEnv:
+    def test_cuda_visible_devices_set_by_default(self):
+        """CUDA_VISIBLE_DEVICES should default to '0' if not set."""
+        from orchestrate import get_libtorch_env
+        with patch.dict(os.environ, {}, clear=False):
+            # Remove CUDA_VISIBLE_DEVICES if present
+            env_copy = os.environ.copy()
+            env_copy.pop("CUDA_VISIBLE_DEVICES", None)
+            with patch.dict(os.environ, env_copy, clear=True):
+                env = get_libtorch_env()
+                assert env["CUDA_VISIBLE_DEVICES"] == "0"
+
+    def test_cuda_visible_devices_not_overridden(self):
+        """CUDA_VISIBLE_DEVICES should not be overridden if already set."""
+        from orchestrate import get_libtorch_env
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1,2"}):
+            env = get_libtorch_env()
+            assert env["CUDA_VISIBLE_DEVICES"] == "1,2"
 
 
 class TestMaxGenerations:
