@@ -169,7 +169,10 @@ def train_with_config(
         print("No training data found.")
         return 0
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True, drop_last=False,
+        num_workers=2, pin_memory=True, persistent_workers=True,
+    )
 
     # Model
     model = LogosNet().to(DEVICE)

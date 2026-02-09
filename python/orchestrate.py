@@ -139,11 +139,14 @@ def export_model_for_rust(model, output_path):
 
 def get_libtorch_env():
     """Get environment with LibTorch on LD_LIBRARY_PATH."""
+    import multiprocessing
     torch_lib_path = os.path.join(os.path.dirname(torch.__file__), "lib")
     env = os.environ.copy()
     env["LD_LIBRARY_PATH"] = torch_lib_path + ":" + env.get("LD_LIBRARY_PATH", "")
     env["LIBTORCH_USE_PYTORCH"] = "1"
     env["LIBTORCH_BYPASS_VERSION_CHECK"] = "1"
+    # Leave 1 core for inference server thread + OS
+    env["RAYON_NUM_THREADS"] = str(max(1, multiprocessing.cpu_count() // 2 - 1))
     return env
 
 

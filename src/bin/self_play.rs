@@ -65,12 +65,26 @@ fn main() {
 
     std::fs::create_dir_all(output_dir).unwrap();
 
+    // Create a single shared InferenceServer for all game threads
+    let shared_server: Option<Arc<InferenceServer>> = if let Some(ref path) = model_path {
+        let mut nn = NeuralNetPolicy::new();
+        if let Err(e) = nn.load(path) {
+            eprintln!("Failed to load model from {}: {}", path, e);
+            None
+        } else {
+            println!("   Shared InferenceServer: batch_size=16");
+            Some(Arc::new(InferenceServer::new(nn, 16)))
+        }
+    } else {
+        None
+    };
+
     let completed_games = Mutex::new(0);
 
     // Run games in parallel
     (0..num_games).into_par_iter().for_each(|i| {
         let verbose = log_all || (log_first && i == 0);
-        let samples = play_game(i, simulations, model_path.clone(), enable_koth, enable_tier1, enable_material, verbose);
+        let samples = play_game(i, simulations, shared_server.clone(), enable_koth, enable_tier1, enable_material, verbose);
 
         if !samples.is_empty() {
             // Save binary data
@@ -87,23 +101,10 @@ fn main() {
     });
 }
 
-fn play_game(game_num: usize, simulations: u32, model_path: Option<String>, enable_koth: bool, enable_tier1: bool, enable_material: bool, verbose: bool) -> Vec<TrainingSample> {
+fn play_game(game_num: usize, simulations: u32, inference_server: Option<Arc<InferenceServer>>, enable_koth: bool, enable_tier1: bool, enable_material: bool, verbose: bool) -> Vec<TrainingSample> {
     let mut rng = StdRng::seed_from_u64(game_num as u64);
     let move_gen = MoveGen::new();
     let mut game_moves: Vec<String> = Vec::new();
-
-    // Each thread gets its own NN instance, wrapped in an InferenceServer
-    let inference_server: Option<Arc<InferenceServer>> = if let Some(path) = model_path {
-        let mut nn = NeuralNetPolicy::new();
-        if let Err(e) = nn.load(&path) {
-            eprintln!("Failed to load model from {}: {}", path, e);
-            None
-        } else {
-            Some(Arc::new(InferenceServer::new(nn, 1)))
-        }
-    } else {
-        None
-    };
 
     let has_nn = inference_server.is_some();
 

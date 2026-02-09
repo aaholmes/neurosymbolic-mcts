@@ -16,8 +16,9 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use rayon::prelude::*;
 
 /// Result of a single evaluation game.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -301,6 +302,178 @@ pub fn play_evaluation_game_koth(
     result
 }
 
+/// Play a single evaluation game using shared InferenceServers (no ownership transfer).
+pub fn play_evaluation_game_with_servers(
+    candidate_server: &Option<Arc<InferenceServer>>,
+    current_server: &Option<Arc<InferenceServer>>,
+    candidate_is_white: bool,
+    simulations: u32,
+    enable_koth: bool,
+    enable_tier1: bool,
+    enable_material: bool,
+    game_seed: u64,
+) -> GameResult {
+    let mut rng = StdRng::seed_from_u64(game_seed);
+    let move_gen = MoveGen::new();
+
+    let candidate_has_nn = candidate_server.is_some();
+    let current_has_nn = current_server.is_some();
+
+    let config_candidate = TacticalMctsConfig {
+        max_iterations: simulations,
+        time_limit: Duration::from_secs(120),
+        mate_search_depth: if enable_tier1 { 5 } else { 0 },
+        exploration_constant: 1.414,
+        use_neural_policy: candidate_has_nn,
+        inference_server: candidate_server.clone(),
+        logger: None,
+        dirichlet_alpha: 0.0,
+        dirichlet_epsilon: 0.0,
+        enable_koth,
+        enable_tier1_gate: enable_tier1,
+        enable_material_value: enable_material,
+        enable_tier3_neural: candidate_has_nn,
+        ..Default::default()
+    };
+
+    let config_current = TacticalMctsConfig {
+        max_iterations: simulations,
+        time_limit: Duration::from_secs(120),
+        mate_search_depth: if enable_tier1 { 5 } else { 0 },
+        exploration_constant: 1.414,
+        use_neural_policy: current_has_nn,
+        inference_server: current_server.clone(),
+        logger: None,
+        dirichlet_alpha: 0.0,
+        dirichlet_epsilon: 0.0,
+        enable_koth,
+        enable_tier1_gate: enable_tier1,
+        enable_material_value: enable_material,
+        enable_tier3_neural: current_has_nn,
+        ..Default::default()
+    };
+
+    let mut board_stack = BoardStack::new();
+    let mut move_count = 0;
+    let mut game_moves: Vec<String> = Vec::new();
+    let mut tt_candidate = TranspositionTable::new();
+    let mut tt_current = TranspositionTable::new();
+
+    loop {
+        let board = board_stack.current_state().clone();
+        let white_to_move = board.w_to_move;
+
+        let candidate_turn = (white_to_move && candidate_is_white)
+            || (!white_to_move && !candidate_is_white);
+
+        let (_best_move, _stats, root) = if candidate_turn {
+            tactical_mcts_search_with_tt(
+                board.clone(),
+                &move_gen,
+                &mut None,
+                config_candidate.clone(),
+                &mut tt_candidate,
+            )
+        } else {
+            tactical_mcts_search_with_tt(
+                board.clone(),
+                &move_gen,
+                &mut None,
+                config_current.clone(),
+                &mut tt_current,
+            )
+        };
+
+        let selected_move = select_eval_move(&root, &mut rng);
+        match selected_move {
+            None => break,
+            Some(mv) => {
+                game_moves.push(mv.to_uci());
+                board_stack.make_move(mv);
+                move_count += 1;
+            }
+        }
+
+        if enable_koth {
+            let (white_won, black_won) = board_stack.current_state().is_koth_win();
+            if white_won || black_won {
+                break;
+            }
+        }
+
+        if board_stack.is_draw_by_repetition() {
+            break;
+        }
+        if board_stack.current_state().halfmove_clock() >= 100 {
+            break;
+        }
+        if move_count > 200 {
+            break;
+        }
+
+        let (mate, stalemate) = board_stack.current_state().is_checkmate_or_stalemate(&move_gen);
+        if mate || stalemate {
+            break;
+        }
+    }
+
+    let final_board = board_stack.current_state();
+    let (mate, stalemate) = final_board.is_checkmate_or_stalemate(&move_gen);
+    let is_repetition = board_stack.is_draw_by_repetition();
+    let is_50_move = final_board.halfmove_clock() >= 100;
+    let (koth_white, koth_black) = if enable_koth {
+        final_board.is_koth_win()
+    } else {
+        (false, false)
+    };
+
+    let (result, result_str) = if koth_white || koth_black {
+        let white_wins = koth_white;
+        let r = if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
+            GameResult::CandidateWin
+        } else {
+            GameResult::CurrentWin
+        };
+        let s = if white_wins { "White wins (KOTH)" } else { "Black wins (KOTH)" };
+        (r, s)
+    } else if mate {
+        let white_wins = !final_board.w_to_move;
+        let r = if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
+            GameResult::CandidateWin
+        } else {
+            GameResult::CurrentWin
+        };
+        let s = if white_wins { "White wins (checkmate)" } else { "Black wins (checkmate)" };
+        (r, s)
+    } else if stalemate {
+        (GameResult::Draw, "Draw (stalemate)")
+    } else if is_repetition {
+        (GameResult::Draw, "Draw (repetition)")
+    } else if is_50_move {
+        (GameResult::Draw, "Draw (50-move rule)")
+    } else if move_count > 200 {
+        (GameResult::Draw, "Draw (move limit)")
+    } else {
+        (GameResult::Draw, "Draw")
+    };
+
+    let mut move_str = String::new();
+    for (i, uci) in game_moves.iter().enumerate() {
+        if i % 2 == 0 {
+            if !move_str.is_empty() { move_str.push(' '); }
+            move_str.push_str(&format!("{}.", i / 2 + 1));
+        }
+        move_str.push(' ');
+        move_str.push_str(uci);
+    }
+    let cand_color = if candidate_is_white { "White" } else { "Black" };
+    eprintln!("  [seed={}] Candidate={} | {} moves | {} -> {:?}",
+              game_seed, cand_color, game_moves.len(), result_str, result);
+    eprintln!("  {}", move_str);
+
+    result
+}
+
 /// Run a full evaluation match between two models.
 pub fn evaluate_models(
     candidate_path: &str,
@@ -321,38 +494,37 @@ pub fn evaluate_models_koth(
     enable_tier1: bool,
     enable_material: bool,
 ) -> EvalResults {
-    let mut results = EvalResults {
+    // Load each model once, create shared InferenceServers
+    let candidate_server: Option<Arc<InferenceServer>> = {
+        let mut nn = NeuralNetPolicy::new();
+        if let Err(e) = nn.load(candidate_path) {
+            eprintln!("Failed to load candidate model: {}", e);
+            return EvalResults { wins: 0, losses: 0, draws: 0 };
+        }
+        Some(Arc::new(InferenceServer::new(nn, 8)))
+    };
+
+    let current_server: Option<Arc<InferenceServer>> = {
+        let mut nn = NeuralNetPolicy::new();
+        if let Err(e) = nn.load(current_path) {
+            eprintln!("Failed to load current model: {}", e);
+            return EvalResults { wins: 0, losses: 0, draws: 0 };
+        }
+        Some(Arc::new(InferenceServer::new(nn, 8)))
+    };
+
+    let results = Mutex::new(EvalResults {
         wins: 0,
         losses: 0,
         draws: 0,
-    };
+    });
 
-    for game_idx in 0..num_games {
-        // Alternate colors each game
+    (0..num_games).into_par_iter().for_each(|game_idx| {
         let candidate_is_white = game_idx % 2 == 0;
 
-        // Load fresh models for each game (avoids stale cache)
-        let mut candidate_nn = {
-            let mut nn = NeuralNetPolicy::new();
-            if let Err(e) = nn.load(candidate_path) {
-                eprintln!("Failed to load candidate model: {}", e);
-                return results;
-            }
-            Some(nn)
-        };
-
-        let mut current_nn = {
-            let mut nn = NeuralNetPolicy::new();
-            if let Err(e) = nn.load(current_path) {
-                eprintln!("Failed to load current model: {}", e);
-                return results;
-            }
-            Some(nn)
-        };
-
-        let result = play_evaluation_game_koth(
-            &mut candidate_nn,
-            &mut current_nn,
+        let result = play_evaluation_game_with_servers(
+            &candidate_server,
+            &current_server,
             candidate_is_white,
             simulations,
             enable_koth,
@@ -361,10 +533,11 @@ pub fn evaluate_models_koth(
             game_idx as u64,
         );
 
+        let mut r = results.lock().unwrap();
         match result {
-            GameResult::CandidateWin => results.wins += 1,
-            GameResult::CurrentWin => results.losses += 1,
-            GameResult::Draw => results.draws += 1,
+            GameResult::CandidateWin => r.wins += 1,
+            GameResult::CurrentWin => r.losses += 1,
+            GameResult::Draw => r.draws += 1,
         }
 
         let color_str = if candidate_is_white { "White" } else { "Black" };
@@ -374,13 +547,13 @@ pub fn evaluate_models_koth(
             num_games,
             color_str,
             result,
-            results.wins,
-            results.losses,
-            results.draws
+            r.wins,
+            r.losses,
+            r.draws
         );
-    }
+    });
 
-    results
+    results.into_inner().unwrap()
 }
 
 fn main() {
