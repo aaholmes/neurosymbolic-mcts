@@ -12,6 +12,8 @@ use kingfisher::mcts::{
 };
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::move_types::Move;
+use kingfisher::search::mate_search;
+use kingfisher::search::koth_center_in_3;
 use kingfisher::search::quiescence::forced_material_balance;
 use kingfisher::tensor::{move_to_index, board_to_planes};
 use kingfisher::transposition::TranspositionTable;
@@ -129,9 +131,34 @@ fn play_game(game_num: usize, simulations: u32, model_path: Option<String>, enab
     let mut samples = Vec::new();
     let mut move_count = 0;
     let mut previous_root = None;
+    let mut early_outcome: Option<f32> = None;
+    let mut early_reason: &str = "";
 
     loop {
         let board = board_stack.current_state().clone();
+
+        // --- Tier 1 pre-checks: skip MCTS for positions resolved by safety gates ---
+        if enable_koth && enable_tier1 {
+            if koth_center_in_3(&board, &move_gen).is_some() {
+                early_outcome = Some(if board.w_to_move { 1.0 } else { -1.0 });
+                early_reason = if board.w_to_move { "White wins (Tier1 KOTH)" } else { "Black wins (Tier1 KOTH)" };
+                break;
+            }
+        }
+
+        if enable_tier1 {
+            let mut temp_stack = BoardStack::with_board(board.clone());
+            let (score, _, _) = mate_search(&mut temp_stack, &move_gen, 5, false);
+            if score >= 1_000_000 {
+                early_outcome = Some(if board.w_to_move { 1.0 } else { -1.0 });
+                early_reason = if board.w_to_move { "White wins (Tier1 mate)" } else { "Black wins (Tier1 mate)" };
+                break;
+            } else if score <= -1_000_000 {
+                early_outcome = Some(if board.w_to_move { -1.0 } else { 1.0 });
+                early_reason = if board.w_to_move { "Black wins (Tier1 mate)" } else { "White wins (Tier1 mate)" };
+                break;
+            }
+        }
 
         // Try to reuse subtree from previous search (Phase 2)
         let reused_root = previous_root.take();
@@ -223,7 +250,9 @@ fn play_game(game_num: usize, simulations: u32, model_path: Option<String>, enab
         (false, false)
     };
 
-    let final_score_white = if koth_white {
+    let final_score_white = if let Some(score) = early_outcome {
+        score
+    } else if koth_white {
         1.0 // White wins by KOTH
     } else if koth_black {
         -1.0 // Black wins by KOTH
@@ -270,7 +299,9 @@ fn play_game(game_num: usize, simulations: u32, model_path: Option<String>, enab
         }
         eprintln!();
 
-        let result_str = if koth_white {
+        let result_str = if early_outcome.is_some() {
+            early_reason
+        } else if koth_white {
             "White wins (KOTH)"
         } else if koth_black {
             "Black wins (KOTH)"
