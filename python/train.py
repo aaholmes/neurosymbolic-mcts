@@ -160,15 +160,46 @@ def get_lr_for_step(schedule, base_lr, step):
     return current_lr
 
 
+def freeze_heads(model, train_heads):
+    """Freeze parameters not in the specified head group.
+
+    train_heads: 'all' (default), 'policy' (freeze value+k), 'value' (freeze policy).
+    The backbone is always trained.
+    """
+    if train_heads == "all":
+        return
+
+    # Parameter name prefixes for each head
+    policy_prefixes = ("p_conv", "p_bn", "p_head")
+    value_prefixes = ("v_conv", "v_bn", "v_fc", "v_out")
+    k_prefixes = ("k_stm_patch_fc", "k_opp_patch_fc", "k_combine", "k_out")
+
+    if train_heads == "policy":
+        frozen = value_prefixes + k_prefixes
+    elif train_heads == "value":
+        frozen = policy_prefixes
+    else:
+        raise ValueError(f"Unknown train_heads={train_heads!r}, expected 'all', 'policy', or 'value'")
+
+    count = 0
+    for name, param in model.named_parameters():
+        if any(name.startswith(prefix) for prefix in frozen):
+            param.requires_grad = False
+            count += 1
+
+    print(f"Frozen {count} parameters (train_heads={train_heads})")
+
+
 def make_optimizer(model, optimizer_name, lr):
-    """Create optimizer by name."""
+    """Create optimizer by name. Only includes parameters with requires_grad."""
+    params = [p for p in model.parameters() if p.requires_grad]
     if optimizer_name == 'muon':
         from muon import Muon
-        return Muon(model.parameters(), lr=lr, backend_lr=lr * 0.1)
+        return Muon(params, lr=lr, backend_lr=lr * 0.1)
     elif optimizer_name == 'adamw':
-        return optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+        return optim.AdamW(params, lr=lr, weight_decay=1e-4)
     else:
-        return optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+        return optim.Adam(params, lr=lr, weight_decay=1e-4)
 
 
 def train_with_config(
@@ -187,6 +218,7 @@ def train_with_config(
     augment=True,
     reset_optimizer=False,
     sampling_half_life=0,
+    train_heads="all",
 ):
     """Core training function. Returns number of minibatches trained.
 
@@ -212,7 +244,6 @@ def train_with_config(
 
     # Model
     model = OracleNet().to(DEVICE)
-    optimizer = make_optimizer(model, optimizer_name, lr)
 
     # Resume from checkpoint
     global_minibatch = 0
@@ -222,18 +253,27 @@ def train_with_config(
             checkpoint = torch.load(resume_path, map_location=DEVICE, weights_only=False)
             if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
                 model.load_state_dict(checkpoint["model_state_dict"])
-                optimizer = make_optimizer(model, optimizer_name, lr)
-                if not reset_optimizer and "optimizer_state_dict" in checkpoint:
-                    try:
-                        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-                    except Exception:
-                        pass  # Optimizer mismatch is OK, just use fresh
                 global_minibatch = checkpoint.get("global_minibatch", 0)
             else:
                 # Legacy format: just state_dict
                 model.load_state_dict(checkpoint)
         except Exception as e:
             print(f"Warning: Failed to load resume checkpoint: {e}")
+
+    # Freeze heads BEFORE creating optimizer (so optimizer only tracks trainable params)
+    freeze_heads(model, train_heads)
+    optimizer = make_optimizer(model, optimizer_name, lr)
+
+    if resume_path and os.path.exists(resume_path) and not reset_optimizer:
+        try:
+            checkpoint = torch.load(resume_path, map_location=DEVICE, weights_only=False)
+            if isinstance(checkpoint, dict) and "optimizer_state_dict" in checkpoint:
+                try:
+                    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                except Exception:
+                    pass  # Optimizer mismatch is OK (e.g., different param count after freeze)
+        except Exception:
+            pass
 
     # LR schedule
     schedule = parse_lr_schedule(lr_schedule)
@@ -399,6 +439,9 @@ def parse_args():
                         help='Disable symmetry augmentation')
     parser.add_argument('--sampling-half-life', type=int, default=0,
                         help='Recency sampling half-life in positions (0 = uniform)')
+    parser.add_argument('--train-heads', type=str, default='all',
+                        choices=['all', 'policy', 'value'],
+                        help='Which heads to train: all, policy (freeze value+k), value (freeze policy)')
     return parser.parse_args()
 
 
@@ -442,6 +485,7 @@ def train():
         augment=args.augment,
         reset_optimizer=args.reset_optimizer,
         sampling_half_life=args.sampling_half_life,
+        train_heads=args.train_heads,
     )
 
 

@@ -364,10 +364,14 @@ class Orchestrator:
         actual = min(target, self.config.minibatches_per_generation)
         return actual
 
-    def run_training(self, generation, buffer_positions=None):
-        """Train on replay buffer, return (candidate_pth, candidate_pt)."""
-        candidate_pth = os.path.join(self.config.weights_dir, f"candidate_{generation}.pth")
-        candidate_pt = os.path.join(self.config.weights_dir, f"candidate_{generation}.pt")
+    def run_training(self, generation, buffer_positions=None, train_heads="all", suffix=""):
+        """Train on replay buffer, return (candidate_pth, candidate_pt).
+
+        train_heads: 'all', 'policy' (freeze value+k), or 'value' (freeze policy).
+        suffix: appended to filename, e.g. '_policy' -> candidate_3_policy.pth
+        """
+        candidate_pth = os.path.join(self.config.weights_dir, f"candidate_{generation}{suffix}.pth")
+        candidate_pt = os.path.join(self.config.weights_dir, f"candidate_{generation}{suffix}.pt")
 
         # Adaptive minibatches: scale to buffer size to prevent overfitting
         if buffer_positions is not None and buffer_positions > 0:
@@ -399,7 +403,10 @@ class Orchestrator:
         if not self.config.enable_material_value:
             cmd.append("--disable-material")
 
-        print(f"Training: {minibatches} minibatches, "
+        if train_heads != "all":
+            cmd.extend(["--train-heads", train_heads])
+
+        print(f"Training ({train_heads}): {minibatches} minibatches, "
               f"optimizer={self.config.optimizer}, lr={lr}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
@@ -604,13 +611,49 @@ class Orchestrator:
             # 2. Buffer update
             buffer_size = self.update_buffer(game_data_dir)
 
-            # 3. Train (adaptive minibatches based on buffer size)
-            candidate_pth, candidate_pt = self.run_training(generation, buffer_positions=buffer_size)
+            # 3. Train 3 variants & evaluate each via SPRT
+            variants = [
+                ("policy", "_policy"),
+                ("value", "_value"),
+                ("all", ""),
+            ]
 
-            # 4. Evaluate
-            accepted, eval_results = self.run_evaluation(candidate_pt, generation=generation)
+            best_variant = None  # (accepted, train_heads, pth, pt, eval_results, training_losses)
 
-            # 5. Accept or reject
+            for train_heads, suffix in variants:
+                print(f"\n--- Variant: train_heads={train_heads} ---")
+                candidate_pth, candidate_pt = self.run_training(
+                    generation, buffer_positions=buffer_size,
+                    train_heads=train_heads, suffix=suffix,
+                )
+                variant_training_losses = dict(self._last_training_losses)
+
+                accepted, eval_results = self.run_evaluation(candidate_pt, generation=generation)
+                print(f"  {train_heads}: W:{eval_results['wins']} L:{eval_results['losses']} "
+                      f"D:{eval_results['draws']} WR:{eval_results['winrate']:.3f} "
+                      f"LLR:{eval_results.get('llr', 'N/A')} -> "
+                      f"{'ACCEPTED' if accepted else 'rejected'}")
+
+                if accepted:
+                    # Pick the accepted variant with highest winrate
+                    if best_variant is None or eval_results["winrate"] > best_variant[4]["winrate"]:
+                        best_variant = (True, train_heads, candidate_pth, candidate_pt,
+                                        eval_results, variant_training_losses)
+
+            # 4. Accept best passing variant, or reject all
+            if best_variant:
+                accepted, train_heads, candidate_pth, candidate_pt, eval_results, training_losses = best_variant
+                print(f"\n>>> Accepting variant: train_heads={train_heads} "
+                      f"(WR={eval_results['winrate']:.3f})")
+                self._last_training_losses = training_losses
+            else:
+                # No variant passed — use the 'all' variant for logging
+                accepted = False
+                train_heads = "all"
+                # candidate_pth/pt already set from last iteration (the 'all' variant)
+                self._last_training_losses = variant_training_losses
+                print(f"\n>>> No variant passed SPRT")
+
             self.handle_eval_result(
                 accepted=accepted,
                 generation=generation,
@@ -619,7 +662,7 @@ class Orchestrator:
                 eval_results=eval_results,
             )
 
-            # 6. Log
+            # 5. Log
             log = {
                 "gen": generation,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -634,6 +677,7 @@ class Orchestrator:
                 "eval_llr": eval_results.get("llr"),
                 "eval_sprt_result": eval_results.get("sprt_result"),
                 "accepted": accepted,
+                "accepted_variant": train_heads if accepted else None,
                 "current_best": self.state.current_best_pt,
             }
             if self._last_training_losses:
@@ -644,7 +688,7 @@ class Orchestrator:
                 log["actual_minibatches"] = self._last_training_losses.get("actual_minibatches")
             self.log_entry(log)
 
-            # 7. Write overview file
+            # 6. Write overview file
             self._write_overview(generation, buffer_size, accepted, eval_results)
 
             # 8. Save state
