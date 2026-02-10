@@ -34,8 +34,6 @@ pub struct AblationConfig {
     pub enable_tier1_gate: bool,
     /// Enable Tier 3: Neural network policy/value
     pub enable_tier3_neural: bool,
-    /// Enable Q-value initialization from tactical analysis
-    pub enable_q_init: bool,
 }
 
 impl AblationConfig {
@@ -44,7 +42,6 @@ impl AblationConfig {
         AblationConfig {
             enable_tier1_gate: true,
             enable_tier3_neural: true,
-            enable_q_init: true,
         }
     }
 
@@ -53,7 +50,6 @@ impl AblationConfig {
         AblationConfig {
             enable_tier1_gate: false,
             enable_tier3_neural: false,
-            enable_q_init: false,
         }
     }
 
@@ -62,16 +58,14 @@ impl AblationConfig {
         AblationConfig {
             enable_tier1_gate: true,
             enable_tier3_neural: false,
-            enable_q_init: false,
         }
     }
 
-    /// Tiers 1+2 (classical hybrid, no neural)
+    /// Classical hybrid (Tier 1 + MVV-LVA visit ordering, no neural)
     pub fn classical_hybrid() -> Self {
         AblationConfig {
             enable_tier1_gate: true,
             enable_tier3_neural: false,
-            enable_q_init: true,
         }
     }
 
@@ -80,7 +74,6 @@ impl AblationConfig {
         AblationConfig {
             enable_tier1_gate: false,
             enable_tier3_neural: true,
-            enable_q_init: false,
         }
     }
 }
@@ -146,7 +139,7 @@ impl Default for ExperimentConfig {
 /// Generate standard ablation experiment configurations
 pub fn generate_ablation_configs() -> Vec<ExperimentConfig> {
     let base = ExperimentConfig::default();
-    
+
     vec![
         ExperimentConfig {
             name: "baseline_mcts".to_string(),

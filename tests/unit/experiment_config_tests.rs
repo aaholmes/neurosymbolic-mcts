@@ -11,7 +11,6 @@ fn test_ablation_full_all_enabled() {
     let config = AblationConfig::full();
     assert!(config.enable_tier1_gate);
     assert!(config.enable_tier3_neural);
-    assert!(config.enable_q_init);
 }
 
 #[test]
@@ -19,7 +18,6 @@ fn test_ablation_baseline_all_disabled() {
     let config = AblationConfig::baseline_mcts();
     assert!(!config.enable_tier1_gate);
     assert!(!config.enable_tier3_neural);
-    assert!(!config.enable_q_init);
 }
 
 #[test]
@@ -27,7 +25,6 @@ fn test_ablation_tier1_only() {
     let config = AblationConfig::tier1_only();
     assert!(config.enable_tier1_gate);
     assert!(!config.enable_tier3_neural);
-    assert!(!config.enable_q_init);
 }
 
 #[test]
@@ -35,7 +32,6 @@ fn test_ablation_classical_hybrid() {
     let config = AblationConfig::classical_hybrid();
     assert!(config.enable_tier1_gate);
     assert!(!config.enable_tier3_neural);
-    assert!(config.enable_q_init);
 }
 
 #[test]
@@ -43,7 +39,6 @@ fn test_ablation_neural_only() {
     let config = AblationConfig::neural_only();
     assert!(!config.enable_tier1_gate);
     assert!(config.enable_tier3_neural);
-    assert!(!config.enable_q_init);
 }
 
 // === ExperimentConfig Default Tests ===
@@ -118,7 +113,6 @@ fn test_generate_ablation_configs_baseline_has_no_tiers() {
     let baseline = configs.iter().find(|c| c.name == "baseline_mcts").unwrap();
     assert!(!baseline.ablation.enable_tier1_gate);
     assert!(!baseline.ablation.enable_tier3_neural);
-    assert!(!baseline.ablation.enable_q_init);
 }
 
 #[test]
@@ -127,7 +121,6 @@ fn test_generate_ablation_configs_full_has_all_tiers() {
     let full = configs.iter().find(|c| c.name == "full_system").unwrap();
     assert!(full.ablation.enable_tier1_gate);
     assert!(full.ablation.enable_tier3_neural);
-    assert!(full.ablation.enable_q_init);
 }
 
 #[test]

@@ -323,7 +323,7 @@ impl EloTournament {
                     logger: None,
                     enable_tier1_gate: false,
                     enable_tier3_neural: false,
-                    enable_q_init: false,
+
                     ..Default::default()
                 };
                 let (best, _, _) = tactical_mcts_search(
@@ -345,7 +345,7 @@ impl EloTournament {
                     logger: None,
                     enable_tier1_gate: true,
                     enable_tier3_neural: false,
-                    enable_q_init: false,
+
                     ..Default::default()
                 };
                 let (best, _, _) = tactical_mcts_search(
@@ -367,7 +367,7 @@ impl EloTournament {
                     logger: None,
                     enable_tier1_gate: true,
                     enable_tier3_neural: false,
-                    enable_q_init: true,
+
                     ..Default::default()
                 };
                 let (best, _, _) = tactical_mcts_search(
@@ -390,7 +390,7 @@ impl EloTournament {
                     logger: None,
                     enable_tier1_gate: true,
                     enable_tier3_neural: true,
-                    enable_q_init: true,
+
                     ..Default::default()
                 };
                 let (best, _, _) = tactical_mcts_search(

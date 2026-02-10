@@ -176,32 +176,28 @@ fn select_ucb_with_policy(
             continue;
         }
 
-        let (prior_prob, q_init) = if let Some(mv) = child_ref.action {
-            let p = node_ref.move_priorities.get(&mv).copied().unwrap_or(1.0 / num_legal_moves as f64);
-            let q = node_ref.tactical_values.get(&mv).copied().unwrap_or(0.0);
-            (p, q)
+        let prior_prob = if let Some(mv) = child_ref.action {
+            node_ref.move_priorities.get(&mv).copied().unwrap_or(1.0 / num_legal_moves as f64)
         } else {
-            (1.0 / num_legal_moves as f64, 0.0)
+            1.0 / num_legal_moves as f64
         };
         
         let ucb_value = calculate_ucb_value(
             &child_ref,
             parent_visits,
             prior_prob,
-            q_init,
             config.exploration_constant,
-            config.enable_q_init,
         );
-        
+
         if ucb_value > best_ucb {
             best_ucb = ucb_value;
             best_child = Some(child.clone());
-            
+
             // Re-calculate components for logging
-            let q = if child_ref.visits == 0 { 
-                if config.enable_q_init { q_init } else { 0.0 }
-            } else { 
-                child_ref.total_value / child_ref.visits as f64 
+            let q = if child_ref.visits == 0 {
+                0.0
+            } else {
+                child_ref.total_value / child_ref.visits as f64
             };
             let u = config.exploration_constant * prior_prob * (parent_visits as f64).sqrt() / (1.0 + child_ref.visits as f64);
             best_details = (q, u, ucb_value);
@@ -234,15 +230,11 @@ pub fn calculate_ucb_value(
     child: &MctsNode,
     parent_visits: u32,
     prior_prob: f64,
-    q_init: f64,
     exploration_constant: f64,
-    enable_q_init: bool,
 ) -> f64 {
-    // Q Value
+    // Q Value — unvisited nodes start at 0.0
     let q = if child.visits == 0 {
-        // TIER 2 INTEGRATION:
-        // Use tactical evaluation as starting Q for unvisited nodes.
-        if enable_q_init { q_init } else { 0.0 }
+        0.0
     } else {
         child.total_value / child.visits as f64
     };
@@ -387,7 +379,7 @@ mod tests {
         
         // Test UCB calculation for unvisited node
         let child_ref = child.borrow();
-        let ucb = calculate_ucb_value(&child_ref, 10, 0.1, 0.0, 1.414, true);
+        let ucb = calculate_ucb_value(&child_ref, 10, 0.1, 1.414);
         assert!(!ucb.is_infinite()); // Unvisited nodes now get finite UCB based on Q-init + Prior
         assert!(ucb > 0.0);
     }

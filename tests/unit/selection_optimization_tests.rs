@@ -99,10 +99,10 @@ fn test_ucb_selection_picks_highest_value() {
     let child = MctsNode::new_child(Rc::downgrade(&parent), e2e4, child_board, &move_gen);
 
     // Unvisited node with high prior should have high UCB
-    let ucb_high_prior = calculate_ucb_value(&child.borrow(), 100, 0.5, 0.0, 1.414, true);
+    let ucb_high_prior = calculate_ucb_value(&child.borrow(), 100, 0.5, 1.414);
 
     // Low prior
-    let ucb_low_prior = calculate_ucb_value(&child.borrow(), 100, 0.01, 0.0, 1.414, true);
+    let ucb_low_prior = calculate_ucb_value(&child.borrow(), 100, 0.01, 1.414);
 
     assert!(ucb_high_prior > ucb_low_prior,
         "Higher prior should produce higher UCB: {} vs {}", ucb_high_prior, ucb_low_prior);

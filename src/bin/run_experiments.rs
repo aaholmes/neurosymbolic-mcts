@@ -120,7 +120,6 @@ fn run_experiment(
             exploration_constant: config.search_config.exploration_constant,
             enable_tier1_gate: config.ablation.enable_tier1_gate,
             enable_tier3_neural: config.ablation.enable_tier3_neural,
-            enable_q_init: config.ablation.enable_q_init,
             use_neural_policy: config.ablation.enable_tier3_neural,
             inference_server: None,
             logger: None,

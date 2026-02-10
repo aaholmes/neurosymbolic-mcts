@@ -42,8 +42,6 @@ pub struct TacticalMctsConfig {
     pub enable_tier1_gate: bool,
     /// Enable Tier 3 (Neural Network Policy)
     pub enable_tier3_neural: bool,
-    /// Enable Q-init from tactical values
-    pub enable_q_init: bool,
     /// Enable KOTH (King of the Hill) win detection — off for standard chess
     pub enable_koth: bool,
     /// Enable material integration in value: V = tanh(V_logit + k·ΔM)
@@ -68,7 +66,6 @@ impl Default for TacticalMctsConfig {
             // All tiers enabled by default
             enable_tier1_gate: true,
             enable_tier3_neural: true,
-            enable_q_init: true,
             enable_koth: false,
             enable_material_value: true,
             dirichlet_alpha: 0.0,
@@ -707,25 +704,6 @@ pub fn tactical_mcts_search_for_training_with_reuse(
     let logger = config.logger.as_ref();
     if root_node.borrow().children.is_empty() {
         evaluate_and_expand_node(root_node.clone(), move_gen, &mut stats, &config, logger);
-    }
-
-    // Apply Dirichlet noise to root priors for training exploration
-    if config.dirichlet_alpha > 0.0 {
-        // Ensure root has move_priorities populated (uniform if no NN)
-        if !root_node.borrow().policy_evaluated {
-            let moves: Vec<Move> = root_node.borrow().children.iter()
-                .filter_map(|c| c.borrow().action)
-                .collect();
-            if !moves.is_empty() {
-                let uniform = 1.0 / moves.len() as f64;
-                let mut node = root_node.borrow_mut();
-                for mv in &moves {
-                    node.move_priorities.entry(*mv).or_insert(uniform);
-                }
-                node.policy_evaluated = true;
-            }
-        }
-        apply_dirichlet_noise(&root_node, config.dirichlet_alpha, config.dirichlet_epsilon);
     }
 
     for iteration in 0..config.max_iterations {

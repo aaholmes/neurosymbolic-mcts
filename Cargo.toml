@@ -84,6 +84,8 @@ path = "tests/regression/mod.rs"
 
 [profile.release]
 debug = true
+lto = "thin"
+codegen-units = 1
 
 [[bin]]
 name = "mcts_inspector"
