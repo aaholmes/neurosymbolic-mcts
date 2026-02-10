@@ -196,6 +196,87 @@ def print_tensor_as_board(tensor):
     print("  +-----------------+")
     print("    a b c d e f g h")
 
+def test_k_feature_extraction():
+    """Verify k head feature extraction on known starting position."""
+    print(f"\nTesting k Feature Extraction...")
+    model = OracleNet()
+    model.eval()
+
+    board = get_starting_position_tensor()  # [1, 17, 8, 8]
+    errors = []
+
+    # --- Test scalar features ---
+    scalars = model._extract_k_scalars(board)  # [1, 8]
+    assert scalars.shape == (1, 8), f"Scalars shape {scalars.shape} != (1, 8)"
+
+    total_pawns = scalars[0, 0].item()
+    stm_pieces = scalars[0, 1].item()
+    opp_pieces = scalars[0, 2].item()
+    stm_queen = scalars[0, 3].item()
+    opp_queen = scalars[0, 4].item()
+    contacts = scalars[0, 5].item()
+    castling = scalars[0, 6].item()
+    stm_king_rank = scalars[0, 7].item()
+
+    if abs(total_pawns - 16.0) > 0.01:
+        errors.append(f"total_pawns={total_pawns}, expected 16")
+    if abs(stm_pieces - 7.0) > 0.01:
+        errors.append(f"stm_pieces={stm_pieces}, expected 7 (2N+2B+2R+1Q)")
+    if abs(opp_pieces - 7.0) > 0.01:
+        errors.append(f"opp_pieces={opp_pieces}, expected 7")
+    if abs(stm_queen - 1.0) > 0.01:
+        errors.append(f"stm_queen={stm_queen}, expected 1")
+    if abs(opp_queen - 1.0) > 0.01:
+        errors.append(f"opp_queen={opp_queen}, expected 1")
+    if abs(contacts - 0.0) > 0.01:
+        errors.append(f"contacts={contacts}, expected 0 (pawns not adjacent)")
+    if abs(castling - 4.0) > 0.01:
+        errors.append(f"castling={castling}, expected 4")
+    # STM king is at tensor row 7, col 4 -> flat pos = 7*8+4 = 60, rank = 60//8 = 7
+    if abs(stm_king_rank - 7.0) > 0.01:
+        errors.append(f"stm_king_rank={stm_king_rank}, expected 7")
+
+    # --- Test king patch extraction ---
+    stm_patch = model._extract_king_patch(board, king_plane=5)  # [1, 300]
+    opp_patch = model._extract_king_patch(board, king_plane=11)  # [1, 300]
+
+    assert stm_patch.shape == (1, 300), f"STM patch shape {stm_patch.shape} != (1, 300)"
+    assert opp_patch.shape == (1, 300), f"Opp patch shape {opp_patch.shape} != (1, 300)"
+
+    # STM king at row 7, col 4 (e1 in tensor coords)
+    # 5x5 patch centered there: rows 5-9, cols 2-6 (padded board rows 7-11, cols 4-8)
+    # Rows 7 (rank 1) has pieces, row 6 (rank 2) has pawns, rows 5,8,9 are empty/padding
+    # Patch should contain non-zero values (pieces around king)
+    stm_nonzero = (stm_patch.abs() > 0.01).sum().item()
+    if stm_nonzero == 0:
+        errors.append("STM king patch is all zeros — expected pieces around king")
+
+    # Opponent king at row 0, col 4 (e8 in tensor coords)
+    opp_nonzero = (opp_patch.abs() > 0.01).sum().item()
+    if opp_nonzero == 0:
+        errors.append("Opp king patch is all zeros — expected pieces around king")
+
+    # --- Test k output on starting position ---
+    with torch.no_grad():
+        material = torch.zeros(1, 1)
+        _, _, k = model(board, material)
+
+    if abs(k.item() - 0.5) > 0.05:
+        errors.append(f"k={k.item():.4f}, expected ~0.5 with zero init")
+
+    if errors:
+        for e in errors:
+            print(f"  ❌ {e}")
+        print(f"❌ k Feature Extraction FAILED ({len(errors)} errors)")
+    else:
+        print(f"  Scalars: pawns={total_pawns:.0f}, stm_pcs={stm_pieces:.0f}, opp_pcs={opp_pieces:.0f}, "
+              f"stm_Q={stm_queen:.0f}, opp_Q={opp_queen:.0f}, contacts={contacts:.0f}, "
+              f"castling={castling:.0f}, king_rank={stm_king_rank:.0f}")
+        print(f"  STM patch nonzero: {stm_nonzero}/300, Opp patch nonzero: {opp_nonzero}/300")
+        print(f"  k = {k.item():.4f} (expected ~0.5)")
+        print(f"✅ k Feature Extraction Correct")
+
+
 def sample_output_demo():
     print(f"\nSample Inference Output")
     print("-" * 30)
@@ -236,8 +317,11 @@ if __name__ == "__main__":
     # 1. Test Shapes & Sizes
     test_model_shapes()
     
-    # 2. Test Gradient Flow (Overfitting)
+    # 2. Test k Feature Extraction
+    test_k_feature_extraction()
+
+    # 3. Test Gradient Flow (Overfitting)
     test_overfitting()
-    
-    # 3. Sample Output
+
+    # 4. Sample Output
     sample_output_demo()

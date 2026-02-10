@@ -83,14 +83,15 @@ class OracleNet(nn.Module):
         self.v_out = nn.Linear(256, 1) # V_net (Residual)
         
         # --- DYNAMIC K HEAD (Confidence) ---
-        # Separate shallow input network — k is a position-type property,
-        # not a position-specific one. Operating on raw input prevents
-        # overfitting k to specific positions via deep backbone features.
-        self.k_conv = nn.Conv2d(input_channels, 32, kernel_size=3, padding=1, bias=False)
-        self.k_bn = nn.BatchNorm2d(32)
-        self.k_pool = nn.AdaptiveAvgPool2d(1)  # [B, 32, 1, 1] -> [B, 32]
-        self.k_fc = nn.Linear(32, 16)
-        self.k_out = nn.Linear(16, 1)  # K_net (Confidence)
+        # Handcrafted scalar features (8 values) + 5x5 king patches.
+        # k is a position-type property: open vs closed, king safety, endgame.
+        # Handcrafted features give k direct access to exactly the features
+        # that determine material convertibility, without needing to rediscover
+        # them from raw convolutions.
+        self.k_stm_patch_fc = nn.Linear(12 * 25, 32)   # STM king 5x5 neighborhood
+        self.k_opp_patch_fc = nn.Linear(12 * 25, 32)   # Opponent king 5x5 neighborhood
+        self.k_combine = nn.Linear(8 + 32 + 32, 32)    # scalars + both king patches
+        self.k_out = nn.Linear(32, 1)                   # k_logit -> K_net (Confidence)
         
         # Denominator Constant: 2 * ln(2)
         self.k_scale = 2 * math.log(2)
@@ -101,12 +102,92 @@ class OracleNet(nn.Module):
         # --- ZERO INITIALIZATION (Crucial) ---
         self._zero_init_heads()
 
+    def _extract_k_scalars(self, x):
+        """Extract 8 handcrafted scalar features from the raw input tensor.
+
+        Args:
+            x: [B, 17, 8, 8] input tensor (STM perspective)
+        Returns:
+            [B, 8] tensor of scalar features
+        """
+        B = x.size(0)
+
+        # 1. Total pawns (STM + opponent)
+        total_pawns = x[:, 0].sum(dim=(1, 2)) + x[:, 6].sum(dim=(1, 2))  # [B]
+
+        # 2. STM non-pawn pieces (N, B, R, Q = planes 1-4)
+        stm_pieces = x[:, 1:5].sum(dim=(1, 2, 3))  # [B]
+
+        # 3. Opponent non-pawn pieces (N, B, R, Q = planes 7-10)
+        opp_pieces = x[:, 7:11].sum(dim=(1, 2, 3))  # [B]
+
+        # 4. STM queen present (plane 4)
+        stm_queen = x[:, 4].sum(dim=(1, 2))  # [B] (0 or 1)
+
+        # 5. Opponent queen present (plane 10)
+        opp_queen = x[:, 10].sum(dim=(1, 2))  # [B] (0 or 1)
+
+        # 6. Pawn contacts: STM pawn at row r, opponent pawn at row r-1
+        # In STM perspective, STM pawns advance toward row 0
+        stm_pawns = x[:, 0]   # [B, 8, 8]
+        opp_pawns = x[:, 6]   # [B, 8, 8]
+        contacts = (stm_pawns[:, 1:, :] * opp_pawns[:, :-1, :]).sum(dim=(1, 2))  # [B]
+
+        # 7. Castling rights (planes 13-16, each is full-board 0 or 1)
+        castling = x[:, 13:17, 0, 0].sum(dim=1)  # [B] (0-4)
+
+        # 8. STM king rank (from plane 5)
+        king_pos = x[:, 5].view(B, 64).argmax(dim=1)  # [B]
+        stm_king_rank = (king_pos // 8).float()  # [B] (0-7)
+
+        return torch.stack([
+            total_pawns, stm_pieces, opp_pieces, stm_queen, opp_queen,
+            contacts, castling, stm_king_rank
+        ], dim=1)  # [B, 8]
+
+    def _extract_king_patch(self, x, king_plane):
+        """Extract 5x5 patch of piece planes centered on a king.
+
+        Args:
+            x: [B, 17, 8, 8] input tensor
+            king_plane: plane index for the king (5=STM, 11=opponent)
+        Returns:
+            [B, 300] flattened patch (12 channels x 5 x 5)
+        """
+        B = x.size(0)
+        piece_planes = x[:, :12]  # [B, 12, 8, 8]
+        padded = F.pad(piece_planes, (2, 2, 2, 2), value=0)  # [B, 12, 12, 12]
+
+        # Find king position from the specified plane
+        king_pos = x[:, king_plane].view(B, 64).argmax(dim=1)  # [B]
+        king_row = king_pos // 8  # [B]
+        king_col = king_pos % 8   # [B]
+
+        # Vectorized extraction using advanced indexing
+        row_off = torch.arange(5, device=x.device)
+        col_off = torch.arange(5, device=x.device)
+
+        # Build index tensors [B, 12, 5, 5]
+        batch_idx = torch.arange(B, device=x.device).view(B, 1, 1, 1).expand(B, 12, 5, 5)
+        ch_idx = torch.arange(12, device=x.device).view(1, 12, 1, 1).expand(B, 12, 5, 5)
+        row_idx = (king_row.view(B, 1, 1, 1) + row_off.view(1, 1, 5, 1)).expand(B, 12, 5, 5)
+        col_idx = (king_col.view(B, 1, 1, 1) + col_off.view(1, 1, 1, 5)).expand(B, 12, 5, 5)
+
+        patches = padded[batch_idx, ch_idx, row_idx, col_idx]  # [B, 12, 5, 5]
+        return patches.view(B, -1)  # [B, 300]
+
     def forward(self, x, material_scalar):
-        # K path (from raw input, independent of backbone)
-        k_feat = F.relu(self.k_bn(self.k_conv(x)))       # [B, 32, 8, 8]
-        k_feat = self.k_pool(k_feat).view(x.size(0), -1) # [B, 32]
-        k_feat = F.relu(self.k_fc(k_feat))                # [B, 16]
-        k_logit = self.k_out(k_feat)                      # [B, 1]
+        # K path: handcrafted scalars + king patches (independent of backbone)
+        scalars = self._extract_k_scalars(x)                        # [B, 8]
+        stm_patch = self._extract_king_patch(x, king_plane=5)       # [B, 300]
+        opp_patch = self._extract_king_patch(x, king_plane=11)      # [B, 300]
+
+        stm_feat = F.relu(self.k_stm_patch_fc(stm_patch))           # [B, 32]
+        opp_feat = F.relu(self.k_opp_patch_fc(opp_patch))           # [B, 32]
+
+        k_feat = torch.cat([scalars, stm_feat, opp_feat], dim=1)    # [B, 72]
+        k_feat = F.relu(self.k_combine(k_feat))                     # [B, 32]
+        k_logit = self.k_out(k_feat)                                # [B, 1]
 
         # Backbone
         x = F.relu(self.start_bn(self.start_conv(x)))

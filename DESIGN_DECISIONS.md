@@ -83,11 +83,19 @@ Not all positions are equally material-sensitive. In a closed Sicilian with lock
 
 $k$ is computed as $\text{Softplus}(K_{net}) / (2\ln 2)$ where $K_{net}$ is a raw network output. At initialization ($K_{net} = 0$): $k = \ln(2) / (2\ln 2) = 0.5$, giving a reasonable material weight from the start.
 
-### k architecture: why input-based, not backbone-dependent
+### k architecture: handcrafted features, not learned convolutions
 
 The first implementation computed $k$ from the backbone's penultimate features (shared with the value head). This caused $k$ to overfit to specific positions — the deep features encoded too much position-specific detail.
 
-The current design uses a **separate shallow input network** for $k$: a single 3x3 conv → BN → global average pool → two linear layers, operating directly on the raw 17x8x8 input. This forces $k$ to learn from broad structural patterns (pawn structure, piece configurations, open vs. closed) rather than position-specific features. $k$ represents "how much should material matter in this *type* of position" — a property of position classes, not individual positions.
+The second design used a **separate shallow input network** for $k$: a single 3x3 conv → BN → global average pool → two linear layers. This was too shallow — one 3x3 conv + global average pool is a "bag of local patterns" that knows what local patterns exist but not where they are. It cannot reliably detect king safety (diluted to 1/64 of signal), pawn structure (multi-hop), or open files (long-range).
+
+The current design uses **handcrafted scalar features + king patches**, consistent with the project philosophy of "compute what you can, learn what you must":
+
+**Scalar features (8 values):** total pawns (open vs closed), STM/opponent non-pawn piece counts (endgame detection), STM/opponent queen presence (tactical complexity), pawn contacts (direct closedness measure), castling rights count (game phase), STM king rank (exposed vs castled). These are extracted directly from the input tensor with simple sums — no learned parameters.
+
+**King patches (2 × 32 features):** 5×5 windows of all 12 piece planes centered on each king, padded for edge kings. Each 300-dim patch is compressed by a separate FC(300→32) + ReLU — separate weights for STM and opponent kings since they have different semantics (king safety vs. attack potential). This captures local piece configurations around each king without global average pooling's dilution.
+
+**Combination:** `[8 scalars | 32 STM patch features | 32 opp patch features]` → FC(72→32) → ReLU → FC(32→1) → k_logit. Only the final FC(32→1) is zero-initialized; patch FCs and combine layer use standard He init. Total: ~21.6k parameters (tiny vs ~1.98M model total).
 
 ### Classical fallback: V\_logit=0, k=0.5
 
@@ -117,9 +125,9 @@ When Black is to move, ranks are flipped so STM pieces always appear at the "bot
 
 1x1 conv → BN → flatten (64 features) → FC(64→256) → FC(256→1). The output is $V_{logit}$ (unbounded). This feeds into the symbolic residual formula with the independently-computed $k$ and $\Delta M$.
 
-### k head: separate input network
+### k head: handcrafted features + king patches
 
-Conv2d(17→32, 3x3) → BN → GlobalAvgPool → FC(32→16) → FC(16→1). Operates on raw input, independent of the backbone. See Section 4 for the rationale.
+8 scalar features (pawn count, piece counts, queen presence, pawn contacts, castling rights, king rank) + two 5×5 king-centered patches compressed via FC(300→32). Scalars + compressed patches → FC(72→32) → FC(32→1). Operates on raw input, independent of the backbone. See Section 4 for the rationale.
 
 ### Zero initialization
 
