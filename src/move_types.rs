@@ -4,7 +4,7 @@
 //! to represent and manipulate chess moves.
 
 use crate::board_utils::sq_ind_to_algebraic;
-use crate::piece_types::{BISHOP, KNIGHT, QUEEN, ROOK};
+use crate::piece_types::{BISHOP, KING, KNIGHT, PAWN, QUEEN, ROOK};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -58,6 +58,17 @@ impl CastlingRights {
             black_kingside: true,
             black_queenside: true,
         }
+    }
+}
+
+fn piece_char(piece: usize) -> char {
+    match piece {
+        KNIGHT => 'N',
+        BISHOP => 'B',
+        ROOK => 'R',
+        QUEEN => 'Q',
+        KING => 'K',
+        _ => '?',
     }
 }
 
@@ -249,6 +260,101 @@ impl Move {
             result.push(promotion_char);
         }
         
+        result
+    }
+
+    /// Convert move to Standard Algebraic Notation (e.g. Nf3, exd5, O-O, Qxe7+).
+    /// Requires the board state before the move and a MoveGen for legality/check detection.
+    pub fn to_san(&self, board: &crate::board::Board, move_gen: &crate::move_generation::MoveGen) -> String {
+        // Castling
+        if self.is_kingside_castle() {
+            let after = board.apply_move_to_board(*self);
+            let check = after.is_check(move_gen);
+            return if check { "O-O+".to_string() } else { "O-O".to_string() };
+        }
+        if self.is_queenside_castle() {
+            let after = board.apply_move_to_board(*self);
+            let check = after.is_check(move_gen);
+            return if check { "O-O-O+".to_string() } else { "O-O-O".to_string() };
+        }
+
+        let (_, piece) = board.get_piece(self.from).unwrap_or((0, PAWN));
+        let is_capture = board.get_piece(self.to).is_some()
+            || (piece == PAWN && self.is_en_passant());
+
+        let to_str = sq_ind_to_algebraic(self.to);
+        let mut result = String::new();
+
+        if piece == PAWN {
+            if is_capture {
+                // e.g. exd5
+                let from_file = (b'a' + (self.from % 8) as u8) as char;
+                result.push(from_file);
+                result.push('x');
+            }
+            result.push_str(&to_str);
+            if let Some(promo) = self.promotion {
+                result.push('=');
+                result.push(piece_char(promo));
+            }
+        } else {
+            result.push(piece_char(piece));
+
+            // Disambiguation: check if other pieces of same type can reach same square
+            let color = if board.w_to_move { 0 } else { 1 };
+            let (captures, non_captures) = move_gen.gen_pseudo_legal_moves(board);
+            let mut ambiguous_file = false;
+            let mut ambiguous_rank = false;
+            let mut ambiguous_count = 0;
+            for &mv in captures.iter().chain(non_captures.iter()) {
+                if mv.to == self.to && mv.from != self.from {
+                    if let Some((c, p)) = board.get_piece(mv.from) {
+                        if c == color && p == piece {
+                            // Check legality
+                            let after = board.apply_move_to_board(mv);
+                            if after.is_legal(move_gen) {
+                                ambiguous_count += 1;
+                                if mv.from % 8 == self.from % 8 {
+                                    ambiguous_file = true; // same file
+                                }
+                                if mv.from / 8 == self.from / 8 {
+                                    ambiguous_rank = true; // same rank
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if ambiguous_count > 0 {
+                let from_file = (b'a' + (self.from % 8) as u8) as char;
+                let from_rank = (b'1' + (self.from / 8) as u8) as char;
+                if !ambiguous_file {
+                    result.push(from_file);
+                } else if !ambiguous_rank {
+                    result.push(from_rank);
+                } else {
+                    result.push(from_file);
+                    result.push(from_rank);
+                }
+            }
+
+            if is_capture {
+                result.push('x');
+            }
+            result.push_str(&to_str);
+        }
+
+        // Check / checkmate suffix
+        let after = board.apply_move_to_board(*self);
+        if after.is_check(move_gen) {
+            let (mate, _) = after.is_checkmate_or_stalemate(move_gen);
+            if mate {
+                result.push('#');
+            } else {
+                result.push('+');
+            }
+        }
+
         result
     }
 

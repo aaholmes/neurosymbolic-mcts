@@ -22,6 +22,7 @@ class TrainingConfig:
     # Self-play
     games_per_generation: int = 100
     simulations_per_move: int = 800
+    sims_schedule: str = ""  # e.g. "0:200,10:400,20:800" — gen:sims pairs
     enable_koth: bool = False
 
     # Ablation flags
@@ -65,6 +66,8 @@ class TrainingConfig:
         parser = argparse.ArgumentParser(description="AGZ Training Orchestrator")
         parser.add_argument("--games-per-generation", type=int, default=100)
         parser.add_argument("--simulations-per-move", type=int, default=800)
+        parser.add_argument("--sims-schedule", type=str, default="",
+                            help="Ramp sims over generations, e.g. '0:200,10:400,20:800'")
         parser.add_argument("--enable-koth", action="store_true")
         parser.add_argument("--buffer-capacity", type=int, default=100_000)
         parser.add_argument("--buffer-dir", type=str, default="data/buffer")
@@ -109,6 +112,7 @@ class TrainingConfig:
         return cls(
             games_per_generation=args.games_per_generation,
             simulations_per_move=args.simulations_per_move,
+            sims_schedule=args.sims_schedule,
             enable_koth=args.enable_koth,
             enable_tier1=not args.disable_tier1,
             enable_material_value=not args.disable_material,
@@ -255,15 +259,35 @@ class Orchestrator:
             print(f"Generation {generation} REJECTED (W:{eval_results['wins']} "
                   f"L:{eval_results['losses']} D:{eval_results['draws']})")
 
+    def _get_sims_for_gen(self, generation):
+        """Resolve simulations count for a generation from schedule or default."""
+        if not self.config.sims_schedule:
+            return self.config.simulations_per_move
+        # Parse "0:200,10:400,20:800" into sorted list of (gen_threshold, sims)
+        entries = []
+        for part in self.config.sims_schedule.split(","):
+            gen_str, sims_str = part.strip().split(":")
+            entries.append((int(gen_str), int(sims_str)))
+        entries.sort()
+        # Find the last entry whose threshold <= generation
+        sims = entries[0][1]  # default to first entry
+        for threshold, s in entries:
+            if generation >= threshold:
+                sims = s
+            else:
+                break
+        return sims
+
     def run_self_play(self, generation):
         """Run self-play games and return the output directory."""
         data_dir = os.path.join(self.config.data_dir, f"gen_{generation}")
         os.makedirs(data_dir, exist_ok=True)
 
+        sims = self._get_sims_for_gen(generation)
         cmd = [
             "cargo", "run", "--release", "--features", "neural", "--bin", "self_play", "--",
             str(self.config.games_per_generation),
-            str(self.config.simulations_per_move),
+            str(sims),
             data_dir,
             self.state.current_best_pt,
             "true" if self.config.enable_koth else "false",
@@ -276,7 +300,7 @@ class Orchestrator:
             cmd.extend(["--threads", str(self.config.game_threads)])
 
         print(f"Self-play: {self.config.games_per_generation} games, "
-              f"{self.config.simulations_per_move} sims, "
+              f"{sims} sims, "
               f"batch_size={self.config.inference_batch_size}...")
         result = subprocess.run(
             cmd, env=get_libtorch_env(),
@@ -418,15 +442,18 @@ class Orchestrator:
 
         return candidate_pth, candidate_pt
 
-    def run_evaluation(self, candidate_pt):
+    def run_evaluation(self, candidate_pt, generation=None):
         """Evaluate candidate vs current best using SPRT. Returns (accepted, results_dict)."""
+        eval_sims = self.config.eval_simulations
+        if generation is not None and self.config.sims_schedule:
+            eval_sims = self._get_sims_for_gen(generation)
         cmd = [
             "cargo", "run", "--release", "--features", "neural",
             "--bin", "evaluate_models", "--",
             candidate_pt,
             self.state.current_best_pt,
             str(self.config.eval_max_games),
-            str(self.config.eval_simulations),
+            str(eval_sims),
             "--sprt",
             "--elo0", str(self.config.sprt_elo0),
             "--elo1", str(self.config.sprt_elo1),
@@ -443,7 +470,7 @@ class Orchestrator:
         if self.config.game_threads > 0:
             cmd.extend(["--threads", str(self.config.game_threads)])
 
-        print(f"Evaluating: up to {self.config.eval_max_games} games (SPRT "
+        print(f"Evaluating: up to {self.config.eval_max_games} games @ {eval_sims} sims (SPRT "
               f"elo0={self.config.sprt_elo0}, elo1={self.config.sprt_elo1}, "
               f"alpha={self.config.sprt_alpha}, beta={self.config.sprt_beta})")
 
@@ -576,7 +603,7 @@ class Orchestrator:
             candidate_pth, candidate_pt = self.run_training(generation, buffer_positions=buffer_size)
 
             # 4. Evaluate
-            accepted, eval_results = self.run_evaluation(candidate_pt)
+            accepted, eval_results = self.run_evaluation(candidate_pt, generation=generation)
 
             # 5. Accept or reject
             self.handle_eval_result(
@@ -592,6 +619,7 @@ class Orchestrator:
                 "gen": generation,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "games_generated": self.config.games_per_generation,
+                "simulations": self._get_sims_for_gen(generation),
                 "buffer_size": buffer_size,
                 "eval_wins": eval_results["wins"],
                 "eval_losses": eval_results["losses"],

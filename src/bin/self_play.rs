@@ -30,6 +30,7 @@ use rayon::prelude::*;
 struct TrainingSample {
     board: Board,
     policy: Vec<(u16, f32)>, // (Move Index, Probability)
+    policy_moves: Vec<(Move, f32)>, // (Move, Probability) for display
     value_target: f32,       // +1 (Win), -1 (Loss), 0 (Draw)
     material_scalar: f32,
     w_to_move: bool,         // Side to move when sample was taken
@@ -203,12 +204,14 @@ fn play_game(game_num: usize, simulations: u32, inference_server: Option<Arc<Inf
         // Prepare Sample (Value unknown yet)
         let total_visits: u32 = result.root_policy.iter().map(|(_, v)| *v).sum();
         let mut policy_dist = Vec::new();
+        let mut policy_moves = Vec::new();
         if total_visits > 0 {
             for (mv, visits) in &result.root_policy {
                 let relative_mv = if board.w_to_move { *mv } else { mv.flip_vertical() };
                 let idx = move_to_index(relative_mv) as u16;
                 let prob = *visits as f32 / total_visits as f32;
                 policy_dist.push((idx, prob));
+                policy_moves.push((*mv, prob));
             }
         }
 
@@ -218,6 +221,7 @@ fn play_game(game_num: usize, simulations: u32, inference_server: Option<Arc<Inf
         samples.push(TrainingSample {
             board: board.clone(),
             policy: policy_dist,
+            policy_moves,
             value_target: 0.0, // Placeholder
             material_scalar,
             w_to_move: board.w_to_move,
@@ -228,7 +232,7 @@ fn play_game(game_num: usize, simulations: u32, inference_server: Option<Arc<Inf
             .unwrap_or_else(|| result.best_move.unwrap());
 
         if verbose {
-            game_moves.push(selected_move.to_uci());
+            game_moves.push(selected_move.to_san(&board, &move_gen));
         }
 
         // Reuse the subtree for the opponent's next move
@@ -302,20 +306,53 @@ fn play_game(game_num: usize, simulations: u32, inference_server: Option<Arc<Inf
     }
 
     if verbose {
+        // If game ended by Tier1 mate, play out the forced mate sequence for display
+        if early_outcome.is_some() && enable_tier1 {
+            // Play out the forced mate from both sides using mate_search.
+            // mate_search is checks-only, so the mating side always checks.
+            // For the losing side's response, just pick the first legal move.
+            let mut temp_stack = BoardStack::with_board(final_board.clone());
+            for _ in 0..20 {
+                let board = temp_stack.current_state();
+                let (is_mate, is_stalemate) = board.is_checkmate_or_stalemate(&move_gen);
+                if is_mate || is_stalemate { break; }
+
+                let (score, mv, _) = mate_search(&mut temp_stack, &move_gen, 5, false);
+                if score >= 1_000_000 {
+                    // STM has a forced mate — play the checking move
+                    game_moves.push(mv.to_san(temp_stack.current_state(), &move_gen));
+                    temp_stack.make_move(mv);
+                } else {
+                    // STM is the losing side (can't check) — pick first legal move
+                    let board = temp_stack.current_state();
+                    let (caps, quiets) = move_gen.gen_pseudo_legal_moves(board);
+                    let legal: Vec<Move> = caps.iter().chain(quiets.iter())
+                        .filter(|&&m| board.apply_move_to_board(m).is_legal(&move_gen))
+                        .cloned().collect();
+                    if let Some(&response) = legal.first() {
+                        game_moves.push(response.to_san(temp_stack.current_state(), &move_gen));
+                        temp_stack.make_move(response);
+                    } else {
+                        break; // Checkmate
+                    }
+                }
+            }
+        }
+
         // Print per-sample training data for auditability
         eprintln!("\n=== Training samples for Game {} ({} samples) ===", game_num, samples.len());
         for (i, s) in samples.iter().enumerate() {
             let fen = s.board.to_fen().unwrap_or_default();
             let stm = if s.w_to_move { "W" } else { "B" };
-            // Top 5 policy moves by probability
-            let mut top_policy: Vec<(u16, f32)> = s.policy.iter()
+            // Top 5 policy moves by probability (using move names)
+            let mut top_policy: Vec<(Move, f32)> = s.policy_moves.iter()
                 .filter(|(_, p)| *p > 0.0)
                 .cloned()
                 .collect();
             top_policy.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
             top_policy.truncate(5);
             let policy_str: Vec<String> = top_policy.iter()
-                .map(|(idx, p)| format!("{}:{:.3}", idx, p))
+                .map(|(mv, p)| format!("{}:{:.3}", mv.to_san(&s.board, &move_gen), p))
                 .collect();
             eprintln!("  [{:3}] {} STM={} V={:+.1} M={:+.1} policy=[{}]",
                 i, fen, stm, s.value_target, s.material_scalar,
@@ -343,13 +380,13 @@ fn play_game(game_num: usize, simulations: u32, inference_server: Option<Arc<Inf
 
         // Format as numbered move pairs
         let mut move_str = String::new();
-        for (i, uci) in game_moves.iter().enumerate() {
+        for (i, san) in game_moves.iter().enumerate() {
             if i % 2 == 0 {
                 if !move_str.is_empty() { move_str.push(' '); }
                 move_str.push_str(&format!("{}.", i / 2 + 1));
             }
             move_str.push(' ');
-            move_str.push_str(uci);
+            move_str.push_str(san);
         }
         println!("\n--- Game {} ({} moves) -> {} ---", game_num, game_moves.len(), result_str);
         println!("{}", move_str);
