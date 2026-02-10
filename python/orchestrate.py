@@ -284,6 +284,7 @@ class Orchestrator:
         os.makedirs(data_dir, exist_ok=True)
 
         sims = self._get_sims_for_gen(generation)
+        seed_offset = (generation - 1) * self.config.games_per_generation
         cmd = [
             "cargo", "run", "--release", "--features", "neural", "--bin", "self_play", "--",
             str(self.config.games_per_generation),
@@ -295,6 +296,7 @@ class Orchestrator:
             str(self.config.enable_material_value).lower(),
             self.config.log_games,
             "--batch-size", str(self.config.inference_batch_size),
+            "--seed-offset", str(seed_offset),
         ]
         if self.config.game_threads > 0:
             cmd.extend(["--threads", str(self.config.game_threads)])

@@ -65,6 +65,12 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse().ok());
 
+    let seed_offset: u64 = args.iter()
+        .position(|a| a == "--seed-offset")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     println!("Self-Play Generator Starting...");
     println!("   Games: {}", num_games);
     println!("   Simulations/Move: {}", simulations);
@@ -109,7 +115,8 @@ fn main() {
     // Run games in parallel
     (0..num_games).into_par_iter().for_each(|i| {
         let verbose = log_all || (log_first && i == 0);
-        let samples = play_game(i, simulations, shared_server.clone(), enable_koth, enable_tier1, enable_material, verbose);
+        let seed = seed_offset + i as u64;
+        let samples = play_game(i, simulations, seed, shared_server.clone(), enable_koth, enable_tier1, enable_material, verbose);
 
         if !samples.is_empty() {
             // Save binary data
@@ -126,8 +133,8 @@ fn main() {
     });
 }
 
-fn play_game(game_num: usize, simulations: u32, inference_server: Option<Arc<InferenceServer>>, enable_koth: bool, enable_tier1: bool, enable_material: bool, verbose: bool) -> Vec<TrainingSample> {
-    let mut rng = StdRng::seed_from_u64(game_num as u64);
+fn play_game(game_num: usize, simulations: u32, seed: u64, inference_server: Option<Arc<InferenceServer>>, enable_koth: bool, enable_tier1: bool, enable_material: bool, verbose: bool) -> Vec<TrainingSample> {
+    let mut rng = StdRng::seed_from_u64(seed);
     let move_gen = MoveGen::new();
     let mut game_moves: Vec<String> = Vec::new();
 
