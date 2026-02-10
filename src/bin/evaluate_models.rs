@@ -113,17 +113,17 @@ fn sample_proportional(policy: &[(Move, u32)], rng: &mut impl Rng) -> Option<Mov
 /// Play a single evaluation game between two models.
 /// When `candidate_is_white` is true, the candidate plays White.
 pub fn play_evaluation_game(
-    candidate_nn: &mut Option<NeuralNetPolicy>,
-    current_nn: &mut Option<NeuralNetPolicy>,
+    candidate_server: &Option<Arc<InferenceServer>>,
+    current_server: &Option<Arc<InferenceServer>>,
     candidate_is_white: bool,
     simulations: u32,
 ) -> GameResult {
-    play_evaluation_game_koth(candidate_nn, current_nn, candidate_is_white, simulations, false, true, true, 0)
+    play_evaluation_game_koth(candidate_server, current_server, candidate_is_white, simulations, false, true, true, 0)
 }
 
 pub fn play_evaluation_game_koth(
-    candidate_nn: &mut Option<NeuralNetPolicy>,
-    current_nn: &mut Option<NeuralNetPolicy>,
+    candidate_server: &Option<Arc<InferenceServer>>,
+    current_server: &Option<Arc<InferenceServer>>,
     candidate_is_white: bool,
     simulations: u32,
     enable_koth: bool,
@@ -134,12 +134,6 @@ pub fn play_evaluation_game_koth(
     let mut rng = StdRng::seed_from_u64(game_seed);
     let move_gen = MoveGen::new();
 
-    // Create InferenceServers from NNs (takes ownership via .take())
-    let candidate_server: Option<Arc<InferenceServer>> = candidate_nn.take()
-        .map(|nn| Arc::new(InferenceServer::new(nn, 1)));
-    let current_server: Option<Arc<InferenceServer>> = current_nn.take()
-        .map(|nn| Arc::new(InferenceServer::new(nn, 1)));
-
     let candidate_has_nn = candidate_server.is_some();
     let current_has_nn = current_server.is_some();
 
@@ -149,7 +143,7 @@ pub fn play_evaluation_game_koth(
         mate_search_depth: if enable_tier1 { 5 } else { 0 },
         exploration_constant: 1.414,
         use_neural_policy: candidate_has_nn,
-        inference_server: candidate_server,
+        inference_server: candidate_server.clone(),
         logger: None,
         dirichlet_alpha: 0.0,
         dirichlet_epsilon: 0.0,
@@ -166,7 +160,7 @@ pub fn play_evaluation_game_koth(
         mate_search_depth: if enable_tier1 { 5 } else { 0 },
         exploration_constant: 1.414,
         use_neural_policy: current_has_nn,
-        inference_server: current_server,
+        inference_server: current_server.clone(),
         logger: None,
         dirichlet_alpha: 0.0,
         dirichlet_epsilon: 0.0,
@@ -195,7 +189,6 @@ pub fn play_evaluation_game_koth(
             tactical_mcts_search_with_tt(
                 board.clone(),
                 &move_gen,
-                &mut None,
                 config_candidate.clone(),
                 &mut tt_candidate,
             )
@@ -203,7 +196,6 @@ pub fn play_evaluation_game_koth(
             tactical_mcts_search_with_tt(
                 board.clone(),
                 &move_gen,
-                &mut None,
                 config_current.clone(),
                 &mut tt_current,
             )
@@ -372,7 +364,6 @@ pub fn play_evaluation_game_with_servers(
             tactical_mcts_search_with_tt(
                 board.clone(),
                 &move_gen,
-                &mut None,
                 config_candidate.clone(),
                 &mut tt_candidate,
             )
@@ -380,7 +371,6 @@ pub fn play_evaluation_game_with_servers(
             tactical_mcts_search_with_tt(
                 board.clone(),
                 &move_gen,
-                &mut None,
                 config_current.clone(),
                 &mut tt_current,
             )

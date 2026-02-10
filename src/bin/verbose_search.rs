@@ -57,7 +57,6 @@ fn main() {
     let (best_move, stats, _root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
     

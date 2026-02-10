@@ -13,7 +13,7 @@
 mod real {
     use crate::board::Board;
     use crate::move_types::Move;
-    use crate::tensor::{move_to_index, board_to_planes};
+    use crate::tensor::{move_to_index, board_to_planes, policy_to_move_priors};
     use tch::{CModule, Tensor, Device, Kind};
     use std::path::Path;
 
@@ -204,27 +204,7 @@ mod real {
         }
 
         pub fn policy_to_move_priors(&self, policy: &[f32], moves: &[Move], board: &Board) -> Vec<(Move, f32)> {
-            let mut result = Vec::with_capacity(moves.len());
-            let mut total_prob = 0.0;
-            for &mv in moves {
-                // If Black to move, flip move vertically to match flipped tensor perspective
-                let relative_mv = if board.w_to_move { mv } else { mv.flip_vertical() };
-                let idx = move_to_index(relative_mv);
-                if idx < policy.len() {
-                    let prob = policy[idx];
-                    result.push((mv, prob));
-                    total_prob += prob;
-                } else {
-                    result.push((mv, 0.0));
-                }
-            }
-            if total_prob > 0.0 {
-                for (_, prob) in result.iter_mut() { *prob /= total_prob; }
-            } else {
-                let uniform = 1.0 / moves.len() as f32;
-                for (_, prob) in result.iter_mut() { *prob = uniform; }
-            }
-            result
+            policy_to_move_priors(policy, moves, board)
         }
 
         pub fn get_position_value(&mut self, board: &Board) -> Option<i32> {

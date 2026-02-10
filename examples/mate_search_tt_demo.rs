@@ -58,11 +58,10 @@ fn show_tt_speedup(
     
     for (_, fen) in positions {
         let board = Board::new_from_fen(fen);
-        let mut nn_policy = None;
         let mut tt = TranspositionTable::new(); // New TT each time
-        
+
         let (_, stats, _) = tactical_mcts_search_with_tt(
-            board, move_gen, &mut nn_policy, config.clone(), &mut tt
+            board, move_gen, config.clone(), &mut tt
         );
         
         cold_total_tt_hits += stats.tt_mate_hits;
@@ -80,10 +79,8 @@ fn show_tt_speedup(
     
     for (_, fen) in positions {
         let board = Board::new_from_fen(fen);
-        let mut nn_policy = None;
-        
         let (_, stats, _) = tactical_mcts_search_with_tt(
-            board, move_gen, &mut nn_policy, config.clone(), &mut shared_transposition_table
+            board, move_gen, config.clone(), &mut shared_transposition_table
         );
         
         warm_total_tt_hits += stats.tt_mate_hits;
@@ -123,11 +120,9 @@ fn analyze_mate_cache_efficiency(
     
     for (i, (name, fen)) in positions.iter().enumerate() {
         let board = Board::new_from_fen(fen);
-        let mut nn_policy = None;
-        
         let start = Instant::now();
         let (best_move, stats, _) = tactical_mcts_search_with_tt(
-            board, move_gen, &mut nn_policy, config.clone(), &mut shared_tt
+            board, move_gen, config.clone(), &mut shared_tt
         );
         let elapsed = start.elapsed();
         
@@ -169,11 +164,9 @@ fn benchmark_repeated_searches(
     println!("   Running {} rounds on position: ?{}", rounds, positions[0].0);
     
     for round in 1..=rounds {
-        let mut nn_policy = None;
-        
         let start = Instant::now();
         let (_best_move, stats, _) = tactical_mcts_search_with_tt(
-            board.clone(), move_gen, &mut nn_policy, config.clone(), &mut shared_tt
+            board.clone(), move_gen, config.clone(), &mut shared_tt
         );
         let elapsed = start.elapsed();
         

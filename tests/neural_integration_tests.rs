@@ -1,7 +1,9 @@
 use kingfisher::board::Board;
 use kingfisher::mcts::neural_mcts_search;
+use kingfisher::mcts::InferenceServer;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::neural_net::NeuralNetPolicy;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Integration tests for neural network functionality.
@@ -62,7 +64,7 @@ fn test_neural_network_integration() {
             })
             .collect();
         
-        let move_priors = nn_policy.policy_to_move_priors(&policy, &legal_moves);
+        let move_priors = nn_policy.policy_to_move_priors(&policy, &legal_moves, &board);
         println!("✅ Move priors for {} legal moves", move_priors.len());
         assert!(!move_priors.is_empty());
 
@@ -75,10 +77,12 @@ fn test_neural_network_integration() {
     
     let start_time = std::time::Instant::now();
     
+    // Create InferenceServer from nn_policy for MCTS search
+    let server = Arc::new(InferenceServer::new(nn_policy, 1));
     let best_move = neural_mcts_search(
         board,
         &move_gen,
-        &mut Some(nn_policy), // Pass the NN policy to the search
+        Some(server),
         2,  // Mate search depth
         Some(50),  // Limited iterations for testing
         Some(Duration::from_millis(1000)),  // 1 second limit

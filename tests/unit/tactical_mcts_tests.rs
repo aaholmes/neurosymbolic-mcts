@@ -25,7 +25,6 @@ fn test_tactical_mcts_returns_legal_move() {
     let (best_move, stats, _root) = tactical_mcts_search(
         board.clone(),
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -58,7 +57,6 @@ fn test_tactical_mcts_finds_mate_in_1() {
     let (best_move, stats, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -97,7 +95,6 @@ fn test_tactical_mcts_tier1_disabled() {
     let (best_move, stats, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -115,7 +112,6 @@ fn test_tactical_mcts_stats_populated() {
     let (_, stats, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -135,7 +131,6 @@ fn test_tactical_mcts_terminal_position() {
     let (best_move, _, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -155,7 +150,6 @@ fn test_tactical_mcts_checkmate_position() {
     let (best_move, _, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -183,7 +177,6 @@ fn test_tactical_mcts_time_limit_respected() {
     let (best_move, stats, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
     let elapsed = start.elapsed();
@@ -209,7 +202,6 @@ fn test_tactical_mcts_iteration_limit_respected() {
     let (_, stats, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -233,7 +225,6 @@ fn test_q_value_sign_convention() {
     let (_, _, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -275,7 +266,6 @@ fn test_koth_gate_value_not_diluted_by_expansion() {
     let (_best_move, _stats, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -326,7 +316,7 @@ fn test_gate_resolved_nodes_not_expanded() {
         ..Default::default()
     };
 
-    let (_, _, root) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (_, _, root) = tactical_mcts_search(board, &move_gen, config);
 
     let root_ref = root.borrow();
     let mut gate_resolved_count = 0;
@@ -357,7 +347,7 @@ fn test_proven_loss_children_get_minimal_visits() {
         ..Default::default()
     };
 
-    let (_, _, root) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (_, _, root) = tactical_mcts_search(board, &move_gen, config);
 
     let root_ref = root.borrow();
     let mut proven_loss_count = 0;
@@ -400,7 +390,6 @@ fn test_koth_opponent_on_center_is_terminal() {
     let (_best_move, _stats, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -429,7 +418,6 @@ fn test_koth_win_in_1_selected_and_search_aborts() {
     let (best_move, stats, _root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -462,7 +450,7 @@ fn test_classical_fallback_material_advantage() {
         ..Default::default()
     };
 
-    let (_, _, root) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (_, _, root) = tactical_mcts_search(board, &move_gen, config);
 
     // Root's Q should be positive (White is winning with queen advantage)
     let root_ref = root.borrow();
@@ -486,7 +474,7 @@ fn test_classical_fallback_material_disadvantage() {
         ..Default::default()
     };
 
-    let (_, _, root) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (_, _, root) = tactical_mcts_search(board, &move_gen, config);
 
     let root_ref = root.borrow();
     if root_ref.visits > 0 {
@@ -509,7 +497,7 @@ fn test_classical_fallback_equal_material() {
         ..Default::default()
     };
 
-    let (_, _, root) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (_, _, root) = tactical_mcts_search(board, &move_gen, config);
 
     let root_ref = root.borrow();
     if root_ref.visits > 0 {
@@ -531,7 +519,7 @@ fn test_leaf_values_in_tanh_range() {
         ..Default::default()
     };
 
-    let (_, _, root) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (_, _, root) = tactical_mcts_search(board, &move_gen, config);
 
     fn check_tree_values(node: &std::rc::Rc<std::cell::RefCell<kingfisher::mcts::node::MctsNode>>) {
         let n = node.borrow();
@@ -567,7 +555,7 @@ fn test_select_best_move_prefers_koth_win_over_captures() {
         ..Default::default()
     };
 
-    let (best_move, stats, _root) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (best_move, stats, _root) = tactical_mcts_search(board, &move_gen, config);
 
     assert!(best_move.is_some());
     let mv = best_move.unwrap();
@@ -594,7 +582,7 @@ fn test_training_search_returns_policy() {
         ..Default::default()
     };
 
-    let result = tactical_mcts_search_for_training(board, &move_gen, &mut None, config);
+    let result = tactical_mcts_search_for_training(board, &move_gen, config);
 
     assert!(result.best_move.is_some(), "Should return a best move");
     assert!(!result.root_policy.is_empty(), "Should return non-empty policy");
@@ -623,7 +611,7 @@ fn test_training_search_koth_early_termination() {
         ..Default::default()
     };
 
-    let result = tactical_mcts_search_for_training(board, &move_gen, &mut None, config);
+    let result = tactical_mcts_search_for_training(board, &move_gen, config);
 
     assert!(result.best_move.is_some());
     assert!(result.stats.iterations < 100,
@@ -648,7 +636,7 @@ fn test_training_search_with_reuse_basic() {
 
     // First search
     let result1 = tactical_mcts_search_for_training_with_reuse(
-        board.clone(), &move_gen, &mut None, config.clone(), None, &mut tt,
+        board.clone(), &move_gen, config.clone(), None, &mut tt,
     );
 
     assert!(result1.best_move.is_some());
@@ -661,7 +649,7 @@ fn test_training_search_with_reuse_basic() {
     // Second search with reused tree
     let next_board = board.apply_move_to_board(best);
     let result2 = tactical_mcts_search_for_training_with_reuse(
-        next_board, &move_gen, &mut None, config, reused, &mut tt,
+        next_board, &move_gen, config, reused, &mut tt,
     );
 
     assert!(result2.best_move.is_some(), "Second search should return a move");
@@ -753,7 +741,7 @@ fn test_tier1_stats_with_mate() {
         ..Default::default()
     };
 
-    let (_, stats, _) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (_, stats, _) = tactical_mcts_search(board, &move_gen, config);
 
     // Should have found mate via tier1 (pre-search gate or in-tree)
     assert!(stats.tier1_solutions > 0 || stats.mates_found > 0,
@@ -777,7 +765,7 @@ fn test_all_tiers_disabled() {
         ..Default::default()
     };
 
-    let (best_move, stats, _) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (best_move, stats, _) = tactical_mcts_search(board, &move_gen, config);
 
     assert!(best_move.is_some(), "Should still return a move with all tiers disabled");
     assert_eq!(stats.tier1_solutions, 0);
@@ -804,7 +792,7 @@ fn test_mock_inference_server_used_in_search() {
         ..Default::default()
     };
 
-    let (best_move, stats, _) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (best_move, stats, _) = tactical_mcts_search(board, &move_gen, config);
 
     assert!(best_move.is_some(), "Should return a move with mock inference server");
     assert!(stats.nn_evaluations > 0,
@@ -829,7 +817,7 @@ fn test_mock_uniform_matches_classical() {
     };
 
     let (move_classical, _, root_classical) = tactical_mcts_search(
-        board.clone(), &move_gen, &mut None, config_classical,
+        board.clone(), &move_gen, config_classical,
     );
 
     // Mock uniform server (v_logit=0, k=0.5 — identical to classical fallback)
@@ -844,7 +832,7 @@ fn test_mock_uniform_matches_classical() {
     };
 
     let (move_nn, stats_nn, root_nn) = tactical_mcts_search(
-        board, &move_gen, &mut None, config_nn,
+        board, &move_gen, config_nn,
     );
 
     // Both should produce the same best move (same evaluation)
@@ -889,7 +877,7 @@ fn test_biased_mock_changes_evaluation() {
     };
 
     let (_, _, root_pos) = tactical_mcts_search(
-        board.clone(), &move_gen, &mut None, config_pos,
+        board.clone(), &move_gen, config_pos,
     );
 
     // Strongly negative bias (thinks position is terrible for STM)
@@ -904,7 +892,7 @@ fn test_biased_mock_changes_evaluation() {
     };
 
     let (_, _, root_neg) = tactical_mcts_search(
-        board, &move_gen, &mut None, config_neg,
+        board, &move_gen, config_neg,
     );
 
     let q_pos = {
@@ -947,7 +935,7 @@ fn test_reused_root_with_stale_terminal_value_still_finds_move() {
 
     // Do an initial search to build a tree
     let result1 = tactical_mcts_search_for_training_with_reuse(
-        board.clone(), &move_gen, &mut None, config.clone(), None, &mut tt,
+        board.clone(), &move_gen, config.clone(), None, &mut tt,
     );
     assert!(result1.best_move.is_some());
     let move1 = result1.best_move.unwrap();
@@ -970,7 +958,7 @@ fn test_reused_root_with_stale_terminal_value_still_finds_move() {
     // The fix should clear terminal_or_mate_value since is_terminal is false
     let next_board = board.apply_move_to_board(move1);
     let result2 = tactical_mcts_search_for_training_with_reuse(
-        next_board, &move_gen, &mut None, config, Some(reused_root), &mut tt,
+        next_board, &move_gen, config, Some(reused_root), &mut tt,
     );
 
     // Before the fix, best_move would be None here
@@ -990,7 +978,7 @@ fn test_single_legal_move() {
     let board = Board::new_from_fen("k7/8/1K6/8/8/8/8/8 b - - 0 1");
 
     let config = test_config(50);
-    let (best_move, _, _) = tactical_mcts_search(board, &move_gen, &mut None, config);
+    let (best_move, _, _) = tactical_mcts_search(board, &move_gen, config);
 
     // Should still return the single legal move
     assert!(best_move.is_some(), "Should return the only legal move");

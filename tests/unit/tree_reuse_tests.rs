@@ -8,13 +8,12 @@ use kingfisher::mcts::tactical_mcts::{TacticalMctsConfig, reuse_subtree};
 fn run_search(iterations: u32) -> (Option<Move>, std::rc::Rc<std::cell::RefCell<kingfisher::mcts::node::MctsNode>>) {
     let board = Board::new();
     let move_gen = MoveGen::new();
-    let mut nn = None;
     let config = TacticalMctsConfig {
         max_iterations: iterations,
         ..Default::default()
     };
     let (best, _stats, root) = kingfisher::mcts::tactical_mcts_search(
-        board, &move_gen, &mut nn, config,
+        board, &move_gen, config,
     );
     (best, root)
 }

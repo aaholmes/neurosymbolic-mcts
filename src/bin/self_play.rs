@@ -10,8 +10,8 @@ use kingfisher::mcts::{
     tactical_mcts_search_for_training_with_reuse, reuse_subtree,
     TacticalMctsConfig, InferenceServer,
 };
-use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::move_types::Move;
+use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::search::mate_search;
 use kingfisher::search::koth_center_in_3;
 use kingfisher::search::quiescence::forced_material_balance;
@@ -191,7 +191,6 @@ fn play_game(game_num: usize, simulations: u32, inference_server: Option<Arc<Inf
         let result = tactical_mcts_search_for_training_with_reuse(
             board.clone(),
             &move_gen,
-            &mut None,
             config.clone(),
             reused_root,
             &mut transposition_table,

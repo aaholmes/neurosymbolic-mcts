@@ -47,7 +47,6 @@ fn test_export_dot_mate_position_shows_gate_color() {
     let (best_move, _, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -79,7 +78,6 @@ fn test_export_dot_tactical_position_has_nodes() {
     let (_, _, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -121,7 +119,6 @@ fn test_export_dot_respects_depth_limit() {
     let (_, _, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
     
@@ -154,7 +151,6 @@ fn test_export_dot_min_visits_filter() {
     let (_, _, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
     
@@ -187,7 +183,6 @@ fn test_export_dot_no_ghost_nodes() {
     let (_, _, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 

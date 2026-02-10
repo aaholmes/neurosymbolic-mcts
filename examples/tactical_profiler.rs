@@ -26,13 +26,10 @@ fn profile_position(
     move_gen: &MoveGen,
     config: TacticalMctsConfig,
 ) -> ProfileResult {
-    let mut nn_policy = None;
-
     let start_time = Instant::now();
     let (_, stats, _) = tactical_mcts_search(
         board,
         move_gen,
-        &mut nn_policy,
         config,
     );
     let total_time = start_time.elapsed();

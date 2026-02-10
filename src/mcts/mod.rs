@@ -53,11 +53,9 @@ pub fn mcts_pesto_search(
         ..Default::default()
     };
 
-    let mut nn = None;
     let (best_move, _stats, _root) = tactical_mcts_search(
         root_state,
         move_gen,
-        &mut nn,
         config
     );
 

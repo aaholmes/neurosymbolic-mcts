@@ -15,13 +15,12 @@ fn main() {
     println!("\n--- MCTS Inspector Test ---");
     let fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/4Q3/PPPP1PPP/RNB1KBNR w KQkq - 0 1";
     let board = Board::new_from_fen(fen);
-    let mut nn = None;
     let config = TacticalMctsConfig {
         max_iterations: 100,
         ..Default::default()
     };
 
-    let (_mv, _stats, root) = tactical_mcts_search(board, &move_gen, &mut nn, config);
+    let (_mv, _stats, root) = tactical_mcts_search(board, &move_gen, config);
     let dot = root.borrow().export_dot(3, 0);
     
     match std::fs::write("test_tree.dot", dot) {

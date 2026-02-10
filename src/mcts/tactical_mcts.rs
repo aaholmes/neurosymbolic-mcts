@@ -14,7 +14,6 @@ use crate::mcts::inference_server::InferenceServer;
 use crate::mcts::search_logger::{SearchLogger, GateReason};
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
-use crate::neural_net::NeuralNetPolicy;
 use crate::search::mate_search;
 use crate::search::koth_center_in_3;
 use crate::search::forced_material_balance;
@@ -124,17 +123,15 @@ impl TacticalMctsStats {
 pub fn tactical_mcts_search(
     board: Board,
     move_gen: &MoveGen,
-    nn_policy: &mut Option<NeuralNetPolicy>,
     config: TacticalMctsConfig,
 ) -> (Option<Move>, TacticalMctsStats, Rc<RefCell<MctsNode>>) {
     let mut transposition_table = TranspositionTable::new();
-    tactical_mcts_search_with_tt(board, move_gen, nn_policy, config, &mut transposition_table)
+    tactical_mcts_search_with_tt(board, move_gen, config, &mut transposition_table)
 }
 
 pub fn tactical_mcts_search_with_tt(
     board: Board,
     move_gen: &MoveGen,
-    nn_policy: &mut Option<NeuralNetPolicy>,
     config: TacticalMctsConfig,
     transposition_table: &mut TranspositionTable,
 ) -> (Option<Move>, TacticalMctsStats, Rc<RefCell<MctsNode>>) {
@@ -252,8 +249,8 @@ pub fn tactical_mcts_search_with_tt(
             log.log_iteration_start(iteration + 1);
         }
 
-        let leaf_node = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats, logger);
-        let value = evaluate_leaf_node(leaf_node.clone(), move_gen, nn_policy, &config, transposition_table, &mut stats, logger);
+        let leaf_node = select_leaf_node(root_node.clone(), move_gen, &config, &mut stats, logger);
+        let value = evaluate_leaf_node(leaf_node.clone(), move_gen, &config, transposition_table, &mut stats, logger);
 
         if !leaf_node.borrow().is_game_terminal()
             && leaf_node.borrow().visits == 0
@@ -314,7 +311,6 @@ pub fn tactical_mcts_search_with_tt(
 fn select_leaf_node(
     mut current: Rc<RefCell<MctsNode>>,
     move_gen: &MoveGen,
-    nn_policy: &mut Option<NeuralNetPolicy>,
     config: &TacticalMctsConfig,
     stats: &mut TacticalMctsStats,
     logger: Option<&Arc<SearchLogger>>,
@@ -335,9 +331,8 @@ fn select_leaf_node(
         
         if let Some(child) = select_child_with_tactical_priority(
             current.clone(),
-            &config,
+            config,
             move_gen,
-            nn_policy,
             stats,
             logger,
             depth,
@@ -356,7 +351,6 @@ fn select_leaf_node(
 fn evaluate_leaf_node(
     node: Rc<RefCell<MctsNode>>,
     move_gen: &MoveGen,
-    _nn_policy: &mut Option<NeuralNetPolicy>, // TODO: Use for Tier 3 neural evaluation
     config: &TacticalMctsConfig,
     transposition_table: &mut TranspositionTable,
     stats: &mut TacticalMctsStats,
@@ -451,9 +445,10 @@ fn evaluate_leaf_node(
             if let Some(server) = &config.inference_server {
                 if config.use_neural_policy {
                     let receiver = server.predict_async(node_ref.state.clone());
-                    if let Ok(Some((_policy, nn_v_logit, k))) = receiver.recv() {
+                    if let Ok(Some((policy, nn_v_logit, k))) = receiver.recv() {
                         v_logit = nn_v_logit as f64;
                         k_val = k;
+                        node_ref.raw_nn_policy = Some(policy);
                     }
                 }
             }
@@ -588,7 +583,6 @@ pub struct MctsTrainingResult {
 pub fn tactical_mcts_search_for_training(
     board: Board,
     move_gen: &MoveGen,
-    nn_policy: &mut Option<NeuralNetPolicy>,
     config: TacticalMctsConfig,
 ) -> MctsTrainingResult {
     let start_time = Instant::now();
@@ -609,8 +603,8 @@ pub fn tactical_mcts_search_for_training(
             log.log_iteration_start(iteration + 1);
         }
 
-        let leaf = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats, logger);
-        let value = evaluate_leaf_node(leaf.clone(), move_gen, nn_policy, &config, &mut transposition_table, &mut stats, logger);
+        let leaf = select_leaf_node(root_node.clone(), move_gen, &config, &mut stats, logger);
+        let value = evaluate_leaf_node(leaf.clone(), move_gen, &config, &mut transposition_table, &mut stats, logger);
         if !leaf.borrow().is_game_terminal()
             && leaf.borrow().visits == 0
             && leaf.borrow().terminal_or_mate_value.is_none()
@@ -670,7 +664,6 @@ pub fn tactical_mcts_search_for_training(
 pub fn tactical_mcts_search_for_training_with_reuse(
     board: Board,
     move_gen: &MoveGen,
-    nn_policy: &mut Option<NeuralNetPolicy>,
     config: TacticalMctsConfig,
     reused_root: Option<Rc<RefCell<MctsNode>>>,
     transposition_table: &mut TranspositionTable,
@@ -713,8 +706,8 @@ pub fn tactical_mcts_search_for_training_with_reuse(
             log.log_iteration_start(iteration + 1);
         }
 
-        let leaf = select_leaf_node(root_node.clone(), move_gen, nn_policy, &config, &mut stats, logger);
-        let value = evaluate_leaf_node(leaf.clone(), move_gen, nn_policy, &config, transposition_table, &mut stats, logger);
+        let leaf = select_leaf_node(root_node.clone(), move_gen, &config, &mut stats, logger);
+        let value = evaluate_leaf_node(leaf.clone(), move_gen, &config, transposition_table, &mut stats, logger);
         if !leaf.borrow().is_game_terminal()
             && leaf.borrow().visits == 0
             && leaf.borrow().terminal_or_mate_value.is_none()

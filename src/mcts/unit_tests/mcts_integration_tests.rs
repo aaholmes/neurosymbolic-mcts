@@ -32,14 +32,12 @@ mod tests {
     fn test_basic_search_functionality() {
         let move_gen = setup_test_env();
         let config = get_test_config();
-        let mut nn_policy = None;
 
         let board = Board::new_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
         let (best_move, stats, _root) = tactical_mcts_search(
             board.clone(),
             &move_gen,
-            &mut nn_policy,
             config,
         );
 
@@ -70,7 +68,6 @@ mod tests {
     fn test_tactical_position_search() {
         let move_gen = setup_test_env();
         let config = get_test_config();
-        let mut nn_policy = None;
 
         // Position with tactical opportunities
         let board = Board::new_from_fen("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3");
@@ -78,7 +75,6 @@ mod tests {
         let (best_move, stats, _root) = tactical_mcts_search(
             board,
             &move_gen,
-            &mut nn_policy,
             config,
         );
 
@@ -106,7 +102,6 @@ mod tests {
             use_neural_policy: false,
             ..Default::default()
         };
-        let mut nn_policy = None;
 
         // Simple mate in 1 position - back rank mate
         let board = Board::new_from_fen("6k1/5ppp/8/8/8/8/8/7R w - - 0 1");
@@ -114,7 +109,6 @@ mod tests {
         let (best_move, stats, _root) = tactical_mcts_search(
             board,
             &move_gen,
-            &mut nn_policy,
             config,
         );
 
@@ -129,7 +123,6 @@ mod tests {
     #[test]
     fn test_search_time_limits() {
         let move_gen = setup_test_env();
-        let mut nn_policy = None;
 
         let board = Board::new_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
@@ -147,7 +140,6 @@ mod tests {
         let (_, stats, _root) = tactical_mcts_search(
             board.clone(),
             &move_gen,
-            &mut nn_policy,
             short_config,
         );
         let elapsed = start.elapsed();
@@ -161,7 +153,6 @@ mod tests {
     #[test]
     fn test_iteration_limits() {
         let move_gen = setup_test_env();
-        let mut nn_policy = None;
 
         let board = Board::new_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
@@ -178,7 +169,6 @@ mod tests {
         let (_, stats, _root) = tactical_mcts_search(
             board,
             &move_gen,
-            &mut nn_policy,
             iter_config,
         );
 
@@ -191,14 +181,12 @@ mod tests {
     fn test_statistics_consistency() {
         let move_gen = setup_test_env();
         let config = get_test_config();
-        let mut nn_policy = None;
 
         let board = Board::new_from_fen("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3");
 
         let (_, stats, _root) = tactical_mcts_search(
             board,
             &move_gen,
-            &mut nn_policy,
             config.clone(),
         );
 
@@ -214,8 +202,6 @@ mod tests {
     #[test]
     fn test_different_exploration_constants() {
         let move_gen = setup_test_env();
-        let mut nn_policy1 = None;
-        let mut nn_policy2 = None;
 
         let board = Board::new_from_fen("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3");
 
@@ -240,14 +226,12 @@ mod tests {
         let (move1, stats1, _) = tactical_mcts_search(
             board.clone(),
             &move_gen,
-            &mut nn_policy1,
             low_exploration,
         );
 
         let (move2, stats2, _) = tactical_mcts_search(
             board,
             &move_gen,
-            &mut nn_policy2,
             high_exploration,
         );
 
@@ -263,8 +247,6 @@ mod tests {
     #[test]
     fn test_mate_search_depth_effect() {
         let move_gen = setup_test_env();
-        let mut nn_policy1 = None;
-        let mut nn_policy2 = None;
 
         let board = Board::new_from_fen("6k1/5ppp/8/8/8/8/8/4R2K w - - 0 1");
 
@@ -289,14 +271,12 @@ mod tests {
         let (_, stats_no_mate, _) = tactical_mcts_search(
             board.clone(),
             &move_gen,
-            &mut nn_policy1,
             no_mate_search,
         );
 
         let (_, stats_with_mate, _) = tactical_mcts_search(
             board,
             &move_gen,
-            &mut nn_policy2,
             with_mate_search,
         );
 
@@ -321,19 +301,15 @@ mod tests {
         let board = Board::new_from_fen("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3");
 
         // Run search twice with same parameters
-        let mut nn_policy1 = None;
         let (move1, stats1, _) = tactical_mcts_search(
             board.clone(),
             &move_gen,
-            &mut nn_policy1,
             config.clone(),
         );
 
-        let mut nn_policy2 = None;
         let (move2, stats2, _) = tactical_mcts_search(
             board,
             &move_gen,
-            &mut nn_policy2,
             config,
         );
 

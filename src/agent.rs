@@ -111,11 +111,9 @@ impl Agent for HumanlikeAgent<'_> {
             ..Default::default()
         };
 
-        let mut nn = None; // Use default stub or could be loaded from UCIEngine
         let (mcts_move, _stats, root) = tactical_mcts_search(
             board.current_state().clone(),
             self.move_gen,
-            &mut nn,
             config
         );
 

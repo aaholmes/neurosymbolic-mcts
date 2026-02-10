@@ -43,7 +43,7 @@ mod value_topology {
                 ..Default::default()
             };
 
-            let (_, _, root_node) = tactical_mcts_search(board, &move_gen, &mut None, config);
+            let (_, _, root_node) = tactical_mcts_search(board, &move_gen, config);
             
             // Check all nodes in tree
             fn check_tree(node: &Rc<RefCell<MctsNode>>) {
@@ -168,7 +168,6 @@ mod tactical_q_init {
             root.clone(),
             &config,
             &move_gen,
-            &mut None,
             &mut stats,
             None,
             0,

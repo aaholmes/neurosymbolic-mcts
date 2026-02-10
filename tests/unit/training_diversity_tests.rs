@@ -128,7 +128,6 @@ fn test_dirichlet_noise_epsilon_zero_no_change() {
 fn test_koth_gating_disabled_by_default() {
     let board = Board::new();
     let move_gen = MoveGen::new();
-    let mut nn = None;
     let mut tt = TranspositionTable::new();
 
     let config = TacticalMctsConfig {
@@ -142,7 +141,6 @@ fn test_koth_gating_disabled_by_default() {
     let result = tactical_mcts_search_for_training_with_reuse(
         board,
         &move_gen,
-        &mut nn,
         config,
         None,
         &mut tt,

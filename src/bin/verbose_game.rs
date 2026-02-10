@@ -73,7 +73,6 @@ fn main() {
         let result = tactical_mcts_search_for_training(
             board.clone(),
             &move_gen,
-            &mut None,
             config,
         );
 

@@ -45,7 +45,6 @@ fn play_test_game_fen_koth(simulations: u32, fen: &str, enable_koth: bool) -> Ga
 
     let mut board_stack = BoardStack::new_from_fen(fen);
     let mut move_count = 0;
-    let mut nn: Option<NeuralNetPolicy> = None;
     let mut tt = TranspositionTable::new();
     let mut koth_winner: Option<bool> = None; // Some(true) = white won, Some(false) = black won
 
@@ -55,7 +54,6 @@ fn play_test_game_fen_koth(simulations: u32, fen: &str, enable_koth: bool) -> Ga
         let (best_move, _stats, _root) = tactical_mcts_search_with_tt(
             board.clone(),
             &move_gen,
-            &mut nn,
             config.clone(),
             &mut tt,
         );
@@ -363,20 +361,18 @@ fn test_two_engine_game_with_different_tt() {
     };
 
     let board = Board::new();
-    let mut nn1: Option<NeuralNetPolicy> = None;
-    let mut nn2: Option<NeuralNetPolicy> = None;
     let mut tt1 = TranspositionTable::new();
     let mut tt2 = TranspositionTable::new();
 
     // White's move (engine 1)
     let (move1, _, _) = tactical_mcts_search_with_tt(
-        board.clone(), &move_gen, &mut nn1, config.clone(), &mut tt1,
+        board.clone(), &move_gen, config.clone(), &mut tt1,
     );
     assert!(move1.is_some());
 
     // Black's move (engine 2) from same position
     let (move2, _, _) = tactical_mcts_search_with_tt(
-        board.clone(), &move_gen, &mut nn2, config.clone(), &mut tt2,
+        board.clone(), &move_gen, config.clone(), &mut tt2,
     );
     assert!(move2.is_some());
 }

@@ -27,7 +27,6 @@ mod tests {
     #[test]
     fn test_node_expansion_from_start() {
         let (board, move_gen, mut stats) = setup_test_env();
-        let mut nn_policy = None;
         let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
@@ -40,7 +39,6 @@ mod tests {
             root_node.clone(),
             &config,
             &move_gen,
-            &mut nn_policy,
             &mut stats,
             None,
             0,
@@ -56,7 +54,6 @@ mod tests {
     #[test]
     fn test_tactical_move_prioritization() {
         let (board, move_gen, mut stats) = setup_test_env();
-        let mut nn_policy = None;
         let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
@@ -67,7 +64,6 @@ mod tests {
                 root_node.clone(),
                 &config,
                 &move_gen,
-                &mut nn_policy,
                 &mut stats,
                 None,
                 0,
@@ -84,7 +80,6 @@ mod tests {
     #[test]
     fn test_statistics_tracking() {
         let (board, move_gen, mut stats) = setup_test_env();
-        let mut nn_policy = None;
         let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
@@ -97,7 +92,6 @@ mod tests {
                 root_node.clone(),
                 &config,
                 &move_gen,
-                &mut nn_policy,
                 &mut stats,
                 None,
                 0,
@@ -118,7 +112,6 @@ mod tests {
     #[test]
     fn test_ucb_selection_with_policy() {
         let (board, move_gen, mut stats) = setup_test_env();
-        let mut nn_policy = None;
         let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
@@ -128,7 +121,6 @@ mod tests {
             root_node.clone(),
             &config,
             &move_gen,
-            &mut nn_policy,
             &mut stats,
             None,
             0,
@@ -150,7 +142,6 @@ mod tests {
             root_node.clone(),
             &config,
             &move_gen,
-            &mut nn_policy,
             &mut stats,
             None,
             0,
@@ -163,7 +154,6 @@ mod tests {
     fn test_terminal_position_handling() {
         let move_gen = MoveGen::new();
         let mut stats = TacticalMctsStats::default();
-        let mut nn_policy = None;
         let config = TacticalMctsConfig::default();
         
         // Checkmate position - black king is mated
@@ -174,7 +164,6 @@ mod tests {
             terminal_node.clone(),
             &config,
             &move_gen,
-            &mut nn_policy,
             &mut stats,
             None,
             0,
@@ -191,8 +180,6 @@ mod tests {
     fn test_exploration_constant_effect() {
         let (board, move_gen, mut stats1) = setup_test_env();
         let (_, _, mut stats2) = setup_test_env();
-        let mut nn_policy1 = None;
-        let mut nn_policy2 = None;
         
         let mut config1 = TacticalMctsConfig::default();
         config1.exploration_constant = 0.5;
@@ -204,8 +191,8 @@ mod tests {
         let root2 = MctsNode::new_root(board, &move_gen);
         
         // Force some visits to create selection differences
-        select_child_with_tactical_priority(root1.clone(), &config1, &move_gen, &mut nn_policy1, &mut stats1, None, 0);
-        select_child_with_tactical_priority(root2.clone(), &config2, &move_gen, &mut nn_policy2, &mut stats2, None, 0);
+        select_child_with_tactical_priority(root1.clone(), &config1, &move_gen, &mut stats1, None, 0);
+        select_child_with_tactical_priority(root2.clone(), &config2, &move_gen, &mut stats2, None, 0);
         
         // Different exploration constants should potentially lead to different selections
         // (This is a behavioral test - exact outcomes depend on position)
@@ -218,7 +205,6 @@ mod tests {
     #[test]
     fn test_policy_evaluation_deferral() {
         let (board, move_gen, mut stats) = setup_test_env();
-        let mut nn_policy = None; // No neural network
         let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
@@ -229,7 +215,6 @@ mod tests {
                 root_node.clone(),
                 &config,
                 &move_gen,
-                &mut nn_policy,
                 &mut stats,
                 None,
                 0,
@@ -248,7 +233,6 @@ mod tests {
     #[test]
     fn test_repeated_selection_consistency() {
         let (board, move_gen, mut stats) = setup_test_env();
-        let mut nn_policy = None;
         let config = TacticalMctsConfig::default();
         
         let root_node = MctsNode::new_root(board, &move_gen);
@@ -261,7 +245,6 @@ mod tests {
                 root_node.clone(),
                 &config,
                 &move_gen,
-                &mut nn_policy,
                 &mut stats,
                 None,
                 0,

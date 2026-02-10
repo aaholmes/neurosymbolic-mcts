@@ -10,7 +10,7 @@ use crate::move_types::Move;
 // use crate::search::alpha_beta::AlphaBeta;
 // use crate::mcts::mcts_search;
 use crate::mcts::neural_mcts::neural_mcts_search;
-use crate::neural_net::NeuralNetPolicy;
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::fmt;
@@ -235,11 +235,10 @@ impl StrengthTester {
             }
             
             EngineVariant::MctsNeuralNet => {
-                let mut nn_policy = self.create_neural_policy();
                 let best_move = neural_mcts_search(
                     board.clone(),
                     &self.move_gen,
-                    &mut nn_policy,
+                    None, // No inference server for now
                     0, // No mate search
                     Some(self.config.mcts_iterations),
                     Some(time_limit),
@@ -248,26 +247,16 @@ impl StrengthTester {
             }
 
             EngineVariant::MctsComplete => {
-                let mut nn_policy = self.create_neural_policy();
                 let best_move = neural_mcts_search(
                     board.clone(),
                     &self.move_gen,
-                    &mut nn_policy,
+                    None, // No inference server for now
                     self.config.mate_search_depth,
                     Some(self.config.mcts_iterations),
                     Some(time_limit),
                 );
                 (best_move, None, None)
             }
-        }
-    }
-    
-    /// Create neural network policy (with fallback)
-    fn create_neural_policy(&self) -> Option<NeuralNetPolicy> {
-        if self.config.neural_model_path.is_some() {
-            Some(NeuralNetPolicy::new())
-        } else {
-            None
         }
     }
     

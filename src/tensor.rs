@@ -143,6 +143,33 @@ pub fn move_to_index(mv: Move) -> usize {
     src * 73 + plane as usize
 }
 
+/// Convert a raw NN policy vector into per-move priors for the given legal moves.
+///
+/// Flips moves for Black (to match the STM-relative tensor encoding),
+/// indexes into the policy vector, and normalizes to sum to 1.
+pub fn policy_to_move_priors(policy: &[f32], moves: &[Move], board: &Board) -> Vec<(Move, f32)> {
+    let mut result = Vec::with_capacity(moves.len());
+    let mut total_prob = 0.0;
+    for &mv in moves {
+        let relative_mv = if board.w_to_move { mv } else { mv.flip_vertical() };
+        let idx = move_to_index(relative_mv);
+        if idx < policy.len() {
+            let prob = policy[idx];
+            result.push((mv, prob));
+            total_prob += prob;
+        } else {
+            result.push((mv, 0.0));
+        }
+    }
+    if total_prob > 0.0 {
+        for (_, prob) in result.iter_mut() { *prob /= total_prob; }
+    } else {
+        let uniform = 1.0 / moves.len() as f32;
+        for (_, prob) in result.iter_mut() { *prob = uniform; }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

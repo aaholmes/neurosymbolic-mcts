@@ -75,7 +75,6 @@ fn test_self_play_detects_50_move_draw() {
 fn test_tt_shared_across_moves() {
     let board = Board::new();
     let move_gen = MoveGen::new();
-    let mut nn = None;
     let mut tt = TranspositionTable::new();
     let config = TacticalMctsConfig {
         max_iterations: 50,
@@ -85,7 +84,7 @@ fn test_tt_shared_across_moves() {
 
     // First search populates the TT
     let result1 = tactical_mcts_search_for_training_with_reuse(
-        board.clone(), &move_gen, &mut nn,
+        board.clone(), &move_gen,
         config.clone(), None, &mut tt,
     );
 
@@ -97,7 +96,7 @@ fn test_tt_shared_across_moves() {
 
     // Second search reuses the same TT — should have mate hits if any were stored
     let result2 = tactical_mcts_search_for_training_with_reuse(
-        board2, &move_gen, &mut nn,
+        board2, &move_gen,
         config.clone(), None, &mut tt,
     );
 

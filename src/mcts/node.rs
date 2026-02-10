@@ -108,6 +108,8 @@ pub struct MctsNode {
     pub move_priorities: HashMap<Move, f64>,
     /// Q-init values for capture/promotion moves (MVV-LVA normalized to [-1, 1])
     pub tactical_values: HashMap<Move, f64>,
+    /// Cached raw NN policy vector from InferenceServer (used by ensure_policy_evaluated)
+    pub raw_nn_policy: Option<Vec<f32>>,
 }
 
 impl MctsNode {
@@ -147,6 +149,7 @@ impl MctsNode {
             policy_evaluated: false,
             move_priorities: HashMap::new(),
             tactical_values: HashMap::new(),
+            raw_nn_policy: None,
         }))
     }
 
@@ -192,6 +195,7 @@ impl MctsNode {
             policy_evaluated: false,
             move_priorities: HashMap::new(),
             tactical_values: HashMap::new(),
+            raw_nn_policy: None,
         }))
     }
 

@@ -127,11 +127,9 @@ fn run_experiment(
         };
         
         let start = Instant::now();
-        let mut nn_policy = None;
         let (best_move, stats, _root) = tactical_mcts_search(
             board.clone(),
             &move_gen,
-            &mut nn_policy,
             mcts_config,
         );
         let elapsed = start.elapsed();

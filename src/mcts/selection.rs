@@ -10,7 +10,6 @@ use crate::mcts::node::MctsNode;
 use crate::mcts::tactical::identify_tactical_moves;
 use crate::mcts::tactical_mcts::{TacticalMctsStats, TacticalMctsConfig};
 use crate::mcts::search_logger::{SearchLogger, SelectionReason};
-use crate::neural_net::NeuralNetPolicy;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,7 +19,6 @@ pub fn select_child_with_tactical_priority(
     node: Rc<RefCell<MctsNode>>,
     config: &TacticalMctsConfig,
     move_gen: &MoveGen,
-    nn_policy: &mut Option<NeuralNetPolicy>,
     stats: &mut TacticalMctsStats,
     logger: Option<&Arc<SearchLogger>>,
     depth: usize,
@@ -67,7 +65,7 @@ pub fn select_child_with_tactical_priority(
     }
 
     // Phase 2: All tactical moves explored, use UCB with policy values
-    select_ucb_with_policy(node, config, move_gen, nn_policy, logger, depth)
+    select_ucb_with_policy(node, config, move_gen, logger, depth)
 }
 
 /// Ensure the node has been expanded with all child nodes
@@ -146,12 +144,11 @@ fn select_ucb_with_policy(
     node: Rc<RefCell<MctsNode>>,
     config: &TacticalMctsConfig,
     _move_gen: &MoveGen,
-    nn_policy: &mut Option<NeuralNetPolicy>,
     logger: Option<&Arc<SearchLogger>>,
     depth: usize,
 ) -> Option<Rc<RefCell<MctsNode>>> {
     // Ensure policy has been evaluated
-    ensure_policy_evaluated(node.clone(), config.enable_tier3_neural, nn_policy);
+    ensure_policy_evaluated(node.clone(), config);
     
     let node_ref = node.borrow();
     if node_ref.children.is_empty() {
@@ -248,18 +245,22 @@ pub fn calculate_ucb_value(
     q + u
 }
 
-/// Ensure neural network policy has been evaluated for the node
+/// Ensure neural network policy has been evaluated for the node.
+///
+/// Uses the cached `raw_nn_policy` on the node (populated by `evaluate_leaf_node`
+/// from the InferenceServer). Falls back to a synchronous InferenceServer call
+/// if the node has no cached policy but a server is available. Otherwise uses
+/// uniform priors (classical fallback).
 fn ensure_policy_evaluated(
     node: Rc<RefCell<MctsNode>>,
-    enable_tier3_neural: bool,
-    nn_policy: &mut Option<NeuralNetPolicy>,
+    config: &TacticalMctsConfig,
 ) {
     let mut node_ref = node.borrow_mut();
-    
+
     if node_ref.policy_evaluated {
         return; // Already evaluated
     }
-    
+
     // Collect moves first to avoid borrowing conflicts
     let mut moves_to_prioritize = Vec::new();
     for child in &node_ref.children {
@@ -267,35 +268,45 @@ fn ensure_policy_evaluated(
             moves_to_prioritize.push(mv);
         }
     }
-    
+
     if moves_to_prioritize.is_empty() {
         node_ref.policy_evaluated = true;
         return;
     }
 
-    // If neural network available, use it
-    if enable_tier3_neural {
-        if let Some(nn) = nn_policy {
-            if nn.is_available() {
-                if let Some((policy_probs, _value, k)) = nn.predict(&node_ref.state) {
-                    let priors = nn.policy_to_move_priors(&policy_probs, &moves_to_prioritize, &node_ref.state);
-                    for (mv, prob) in priors {
-                        node_ref.move_priorities.insert(mv, prob as f64);
-                    }
-                    node_ref.k_val = k; // Store k for tactical expansion
-                    node_ref.policy_evaluated = true;
-                    return;
+    // 1. If we have a cached NN policy (from evaluate_leaf_node), use it
+    if let Some(ref policy) = node_ref.raw_nn_policy {
+        let priors = crate::tensor::policy_to_move_priors(policy, &moves_to_prioritize, &node_ref.state);
+        for (mv, prob) in priors {
+            node_ref.move_priorities.insert(mv, prob as f64);
+        }
+        node_ref.policy_evaluated = true;
+        return;
+    }
+
+    // 2. If inference server available, call it synchronously and cache the result
+    if config.enable_tier3_neural {
+        if let Some(ref server) = config.inference_server {
+            let receiver = server.predict_async(node_ref.state.clone());
+            if let Ok(Some((policy, _v_logit, k))) = receiver.recv() {
+                let priors = crate::tensor::policy_to_move_priors(&policy, &moves_to_prioritize, &node_ref.state);
+                for (mv, prob) in &priors {
+                    node_ref.move_priorities.insert(*mv, *prob as f64);
                 }
+                node_ref.k_val = k;
+                node_ref.raw_nn_policy = Some(policy);
+                node_ref.policy_evaluated = true;
+                return;
             }
         }
     }
-    
-    // Fallback: uniform priors
+
+    // 3. Fallback: uniform priors
     let uniform_prior = 1.0 / moves_to_prioritize.len() as f64;
     for mv in moves_to_prioritize {
         node_ref.move_priorities.insert(mv, uniform_prior);
     }
-    
+
     node_ref.policy_evaluated = true;
 }
 

@@ -27,7 +27,6 @@ fn test_mcts_finds_mate_in_1() {
     let (best_move, stats, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
     
@@ -54,7 +53,6 @@ fn test_mcts_finds_mate_for_black() {
     let (best_move, _, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
     
@@ -80,7 +78,6 @@ fn test_mcts_finds_koth_win() {
     let (best_move, _, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -112,7 +109,6 @@ fn test_mcts_prefers_winning_capture() {
     let (best_move, _, _) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
     
@@ -141,7 +137,6 @@ fn test_backpropagation_sign_consistency() {
     let (_, _, root) = tactical_mcts_search(
         board,
         &move_gen,
-        &mut None,
         config,
     );
     
@@ -174,7 +169,6 @@ fn test_training_search_logger_passthrough() {
     let result = tactical_mcts_search_for_training(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 
@@ -201,7 +195,6 @@ fn test_log_enter_node_contains_fen() {
     let _ = tactical_mcts_search_for_training(
         board,
         &move_gen,
-        &mut None,
         config,
     );
 

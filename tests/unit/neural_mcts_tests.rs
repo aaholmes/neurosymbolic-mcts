@@ -9,12 +9,11 @@ use std::time::Duration;
 fn test_neural_mcts_search_no_nn_returns_move() {
     let move_gen = MoveGen::new();
     let board = Board::new();
-    let mut nn = None;
 
     let result = neural_mcts_search(
         board,
         &move_gen,
-        &mut nn,
+        None,
         3,
         Some(50),
         Some(Duration::from_secs(5)),
@@ -27,12 +26,11 @@ fn test_neural_mcts_search_mate_in_1() {
     let move_gen = MoveGen::new();
     // Back rank mate: Re8#
     let board = Board::new_from_fen("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1");
-    let mut nn = None;
 
     let result = neural_mcts_search(
         board,
         &move_gen,
-        &mut nn,
+        None,
         3,
         Some(100),
         None,
@@ -46,13 +44,12 @@ fn test_neural_mcts_search_mate_in_1() {
 fn test_neural_mcts_search_defaults() {
     let move_gen = MoveGen::new();
     let board = Board::new();
-    let mut nn = None;
 
     // Use None for both iterations and time_limit to test defaults
     let result = neural_mcts_search(
         board,
         &move_gen,
-        &mut nn,
+        None,
         3,
         None,
         None,
@@ -64,12 +61,11 @@ fn test_neural_mcts_search_defaults() {
 fn test_neural_mcts_search_few_iterations() {
     let move_gen = MoveGen::new();
     let board = Board::new();
-    let mut nn = None;
 
     let result = neural_mcts_search(
         board,
         &move_gen,
-        &mut nn,
+        None,
         3,
         Some(10),
         Some(Duration::from_secs(10)),

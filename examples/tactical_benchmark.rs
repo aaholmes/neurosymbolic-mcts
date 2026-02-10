@@ -212,8 +212,6 @@ fn benchmark_tactical_mcts(
     pesto_eval: &PestoEval,
     config: &BenchmarkConfig,
 ) -> SearchResult {
-    let mut nn_policy = None; // Start without neural network for baseline comparison
-    
     let tactical_config = TacticalMctsConfig {
         max_iterations: 1000,
         time_limit: config.tactical_mcts_time,
@@ -224,12 +222,11 @@ fn benchmark_tactical_mcts(
         logger: None,
         ..Default::default()
     };
-    
+
     let start_time = Instant::now();
     let (best_move, stats, _root) = tactical_mcts_search(
         board.clone(),
         move_gen,
-        &mut nn_policy,
         tactical_config,
     );
     let search_time = start_time.elapsed();

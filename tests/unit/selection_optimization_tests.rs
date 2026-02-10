@@ -19,11 +19,10 @@ fn test_selection_returns_valid_child() {
     let root = MctsNode::new_root(board, &move_gen);
     let config = TacticalMctsConfig::default();
     let mut stats = TacticalMctsStats::default();
-    let mut nn_policy = None;
 
     // First selection should expand and return a child
     let child = select_child_with_tactical_priority(
-        root.clone(), &config, &move_gen, &mut nn_policy, &mut stats, None, 0,
+        root.clone(), &config, &move_gen, &mut stats, None, 0,
     );
 
     assert!(child.is_some(), "Selection should return a child from starting position");
@@ -48,11 +47,10 @@ fn test_selection_consistent_with_expansion() {
     let root = MctsNode::new_root(board, &move_gen);
     let config = TacticalMctsConfig::default();
     let mut stats = TacticalMctsStats::default();
-    let mut nn_policy = None;
 
     // Trigger expansion via selection
     let _ = select_child_with_tactical_priority(
-        root.clone(), &config, &move_gen, &mut nn_policy, &mut stats, None, 0,
+        root.clone(), &config, &move_gen, &mut stats, None, 0,
     );
 
     // Verify all children have legal actions
@@ -77,10 +75,9 @@ fn test_selection_handles_no_children() {
     let root = MctsNode::new_root(board, &move_gen);
     let config = TacticalMctsConfig::default();
     let mut stats = TacticalMctsStats::default();
-    let mut nn_policy = None;
 
     let child = select_child_with_tactical_priority(
-        root.clone(), &config, &move_gen, &mut nn_policy, &mut stats, None, 0,
+        root.clone(), &config, &move_gen, &mut stats, None, 0,
     );
 
     assert!(child.is_none(), "Terminal position should return None");
@@ -117,11 +114,10 @@ fn test_best_explored_child_no_revalidation() {
     let root = MctsNode::new_root(board, &move_gen);
     let config = TacticalMctsConfig::default();
     let mut stats = TacticalMctsStats::default();
-    let mut nn_policy = None;
 
     // Expand the root
     let _ = select_child_with_tactical_priority(
-        root.clone(), &config, &move_gen, &mut nn_policy, &mut stats, None, 0,
+        root.clone(), &config, &move_gen, &mut stats, None, 0,
     );
 
     // Give one child more visits so it has a defined Q-value
@@ -147,10 +143,9 @@ fn test_selection_tactical_position() {
     let root = MctsNode::new_root(board, &move_gen);
     let config = TacticalMctsConfig::default();
     let mut stats = TacticalMctsStats::default();
-    let mut nn_policy = None;
 
     let child = select_child_with_tactical_priority(
-        root.clone(), &config, &move_gen, &mut nn_policy, &mut stats, None, 0,
+        root.clone(), &config, &move_gen, &mut stats, None, 0,
     );
 
     assert!(child.is_some(), "Should select a child in tactical position");
@@ -164,12 +159,11 @@ fn test_repeated_selection_no_errors() {
     let root = MctsNode::new_root(board, &move_gen);
     let config = TacticalMctsConfig::default();
     let mut stats = TacticalMctsStats::default();
-    let mut nn_policy = None;
 
     // Run selection many times (simulating MCTS iterations)
     for _ in 0..50 {
         let child = select_child_with_tactical_priority(
-            root.clone(), &config, &move_gen, &mut nn_policy, &mut stats, None, 0,
+            root.clone(), &config, &move_gen, &mut stats, None, 0,
         );
         assert!(child.is_some(), "Selection should always return a child from starting position");
     }
