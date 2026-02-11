@@ -758,10 +758,10 @@ class TestMaxGenerations:
             # Run the main loop
             orch.run()
 
-            # Should have run exactly 3 generations
+            # Should have run exactly 3 generations (1 self-play + 3 variants each)
             assert mock_sp.call_count == 3
-            assert mock_train.call_count == 3
-            assert mock_eval.call_count == 3
+            assert mock_train.call_count == 9   # 3 variants x 3 generations
+            assert mock_eval.call_count == 9    # 3 variants x 3 generations
 
     def test_loop_runs_one_generation(self, tmp_workspace):
         """max_generations=1 should run exactly one iteration."""
@@ -782,7 +782,7 @@ class TestMaxGenerations:
             orch.initialize_gen0()
             orch.save_state()
             orch.run()
-            assert mock_eval.call_count == 1
+            assert mock_eval.call_count == 3  # 3 variants in 1 generation
 
     def test_loop_respects_resume_with_max_generations(self, tmp_workspace):
         """When resuming, max_generations counts from the resume point."""
@@ -807,8 +807,8 @@ class TestMaxGenerations:
              patch.object(orch, 'run_evaluation', return_value=(False, {"wins": 0, "losses": 0, "draws": 0, "winrate": 0.0})) as mock_eval:
 
             orch.run()
-            # Should run generations 6 and 7 (2 total)
-            assert mock_eval.call_count == 2
+            # Should run generations 6 and 7 (2 total, 3 variants each)
+            assert mock_eval.call_count == 6
 
 
 class TestSPRT:

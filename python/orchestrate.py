@@ -148,6 +148,7 @@ class OrchestratorState:
     current_best_pt: str = ""
     global_minibatches: int = 0
     reset_optimizer_next: bool = False
+    accepted_count: int = 0  # number of models accepted (for recency weighting)
 
     def save(self, path):
         with open(path, "w") as f:
@@ -252,6 +253,7 @@ class Orchestrator:
 
             self.state.current_best_pt = gen_pt
             self.state.current_best_pth = gen_pth
+            self.state.accepted_count += 1
 
             # Update latest symlink
             latest_pt = os.path.join(self.config.weights_dir, "latest.pt")
@@ -353,10 +355,10 @@ class Orchestrator:
             buffer_dir=self.config.buffer_dir,
         )
         buf.load_manifest()
-        added = buf.add_games(game_data_dir)
+        added = buf.add_games(game_data_dir, model_generation=self.state.accepted_count)
         buf.evict_oldest()
         total = buf.total_positions()
-        print(f"Buffer: +{added} positions, {total} total")
+        print(f"Buffer: +{added} positions (model_gen={self.state.accepted_count}), {total} total")
         return total
 
     def _compute_adaptive_minibatches(self, buffer_positions):

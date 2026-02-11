@@ -299,35 +299,66 @@ class TestReplayBuffer:
 
 
 class TestRecencyWeighting:
-    def test_recency_weighting_favors_recent(self, tmp_dirs):
-        """With small half_life, newer entries should be sampled much more often."""
+    def test_recency_weighting_favors_newer_model_gen(self, tmp_dirs):
+        """Data from a newer model generation should be weighted higher."""
         buffer_dir, _ = tmp_dirs
         buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
                            sampling_half_life=50)
 
-        # Add two batches of equal size, old then new
+        # Add data from model_generation=0 and model_generation=1
         src1 = tempfile.mkdtemp(prefix="old_")
         src2 = tempfile.mkdtemp(prefix="new_")
         try:
             make_fake_bin(os.path.join(src1, "old.bin"), 100)
-            buf.add_games(src1)
+            buf.add_games(src1, model_generation=0)
             make_fake_bin(os.path.join(src2, "new.bin"), 100)
-            buf.add_games(src2)
+            buf.add_games(src2, model_generation=1)
 
-            # With half_life=50 and 100 positions newer:
-            # old weight = 100 * 0.5^(100/50) = 100 * 0.25 = 25
-            # new weight = 100 * 0.5^(0/50) = 100
-            # new fraction = 100/125 = 0.8
+            # gen_0 data has 100 positions from newer gen → weight = 100 * 0.5^(100/50) = 25
+            # gen_1 data has 0 positions from newer gen → weight = 100
+            # gen_1 fraction = 100/125 = 0.8
             counts = np.array([e["num_positions"] for e in buf.entries], dtype=np.float64)
-            positions_newer = np.cumsum(counts[::-1])[::-1] - counts
-            recency = np.power(0.5, positions_newer / buf.sampling_half_life)
+            model_gens = np.array([e.get("model_generation", 0) for e in buf.entries])
+            positions_from_newer = np.zeros(len(buf.entries), dtype=np.float64)
+            for i in range(len(buf.entries)):
+                positions_from_newer[i] = counts[model_gens > model_gens[i]].sum()
+            recency = np.power(0.5, positions_from_newer / buf.sampling_half_life)
             weights = counts * recency
             weights /= weights.sum()
 
-            assert weights[1] > 0.7, f"Newer entry weight {weights[1]:.3f} should be > 0.7"
+            assert weights[1] > 0.7, f"Newer model gen weight {weights[1]:.3f} should be > 0.7"
         finally:
             shutil.rmtree(src1, ignore_errors=True)
             shutil.rmtree(src2, ignore_errors=True)
+
+    def test_same_model_gen_weighted_equally(self, tmp_dirs):
+        """Multiple entries from the same model generation should have equal weight per position."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
+                           sampling_half_life=50)
+
+        # Add 3 batches all from model_generation=0
+        srcs = [tempfile.mkdtemp(prefix=f"src{i}_") for i in range(3)]
+        try:
+            for src in srcs:
+                make_fake_bin(os.path.join(src, "game.bin"), 100)
+                buf.add_games(src, model_generation=0)
+
+            counts = np.array([e["num_positions"] for e in buf.entries], dtype=np.float64)
+            model_gens = np.array([e.get("model_generation", 0) for e in buf.entries])
+            positions_from_newer = np.zeros(len(buf.entries), dtype=np.float64)
+            for i in range(len(buf.entries)):
+                positions_from_newer[i] = counts[model_gens > model_gens[i]].sum()
+            recency = np.power(0.5, positions_from_newer / buf.sampling_half_life)
+            weights = counts * recency
+            weights /= weights.sum()
+
+            # All same model gen, all same size → equal weights
+            assert weights[0] == pytest.approx(weights[1], rel=1e-6)
+            assert weights[1] == pytest.approx(weights[2], rel=1e-6)
+        finally:
+            for src in srcs:
+                shutil.rmtree(src, ignore_errors=True)
 
     def test_recency_weighting_disabled_is_uniform(self, tmp_dirs):
         """half_life=0 should give uniform weighting (proportional to file size)."""
@@ -339,9 +370,9 @@ class TestRecencyWeighting:
         src2 = tempfile.mkdtemp(prefix="b_")
         try:
             make_fake_bin(os.path.join(src1, "a.bin"), 100)
-            buf.add_games(src1)
+            buf.add_games(src1, model_generation=0)
             make_fake_bin(os.path.join(src2, "b.bin"), 100)
-            buf.add_games(src2)
+            buf.add_games(src2, model_generation=1)
 
             # With equal sizes and no recency, weights should be equal
             counts = np.array([e["num_positions"] for e in buf.entries], dtype=np.float64)
@@ -354,7 +385,7 @@ class TestRecencyWeighting:
             shutil.rmtree(src2, ignore_errors=True)
 
     def test_recency_weighting_tiny_half_life(self, tmp_dirs):
-        """half_life=1 should almost exclusively sample from the newest entry."""
+        """half_life=1 should almost exclusively sample from the newest model gen."""
         buffer_dir, _ = tmp_dirs
         buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
                            sampling_half_life=1)
@@ -363,17 +394,20 @@ class TestRecencyWeighting:
         src2 = tempfile.mkdtemp(prefix="new_")
         try:
             make_fake_bin(os.path.join(src1, "old.bin"), 100)
-            buf.add_games(src1)
+            buf.add_games(src1, model_generation=0)
             make_fake_bin(os.path.join(src2, "new.bin"), 100)
-            buf.add_games(src2)
+            buf.add_games(src2, model_generation=1)
 
             counts = np.array([e["num_positions"] for e in buf.entries], dtype=np.float64)
-            positions_newer = np.cumsum(counts[::-1])[::-1] - counts
-            recency = np.power(0.5, positions_newer / buf.sampling_half_life)
+            model_gens = np.array([e.get("model_generation", 0) for e in buf.entries])
+            positions_from_newer = np.zeros(len(buf.entries), dtype=np.float64)
+            for i in range(len(buf.entries)):
+                positions_from_newer[i] = counts[model_gens > model_gens[i]].sum()
+            recency = np.power(0.5, positions_from_newer / buf.sampling_half_life)
             weights = counts * recency
             weights /= weights.sum()
 
-            # Old entry has 100 positions newer → weight = 0.5^(100/1) ≈ 0
+            # gen_0 has 100 positions from newer gen → weight = 0.5^(100/1) ≈ 0
             assert weights[1] > 0.99, f"Newest weight {weights[1]:.6f} should be > 0.99"
         finally:
             shutil.rmtree(src1, ignore_errors=True)
@@ -388,11 +422,36 @@ class TestRecencyWeighting:
         src = tempfile.mkdtemp(prefix="data_")
         try:
             make_fake_bin(os.path.join(src, "game.bin"), 20)
-            buf.add_games(src)
+            buf.add_games(src, model_generation=0)
 
             boards, materials, values, policies = buf.sample_batch(8)
             assert boards.shape == (8, INPUT_CHANNELS, 8, 8)
             assert np.all(np.isfinite(boards))
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+
+    def test_legacy_entries_without_model_generation(self, tmp_dirs):
+        """Entries without model_generation field default to 0."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
+                           sampling_half_life=50)
+
+        src = tempfile.mkdtemp(prefix="legacy_")
+        try:
+            make_fake_bin(os.path.join(src, "game.bin"), 50)
+            buf.add_games(src)  # no model_generation arg → defaults to 0
+
+            # Manually strip model_generation to simulate legacy manifest
+            for entry in buf.entries:
+                entry.pop("model_generation", None)
+            buf.save_manifest()
+
+            # Reload and sample — should not crash
+            buf2 = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir,
+                                sampling_half_life=50)
+            buf2.load_manifest()
+            boards, _, _, _ = buf2.sample_batch(4)
+            assert boards.shape[0] == 4
         finally:
             shutil.rmtree(src, ignore_errors=True)
 

@@ -27,8 +27,13 @@ class ReplayBuffer:
         self.entries = []  # [{path, num_positions, timestamp}] ordered by insertion
         os.makedirs(buffer_dir, exist_ok=True)
 
-    def add_games(self, bin_dir: str) -> int:
-        """Add all .bin files from bin_dir to the buffer. Returns number of positions added."""
+    def add_games(self, bin_dir: str, model_generation: int = 0) -> int:
+        """Add all .bin files from bin_dir to the buffer. Returns number of positions added.
+
+        model_generation: which accepted model produced this data. Used for
+        recency weighting — data from the same model generation is weighted
+        equally, with decay applied only across model generation boundaries.
+        """
         bin_files = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
         total_added = 0
 
@@ -50,6 +55,7 @@ class ReplayBuffer:
                 "path": dst_path,
                 "num_positions": num_positions,
                 "timestamp": time.time(),
+                "model_generation": model_generation,
             })
             total_added += num_positions
 
@@ -65,11 +71,22 @@ class ReplayBuffer:
         # Weight files by position count
         counts = np.array([e["num_positions"] for e in self.entries], dtype=np.float64)
 
-        # Apply recency weighting: weight = num_positions * 0.5^(positions_newer / half_life)
+        # Apply recency weighting across model generation boundaries only.
+        # Data from the same model generation is weighted equally — the model
+        # that generated it was identical, so there's no reason to prefer newer
+        # games over older ones within the same generation.
         if self.sampling_half_life > 0:
-            # positions_newer[i] = total positions in entries i+1..N-1
-            positions_newer = np.cumsum(counts[::-1])[::-1] - counts
-            recency = np.power(0.5, positions_newer / self.sampling_half_life)
+            model_gens = np.array([e.get("model_generation", 0) for e in self.entries])
+            latest_gen = model_gens.max() if len(model_gens) > 0 else 0
+
+            # Compute positions from newer model generations (not same-gen peers)
+            positions_from_newer_gens = np.zeros(len(self.entries), dtype=np.float64)
+            for i, entry in enumerate(self.entries):
+                gen = model_gens[i]
+                # Sum positions from all entries with strictly newer model_generation
+                positions_from_newer_gens[i] = counts[model_gens > gen].sum()
+
+            recency = np.power(0.5, positions_from_newer_gens / self.sampling_half_life)
             weights = counts * recency
         else:
             weights = counts
