@@ -968,6 +968,60 @@ fn test_reused_root_with_stale_terminal_value_still_finds_move() {
         "Should have non-empty policy");
 }
 
+// === Material value toggle ===
+
+#[test]
+fn test_enable_material_value_toggle() {
+    // White is up a queen — with material enabled, classical fallback should give
+    // strongly positive Q. With material disabled, classical fallback = 0.0 for every
+    // leaf, so Q should be near 0.
+    let move_gen = MoveGen::new();
+    let board = Board::new_from_fen("4k3/8/8/3Q4/8/8/8/4K3 w - - 0 1");
+
+    // With material enabled (default)
+    let config_material = TacticalMctsConfig {
+        max_iterations: 50,
+        time_limit: Duration::from_secs(10),
+        enable_tier3_neural: false,
+        enable_material_value: true,
+        ..Default::default()
+    };
+
+    let (_, _, root_material) = tactical_mcts_search(board.clone(), &move_gen, config_material);
+    let q_material = {
+        let r = root_material.borrow();
+        if r.visits > 0 { -(r.total_value / r.visits as f64) } else { 0.0 }
+    };
+
+    // With material disabled (pure AlphaZero mode)
+    let config_no_material = TacticalMctsConfig {
+        max_iterations: 50,
+        time_limit: Duration::from_secs(10),
+        enable_tier3_neural: false,
+        enable_material_value: false,
+        ..Default::default()
+    };
+
+    let (_, _, root_no_material) = tactical_mcts_search(board, &move_gen, config_no_material);
+    let q_no_material = {
+        let r = root_no_material.borrow();
+        if r.visits > 0 { -(r.total_value / r.visits as f64) } else { 0.0 }
+    };
+
+    // Material-enabled should detect the queen advantage
+    assert!(q_material > 0.3,
+        "With material enabled, white up a queen should have Q > 0.3, got {:.4}", q_material);
+
+    // Material-disabled classical fallback gives 0.0 for every leaf
+    assert!(q_no_material.abs() < 0.01,
+        "With material disabled and no NN, Q should be ~0.0, got {:.4}", q_no_material);
+
+    // The two should differ significantly
+    assert!((q_material - q_no_material).abs() > 0.2,
+        "Material toggle should produce different Q: material={:.4}, no_material={:.4}",
+        q_material, q_no_material);
+}
+
 // === Edge cases ===
 
 #[test]

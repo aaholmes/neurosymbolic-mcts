@@ -226,6 +226,9 @@ class Orchestrator:
         if not os.path.exists(gen0_pt):
             print("Initializing Generation 0...")
             model = OracleNet()
+            # Move to CUDA so TorchScript traces device-dependent ops correctly
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = model.to(device)
             export_model_for_rust(model, gen0_pt)
             torch.save({
                 "model_state_dict": model.state_dict(),
@@ -455,6 +458,9 @@ class Orchestrator:
             model.load_state_dict(checkpoint["model_state_dict"])
         else:
             model.load_state_dict(checkpoint)
+        # Move to CUDA so TorchScript traces device-dependent ops correctly
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
         export_model_for_rust(model, candidate_pt)
 
         return candidate_pth, candidate_pt
