@@ -55,7 +55,7 @@ class TrainingConfig:
     game_threads: int = 0  # 0 = auto (RAYON_NUM_THREADS or rayon default)
 
     # Training variants
-    single_variant: bool = False  # True = train "all" only, skip policy/value-only
+    single_variant: bool = True  # train "all" only; use --multi-variant for policy/value/all
 
     # Model architecture
     num_blocks: int = 6
@@ -114,8 +114,8 @@ class TrainingConfig:
                             help="Batch size for GPU inference server (default: 16)")
         parser.add_argument("--game-threads", type=int, default=0,
                             help="Parallel game threads for self-play/eval (0 = auto)")
-        parser.add_argument("--single-variant", action="store_true",
-                            help="Train only 'all' variant (skip policy-only and value-only)")
+        parser.add_argument("--multi-variant", action="store_true",
+                            help="Train all 3 variants (policy-only, value-only, all) instead of just 'all'")
         parser.add_argument("--num-blocks", type=int, default=6,
                             help="Number of residual blocks in OracleNet (default: 6)")
         parser.add_argument("--hidden-dim", type=int, default=128,
@@ -151,7 +151,7 @@ class TrainingConfig:
             log_games=args.log_games,
             inference_batch_size=args.inference_batch_size,
             game_threads=args.game_threads,
-            single_variant=args.single_variant,
+            single_variant=not args.multi_variant,
             num_blocks=args.num_blocks,
             hidden_dim=args.hidden_dim,
         )
