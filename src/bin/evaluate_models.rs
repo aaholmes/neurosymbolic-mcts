@@ -691,10 +691,22 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let save_training_data: Option<String> = args.iter()
-        .position(|a| a == "--save-training-data")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+    let no_save_training_data = args.iter().any(|a| a == "--no-save-training-data");
+    let save_training_data: Option<String> = if no_save_training_data {
+        None
+    } else {
+        // Default: save alongside candidate model; --save-training-data <dir> overrides
+        let explicit = args.iter()
+            .position(|a| a == "--save-training-data")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        Some(explicit.unwrap_or_else(|| {
+            let parent = std::path::Path::new(candidate_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            parent.join("eval_training_data").to_string_lossy().into_owned()
+        }))
+    };
 
     if let Some(threads) = num_threads {
         rayon::ThreadPoolBuilder::new()
