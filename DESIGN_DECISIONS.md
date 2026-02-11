@@ -176,6 +176,29 @@ Samples are weighted by $1/N$ where $N$ is the symmetry group size (8, 2, or 1),
 
 Adam was the initial default. Muon (Momentum + Newton-Schulz orthogonalization) converges faster on ResNet-style architectures — it normalizes gradient updates using Newton-Schulz iterations, which helps with the ill-conditioning typical of deep convnets. Falls back to AdamW for 1D parameters (biases, batch norm).
 
+### Multi-variant training: isolating head contributions
+
+**The problem.** Standard joint training updates all three heads (policy, value, k) simultaneously. When a candidate fails SPRT, it's unclear *why* — did the policy get worse? Did the value head overfit? Did improving one head degrade another?
+
+**The solution.** Each generation trains three variants from the same checkpoint:
+
+- **Policy-only:** freeze value + k heads, train only the policy head
+- **Value-only:** freeze policy head, train only value + k heads
+- **All-heads:** standard joint training
+
+Each variant is evaluated independently via SPRT. The best passing variant is promoted. This provides two benefits:
+
+1. **Diagnostic clarity.** If policy-only passes but all-heads doesn't, it suggests value head training is interfering with policy improvements (or vice versa).
+2. **Monotonic progress.** By allowing single-head improvements through the gate, the system can make incremental progress even when joint training is unstable.
+
+All three variants are evaluated with the same random seeds, so any difference in game outcomes is attributable to the model weights, not randomness. This makes cross-variant comparisons directly meaningful.
+
+### Evaluation: greedy selection after opening diversity
+
+**The problem.** AlphaZero-style proportional move selection (sampling from visit counts) adds noise that obscures model differences. Two models might produce very different search trees but — by random sampling — end up playing similar moves, making SPRT evaluation less sensitive.
+
+**The solution.** Use proportional sampling only for the first 10 plies (opening diversity), then switch to greedy selection (most-visited child) for the rest of the game. Forced wins are always played deterministically regardless of move number. This gives evaluation games a diverse opening book while measuring pure strength in the middlegame and endgame.
+
 ## 7. Performance Optimizations
 
 ### Incremental Zobrist hashing

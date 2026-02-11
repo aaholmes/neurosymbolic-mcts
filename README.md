@@ -75,6 +75,15 @@ With zero training, the engine already plays intelligently. All four top moves (
 
 AlphaZero-style loop: self-play → replay buffer → train → export → evaluate → gate (SPRT).
 
+Each generation trains three model variants in parallel and evaluates each via SPRT:
+- **Policy-only:** freeze value + k heads, train only the policy head
+- **Value-only:** freeze policy head, train only value + k heads
+- **All-heads:** standard joint training of all parameters
+
+The best passing variant (if any) is promoted. This isolates whether gains come from better move selection or better position evaluation, and avoids catastrophic forgetting where improving one head degrades another.
+
+Evaluation games use greedy move selection (most-visited child) after the first 10 plies, with proportional sampling only in the opening for diversity. All three variants are evaluated with the same random seeds so game differences are attributable to the model, not randomness.
+
 ```bash
 # Full training loop with KOTH, ramping sims from 100→800 over generations
 python python/orchestrate.py --enable-koth \
