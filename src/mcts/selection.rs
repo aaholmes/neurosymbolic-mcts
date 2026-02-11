@@ -301,12 +301,15 @@ fn ensure_policy_evaluated(
         }
     }
 
-    // 3. Fallback: uniform priors
+    // 3. No uniform fallback — if we reach here, something is wrong
+    eprintln!("[BUG] ensure_policy_evaluated: NO POLICY AVAILABLE! tier3={}, server={}, neural_policy={}, raw_nn_policy={}, children={}",
+        config.enable_tier3_neural, config.inference_server.is_some(), config.use_neural_policy,
+        node_ref.raw_nn_policy.is_some(), moves_to_prioritize.len());
+    // Still set uniform so we don't crash, but the eprintln above flags the issue
     let uniform_prior = 1.0 / moves_to_prioritize.len() as f64;
     for mv in moves_to_prioritize {
         node_ref.move_priorities.insert(mv, uniform_prior);
     }
-
     node_ref.policy_evaluated = true;
 }
 

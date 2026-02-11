@@ -14,8 +14,26 @@ mod real {
     use crate::board::Board;
     use crate::move_types::Move;
     use crate::tensor::{move_to_index, board_to_planes, policy_to_move_priors};
-    use tch::{CModule, Tensor, Device, Kind};
+    use tch::{CModule, Tensor, Device, Kind, IValue};
     use std::path::Path;
+
+    /// Describe an IValue type for debugging (without printing full tensor data)
+    fn describe_ivalue(iv: &IValue) -> String {
+        match iv {
+            IValue::Tensor(t) => format!("Tensor(shape={:?}, kind={:?})", t.size(), t.kind()),
+            IValue::Tuple(elems) => {
+                let descs: Vec<String> = elems.iter().map(describe_ivalue).collect();
+                format!("Tuple(len={}, [{}])", elems.len(), descs.join(", "))
+            }
+            IValue::GenericList(elems) => format!("GenericList(len={})", elems.len()),
+            IValue::None => "None".to_string(),
+            IValue::Bool(b) => format!("Bool({})", b),
+            IValue::Int(i) => format!("Int({})", i),
+            IValue::Double(d) => format!("Double({})", d),
+            IValue::String(s) => format!("String({:?})", s),
+            _ => "Unknown".to_string(),
+        }
+    }
 
     /// Force-load libtorch_cuda.so so that PyTorch's CUDA hooks register.
     /// Without this, the dynamic linker only loads libtorch_cpu.so (since all
@@ -166,7 +184,7 @@ mod real {
                 .unsqueeze(1);
 
             let ivalue = model.method_is("forward", &[tch::IValue::Tensor(input_batch), tch::IValue::Tensor(mat_batch)]);
-            
+
             match ivalue {
                 Ok(tch::IValue::Tuple(elements)) if elements.len() == 3 => {
                     let policy_batch = match &elements[0] {
@@ -187,19 +205,34 @@ mod real {
 
                     // Extract data from batch tensors
                     // policy_batch: [B, 4672], value_batch: [B, 1], k_batch: [B, 1]
-                    
+
                     for i in 0..batch_size {
                         let mut policy_probs = vec![0.0f32; 4672];
                         policy_batch.get(i as i64).exp().to_device(Device::Cpu).copy_data(&mut policy_probs, 4672);
-                        
+
                         let value = value_batch.double_value(&[i as i64, 0]) as f32;
                         let k_val = k_batch.double_value(&[i as i64, 0]) as f32;
-                        
+
                         results.push(Some((policy_probs, value, k_val)));
                     }
                     results
                 }
-                _ => vec![None; boards.len()],
+                Ok(ref other) => {
+                    use std::sync::Once;
+                    static ONCE: Once = Once::new();
+                    ONCE.call_once(|| {
+                        eprintln!("[NN-ERROR] predict_batch: unexpected output type: {:?}", describe_ivalue(other));
+                    });
+                    vec![None; boards.len()]
+                }
+                Err(ref e) => {
+                    use std::sync::Once;
+                    static ONCE_ERR: Once = Once::new();
+                    ONCE_ERR.call_once(|| {
+                        eprintln!("[NN-ERROR] predict_batch forward failed: {:?}", e);
+                    });
+                    vec![None; boards.len()]
+                }
             }
         }
 

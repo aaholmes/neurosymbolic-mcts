@@ -161,13 +161,19 @@ class OrchestratorState:
 
 
 def export_model_for_rust(model, output_path):
-    """Export PyTorch model to TorchScript for Rust integration."""
+    """Export PyTorch model to TorchScript for Rust integration.
+
+    Traces on CUDA if available so that device-dependent ops (like
+    torch.arange(..., device=x.device) in the k-head) are correctly
+    baked in for GPU inference in Rust.
+    """
+    device = next(model.parameters()).device
     model.eval()
-    example_board = torch.randn(1, 17, 8, 8)
-    example_material = torch.randn(1, 1)
+    example_board = torch.randn(1, 17, 8, 8, device=device)
+    example_material = torch.randn(1, 1, device=device)
     traced = torch.jit.trace(model, (example_board, example_material))
     traced.save(output_path)
-    print(f"Exported TorchScript model to {output_path}")
+    print(f"Exported TorchScript model to {output_path} (traced on {device})")
 
 
 def get_libtorch_env():
@@ -479,6 +485,7 @@ class Orchestrator:
         if self.config.game_threads > 0:
             cmd.extend(["--threads", str(self.config.game_threads)])
         if generation is not None:
+            # Same seed offset for all variants so games are directly comparable
             eval_seed_offset = generation * self.config.eval_max_games
             cmd.extend(["--seed-offset", str(eval_seed_offset)])
 
