@@ -219,6 +219,8 @@ def train_with_config(
     reset_optimizer=False,
     sampling_half_life=0,
     train_heads="all",
+    num_blocks=6,
+    hidden_dim=128,
 ):
     """Core training function. Returns number of minibatches trained.
 
@@ -243,7 +245,7 @@ def train_with_config(
     )
 
     # Model
-    model = OracleNet().to(DEVICE)
+    model = OracleNet(num_blocks=num_blocks, hidden_dim=hidden_dim).to(DEVICE)
 
     # Resume from checkpoint
     global_minibatch = 0
@@ -442,6 +444,10 @@ def parse_args():
     parser.add_argument('--train-heads', type=str, default='all',
                         choices=['all', 'policy', 'value'],
                         help='Which heads to train: all, policy (freeze value+k), value (freeze policy)')
+    parser.add_argument('--num-blocks', type=int, default=6,
+                        help='Number of residual blocks in OracleNet (default: 6)')
+    parser.add_argument('--hidden-dim', type=int, default=128,
+                        help='Hidden dimension of OracleNet (default: 128)')
     return parser.parse_args()
 
 
@@ -486,6 +492,8 @@ def train():
         reset_optimizer=args.reset_optimizer,
         sampling_half_life=args.sampling_half_life,
         train_heads=args.train_heads,
+        num_blocks=args.num_blocks,
+        hidden_dim=args.hidden_dim,
     )
 
 

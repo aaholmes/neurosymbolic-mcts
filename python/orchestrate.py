@@ -54,6 +54,10 @@ class TrainingConfig:
     inference_batch_size: int = 16
     game_threads: int = 0  # 0 = auto (RAYON_NUM_THREADS or rayon default)
 
+    # Model architecture
+    num_blocks: int = 6
+    hidden_dim: int = 128
+
     # Infrastructure
     weights_dir: str = "weights"
     data_dir: str = "data"
@@ -107,6 +111,10 @@ class TrainingConfig:
                             help="Batch size for GPU inference server (default: 16)")
         parser.add_argument("--game-threads", type=int, default=0,
                             help="Parallel game threads for self-play/eval (0 = auto)")
+        parser.add_argument("--num-blocks", type=int, default=6,
+                            help="Number of residual blocks in OracleNet (default: 6)")
+        parser.add_argument("--hidden-dim", type=int, default=128,
+                            help="Hidden dimension of OracleNet (default: 128)")
 
         args = parser.parse_args()
         return cls(
@@ -138,6 +146,8 @@ class TrainingConfig:
             log_games=args.log_games,
             inference_batch_size=args.inference_batch_size,
             game_threads=args.game_threads,
+            num_blocks=args.num_blocks,
+            hidden_dim=args.hidden_dim,
         )
 
 
@@ -225,7 +235,7 @@ class Orchestrator:
 
         if not os.path.exists(gen0_pt):
             print("Initializing Generation 0...")
-            model = OracleNet()
+            model = OracleNet(num_blocks=self.config.num_blocks, hidden_dim=self.config.hidden_dim)
             # Move to CUDA so TorchScript traces device-dependent ops correctly
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model = model.to(device)
@@ -414,6 +424,9 @@ class Orchestrator:
         if not self.config.enable_material_value:
             cmd.append("--disable-material")
 
+        cmd.extend(["--num-blocks", str(self.config.num_blocks)])
+        cmd.extend(["--hidden-dim", str(self.config.hidden_dim)])
+
         if train_heads != "all":
             cmd.extend(["--train-heads", train_heads])
 
@@ -452,7 +465,7 @@ class Orchestrator:
 
         # Export to TorchScript
         print("Exporting candidate model...")
-        model = OracleNet()
+        model = OracleNet(num_blocks=self.config.num_blocks, hidden_dim=self.config.hidden_dim)
         checkpoint = torch.load(candidate_pth, map_location="cpu", weights_only=False)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             model.load_state_dict(checkpoint["model_state_dict"])
