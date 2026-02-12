@@ -942,6 +942,97 @@ class TestSPRT:
         assert cmd[beta_idx + 1] == "0.05"
 
 
+class TestSkipSelfPlay:
+    def _make_orch(self, tmp_workspace, **overrides):
+        cfg = TrainingConfig(
+            weights_dir=os.path.join(tmp_workspace, "weights"),
+            data_dir=os.path.join(tmp_workspace, "data"),
+            buffer_dir=os.path.join(tmp_workspace, "buffer"),
+            log_file=os.path.join(tmp_workspace, "log.jsonl"),
+            **overrides,
+        )
+        return Orchestrator(cfg)
+
+    def test_skip_self_play_after_gen1(self, tmp_workspace):
+        """With skip_self_play=True, run_self_play called only for gen 1."""
+        orch = self._make_orch(tmp_workspace, skip_self_play=True, max_generations=3)
+        orch.initialize_gen0()
+        orch.save_state()
+
+        with patch.object(orch, 'run_self_play', return_value=tmp_workspace) as mock_sp, \
+             patch.object(orch, 'update_buffer', return_value=100) as mock_buf, \
+             patch.object(orch, '_get_buffer_size', return_value=100) as mock_get_buf, \
+             patch.object(orch, 'run_training', return_value=("c.pth", "c.pt")) as mock_train, \
+             patch.object(orch, 'run_evaluation', return_value=(False, {"wins": 0, "losses": 0, "draws": 0, "winrate": 0.0})) as mock_eval:
+
+            orch.run()
+
+            assert mock_sp.call_count == 1  # Only gen 1
+            assert mock_train.call_count == 3  # Every gen
+            assert mock_eval.call_count == 3  # Every gen
+
+    def test_skip_self_play_still_gets_buffer_size(self, tmp_workspace):
+        """With skip_self_play=True, gen 2+ gets buffer_size via _get_buffer_size."""
+        orch = self._make_orch(tmp_workspace, skip_self_play=True, max_generations=2)
+        orch.initialize_gen0()
+        orch.save_state()
+
+        with patch.object(orch, 'run_self_play', return_value=tmp_workspace), \
+             patch.object(orch, 'update_buffer', return_value=100), \
+             patch.object(orch, '_get_buffer_size', return_value=200) as mock_get_buf, \
+             patch.object(orch, 'run_training', return_value=("c.pth", "c.pt")) as mock_train, \
+             patch.object(orch, 'run_evaluation', return_value=(False, {"wins": 0, "losses": 0, "draws": 0, "winrate": 0.0})):
+
+            orch.run()
+
+            # Gen 2 should use _get_buffer_size (called once for gen 2)
+            assert mock_get_buf.call_count == 1
+            # Gen 2 training should get buffer_positions=200 from _get_buffer_size
+            gen2_call = mock_train.call_args_list[1]
+            assert gen2_call[1].get("buffer_positions") == 200
+
+    def test_skip_self_play_default_false(self):
+        """skip_self_play defaults to False for backward compat."""
+        cfg = TrainingConfig()
+        assert cfg.skip_self_play is False
+
+    def test_skip_self_play_gen1_always_runs(self, tmp_workspace):
+        """Even with skip_self_play=True, gen 1 always runs self-play."""
+        orch = self._make_orch(tmp_workspace, skip_self_play=True, max_generations=1)
+        orch.initialize_gen0()
+        orch.save_state()
+
+        with patch.object(orch, 'run_self_play', return_value=tmp_workspace) as mock_sp, \
+             patch.object(orch, 'update_buffer', return_value=100), \
+             patch.object(orch, 'run_training', return_value=("c.pth", "c.pt")), \
+             patch.object(orch, 'run_evaluation', return_value=(False, {"wins": 0, "losses": 0, "draws": 0, "winrate": 0.0})):
+
+            orch.run()
+
+            assert mock_sp.call_count == 1  # Gen 1 always runs
+
+    def test_skip_self_play_log_games_generated_zero(self, tmp_workspace):
+        """When self-play is skipped, games_generated in log should be 0."""
+        orch = self._make_orch(tmp_workspace, skip_self_play=True, max_generations=2)
+        orch.initialize_gen0()
+        orch.save_state()
+
+        with patch.object(orch, 'run_self_play', return_value=tmp_workspace), \
+             patch.object(orch, 'update_buffer', return_value=100), \
+             patch.object(orch, '_get_buffer_size', return_value=100), \
+             patch.object(orch, 'run_training', return_value=("c.pth", "c.pt")), \
+             patch.object(orch, 'run_evaluation', return_value=(False, {"wins": 0, "losses": 0, "draws": 0, "winrate": 0.0})):
+
+            orch.run()
+
+        with open(orch.config.log_file) as f:
+            lines = f.readlines()
+        gen1_log = json.loads(lines[0])
+        gen2_log = json.loads(lines[1])
+        assert gen1_log["games_generated"] == orch.config.games_per_generation
+        assert gen2_log["games_generated"] == 0
+
+
 class TestEloTracking:
     def _make_orch(self, tmp_workspace, **overrides):
         cfg = TrainingConfig(

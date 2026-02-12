@@ -67,6 +67,7 @@ class TrainingConfig:
     log_file: str = "training_log.jsonl"
     resume: bool = True
     max_generations: int = 0  # 0 = unlimited
+    skip_self_play: bool = False  # skip self-play after gen 1 (eval games produce training data)
 
     @classmethod
     def from_args(cls):
@@ -112,6 +113,8 @@ class TrainingConfig:
                             help="Batch size for GPU inference server (default: 16)")
         parser.add_argument("--game-threads", type=int, default=0,
                             help="Parallel game threads for self-play/eval (0 = auto)")
+        parser.add_argument("--skip-self-play", action="store_true",
+                            help="Skip self-play after gen 1 (eval games produce training data)")
         parser.add_argument("--multi-variant", action="store_true",
                             help="Train all 3 variants (policy-only, value-only, all) instead of just 'all'")
         parser.add_argument("--num-blocks", type=int, default=6,
@@ -151,6 +154,7 @@ class TrainingConfig:
             single_variant=not args.multi_variant,
             num_blocks=args.num_blocks,
             hidden_dim=args.hidden_dim,
+            skip_self_play=args.skip_self_play,
         )
 
 
@@ -400,6 +404,15 @@ class Orchestrator:
         added = buf.add_games(bin_dir, model_elo=model_elo)
         buf.evict_oldest()
         return added
+
+    def _get_buffer_size(self):
+        """Get current buffer size without adding any data."""
+        buf = ReplayBuffer(
+            capacity_positions=self.config.buffer_capacity,
+            buffer_dir=self.config.buffer_dir,
+        )
+        buf.load_manifest()
+        return buf.total_positions()
 
     def _compute_adaptive_minibatches(self, buffer_positions):
         """Compute minibatches targeting ~1.5 epochs over the buffer.
@@ -662,11 +675,12 @@ class Orchestrator:
 
             self._current_generation = generation
 
-            # 1. Self-play
-            game_data_dir = self.run_self_play(generation)
-
-            # 2. Buffer update
-            buffer_size = self.update_buffer(game_data_dir)
+            # 1. Self-play (skip after gen 1 if configured)
+            if not self.config.skip_self_play or generation <= 1:
+                game_data_dir = self.run_self_play(generation)
+                buffer_size = self.update_buffer(game_data_dir)
+            else:
+                buffer_size = self._get_buffer_size()
 
             # 3. Train variant(s) & evaluate each via SPRT
             if self.config.single_variant:
@@ -743,7 +757,7 @@ class Orchestrator:
             log = {
                 "gen": generation,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "games_generated": self.config.games_per_generation,
+                "games_generated": self.config.games_per_generation if (not self.config.skip_self_play or generation <= 1) else 0,
                 "simulations": self._get_sims_for_gen(generation),
                 "buffer_size": buffer_size,
                 "eval_wins": eval_results["wins"],
