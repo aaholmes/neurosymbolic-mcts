@@ -496,6 +496,41 @@ fn test_sprt_decision_inconclusive() {
     assert_eq!(result, SprtResult::Inconclusive, "Close results should be inconclusive");
 }
 
+/// Regression test for the SPRT in-flight dilution bug.
+///
+/// When running eval games in parallel, the SPRT may trigger H1 (accept) at game N,
+/// setting the stop flag. But ~28 in-flight games continue to complete, and their
+/// results can drag the LLR back below the threshold. The final decision must use
+/// the decision captured at the stop-flag point, not re-evaluate on diluted counts.
+///
+/// This reproduces caissawary9 gen 12: H1 fired at game 162 (21W/4L/137D, LLR=2.95),
+/// but 27 in-flight games (including 5 losses) brought it to 24W/9L/156D, LLR=2.10.
+#[test]
+fn test_sprt_decision_not_diluted_by_inflight_games() {
+    let config = default_sprt_config(); // elo0=0, elo1=10, alpha/beta=0.05
+    let (lower, upper) = config.bounds();
+
+    // State at decision point: 21W/4L/137D — this triggers H1
+    let state_at_decision = SprtState { wins: 21, losses: 4, draws: 137 };
+    let llr_at_decision = state_at_decision.compute_llr(&config).unwrap();
+    let decision_at_trigger = state_at_decision.check_decision(&config);
+    assert!(llr_at_decision >= upper, "LLR {:.2} should be >= threshold {:.3}", llr_at_decision, upper);
+    assert_eq!(decision_at_trigger, SprtResult::AcceptH1);
+
+    // State after in-flight games complete: 24W/9L/156D — diluted below threshold
+    let state_after_inflight = SprtState { wins: 24, losses: 9, draws: 156 };
+    let llr_after = state_after_inflight.compute_llr(&config).unwrap();
+    let decision_after = state_after_inflight.check_decision(&config);
+    assert!(llr_after < upper, "Diluted LLR {:.2} should be < threshold {:.3}", llr_after, upper);
+    assert_eq!(decision_after, SprtResult::Inconclusive);
+
+    // The correct behavior: use the decision captured at the stop-flag point (H1),
+    // NOT the re-evaluated decision from diluted counts (Inconclusive).
+    // This is what evaluate_models_koth_sprt should return.
+    assert_eq!(decision_at_trigger, SprtResult::AcceptH1,
+        "The decision at the SPRT trigger point should be AcceptH1, not overridden by in-flight dilution");
+}
+
 #[test]
 fn test_sprt_bounds_symmetric() {
     let config = SprtConfig {

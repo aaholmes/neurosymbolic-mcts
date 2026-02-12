@@ -526,6 +526,8 @@ pub fn evaluate_models_koth_sprt(
     let sprt_state = Arc::new(Mutex::new(SprtState::new()));
     let stop_flag = Arc::new(AtomicBool::new(false));
     let games_completed = Arc::new(Mutex::new(0u32));
+    // Record the SPRT decision at the moment it fires, before in-flight games dilute it
+    let triggered_decision: Arc<Mutex<Option<(SprtResult, Option<f64>)>>> = Arc::new(Mutex::new(None));
 
     // Thread-safe accumulators for training samples
     let all_candidate_samples: Arc<Mutex<Vec<TrainingSample>>> = Arc::new(Mutex::new(Vec::new()));
@@ -590,6 +592,11 @@ pub fn evaluate_models_koth_sprt(
 
         match decision {
             SprtResult::AcceptH1 | SprtResult::AcceptH0 => {
+                // Record the decision and LLR before in-flight games can dilute it
+                let mut td = triggered_decision.lock().unwrap();
+                if td.is_none() {
+                    *td = Some((decision, state.compute_llr(sprt_config)));
+                }
                 stop_flag.store(true, Ordering::Relaxed);
             }
             SprtResult::Inconclusive => {}
@@ -634,12 +641,18 @@ pub fn evaluate_models_koth_sprt(
     }
 
     let final_state = sprt_state.lock().unwrap();
-    let llr = final_state.compute_llr(sprt_config);
-    let decision = final_state.check_decision(sprt_config);
     let results = EvalResults {
         wins: final_state.wins,
         losses: final_state.losses,
         draws: final_state.draws,
+    };
+
+    // Use the decision captured at the SPRT trigger point, not re-evaluated on
+    // diluted final counts. In-flight parallel games can complete after the stop
+    // flag is set, adding results that drag the LLR below the threshold.
+    let (decision, llr) = match *triggered_decision.lock().unwrap() {
+        Some((dec, llr_at_trigger)) => (dec, llr_at_trigger),
+        None => (final_state.check_decision(sprt_config), final_state.compute_llr(sprt_config)),
     };
 
     (results, llr, decision)
