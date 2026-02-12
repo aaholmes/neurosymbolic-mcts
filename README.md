@@ -99,7 +99,7 @@ python python/orchestrate.py \
   --minibatches-per-gen 10 --eval-max-games 4 --buffer-capacity 1000
 ```
 
-The orchestrator supports adaptive minibatch scaling (~3 epochs per generation), recency-weighted sampling from the replay buffer, and Muon optimizer by default. Model architecture is configurable via `--num-blocks` and `--hidden-dim`.
+The orchestrator supports adaptive minibatch scaling (~3 epochs per generation), Elo-based strength weighting for the replay buffer, and Muon optimizer by default. Model architecture is configurable via `--num-blocks` and `--hidden-dim`.
 
 Evaluation uses SPRT (Sequential Probability Ratio Test) with early stopping — clear winners/losers decided in ~30 games, marginal cases use up to 400 (needed for statistical power at the ~84% draw rate typical of self-play). Data augmentation exploits board symmetry: positions without castling rights are expanded into both the original and horizontal flip (2x data), with pawnless endgames getting the full D4 dihedral group (8x data).
 

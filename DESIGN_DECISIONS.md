@@ -156,7 +156,13 @@ This means a freshly initialized network immediately produces meaningful behavio
 
 **v2: Sliding window.** FIFO eviction — oldest games are removed when capacity is exceeded, regardless of model acceptance. The buffer always contains a mix of recent and older data.
 
-**v3: Recency-weighted sampling (current).** Sliding window with exponential recency weighting (configurable half-life, default 20k positions). Recent games are sampled more frequently, but old games still contribute. This smooths the distribution shift between model generations.
+**v3: Recency-weighted sampling.** Sliding window with exponential half-life decay across model generations. Recent games sampled more frequently, old games still contribute. Problem: the half-life parameter was arbitrary and disconnected from actual model strength — a 55% winrate gap (barely detectable) produced the same 7:1 sampling ratio as a massive strength improvement if the same number of positions separated them.
+
+**v4: Elo-based strength weighting (current).** Each model acceptance chains the SPRT winrate into a cumulative Elo rating: $\Delta_{Elo} = -400 \cdot \log_{10}(1/WR - 1)$. Training data is weighted by expected score against the current best model:
+
+$$w_i = n_i \cdot 2 \cdot \frac{1}{1 + 10^{(Elo_{max} - Elo_i) / 400}}$$
+
+This produces sampling ratios proportional to actual measured strength differences. A 55% winrate gap (~35 Elo) yields a ~1.2:1 ratio (not 7:1). A 200 Elo gap yields ~0.48x weight. No data is ever fully discarded — even data from much weaker models contributes at a reduced rate. The weighting adapts automatically: rapid improvement produces steeper gradients, while plateaus produce near-uniform sampling.
 
 ### Adaptive minibatches
 
@@ -210,7 +216,7 @@ Each variant was evaluated independently via SPRT. The best passing variant was 
 
 **Selective ingestion based on gating outcome.** If the candidate wins SPRT: both sides' data is added to the replay buffer (the candidate is stronger, and the current model's data is still valid). If the candidate loses: only the current model's data is kept — the rejected candidate may be overfit or degenerate, so its policy targets could be harmful. The current model's data is always useful regardless of outcome, since by definition it represents the best known model.
 
-**Generation tagging.** Candidate samples are tagged with `model_generation = N+1` and current samples with `model_generation = N`, integrating naturally with the existing recency-weighted sampling. This means eval data from a newly accepted model is weighted as "fresh" by the half-life mechanism, while data from the previous model decays at the same rate as self-play data from that generation.
+**Elo tagging.** Candidate samples are tagged with the newly accepted model's cumulative Elo, and current samples with the previous model's Elo. This integrates naturally with the Elo-based strength weighting — eval data from a newly accepted model receives proportionally higher sampling weight, while data from the previous model is downweighted by exactly the measured strength gap.
 
 **Cost-benefit.** A typical SPRT evaluation (mean ~75 games, ~100 positions per game) yields ~7,500 training samples — roughly equivalent to 75 self-play games but at zero marginal compute cost (the MCTS searches were already being run for evaluation). With 100 self-play games per generation, this represents a ~75% increase in training data per generation for free.
 
