@@ -77,6 +77,8 @@ AlphaZero-style loop: self-play → replay buffer → train → export → evalu
 
 Each generation trains all heads jointly, exports the candidate, and evaluates it against the current best via SPRT (up to 400 games with early stopping). Evaluation uses greedy move selection (most-visited child) after the first 10 plies, with proportional sampling only in the opening for diversity. Evaluation games also produce training data by default — each move's MCTS visit counts and material balance are recorded and fed back into the replay buffer. If the candidate is accepted, both sides' data is kept; if rejected, only the current model's data is retained (the candidate may be overfit).
 
+Since evaluation games produce training data, self-play is optional after gen 1. With `--skip-self-play`, the loop becomes: train on buffer → eval (producing new training data) → gate → ingest eval data. Gen 1 always runs self-play to seed the buffer.
+
 Multi-variant training (policy-only, value-only, all-heads in parallel) is available via `--multi-variant` but disabled by default — empirical testing showed policy-only training consistently underperformed, and joint training is stable thanks to the factored value function.
 
 ```bash
@@ -92,6 +94,9 @@ python python/orchestrate.py --disable-material
 
 # Smaller model for faster iteration (240K params vs 2M default)
 python python/orchestrate.py --num-blocks 2 --hidden-dim 64
+
+# Skip self-play after gen 1 (eval games produce training data)
+python python/orchestrate.py --skip-self-play
 
 # Quick smoke test
 python python/orchestrate.py \

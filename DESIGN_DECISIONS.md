@@ -220,6 +220,12 @@ Each variant was evaluated independently via SPRT. The best passing variant was 
 
 **Cost-benefit.** A typical SPRT evaluation (mean ~75 games, ~100 positions per game) yields ~7,500 training samples — roughly equivalent to 75 self-play games but at zero marginal compute cost (the MCTS searches were already being run for evaluation). With 100 self-play games per generation, this represents a ~75% increase in training data per generation for free.
 
+### Eval-only mode: skipping self-play after gen 1
+
+Since eval games produce training data at zero marginal cost, self-play is redundant after the initial buffer seeding. The MCTS training signal (visit-count policy targets, game-outcome value targets) comes from the engine's own search regardless of opponent — the opponent only determines which positions arise. Eval games actually produce *more* data (up to 400 games vs 100 self-play) at higher quality (greedy play after ply 10, fresh MCTS search per move).
+
+With `--skip-self-play`, the loop after gen 1 becomes: train on buffer → eval (400 games, producing training data) → gate → ingest eval data. Gen 1 always runs self-play to seed the buffer. This cuts per-generation wall time roughly in half by eliminating the self-play phase.
+
 ## 7. Performance Optimizations
 
 ### Incremental Zobrist hashing
