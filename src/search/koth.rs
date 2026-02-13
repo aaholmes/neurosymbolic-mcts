@@ -16,6 +16,7 @@
 
 use crate::board::{Board, KOTH_CENTER};
 use crate::move_generation::MoveGen;
+use crate::move_types::Move;
 use crate::piece_types::{BLACK, KING, WHITE};
 
 /// Distance rings for KOTH-in-3 geometric pruning
@@ -46,6 +47,43 @@ pub fn koth_center_in_3(board: &Board, move_gen: &MoveGen) -> Option<u8> {
         let max_ply = (n as i32) * 2 - 1;
         if solve_koth(board, move_gen, 0, max_ply) {
             return Some(n);
+        }
+    }
+    None
+}
+
+/// Returns the best move for the side to move to force a KOTH win,
+/// or `None` if there is no forced KOTH win (or the king is already on center).
+///
+/// This is used for KOTH play-outs: the winning side plays `koth_best_move()` moves
+/// to march its king to the center.
+pub fn koth_best_move(board: &Board, move_gen: &MoveGen) -> Option<Move> {
+    // If already on center (n=0), no move needed
+    let (w_won, b_won) = board.is_koth_win();
+    if (board.w_to_move && w_won) || (!board.w_to_move && b_won) {
+        return None;
+    }
+
+    // Try n=1, 2, 3 — return the first winning move at minimum n
+    for n in 1..=3u8 {
+        let max_ply = (n as i32) * 2 - 1;
+        let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
+        for m in captures.iter().chain(moves.iter()) {
+            let next_board = board.apply_move_to_board(*m);
+            if !next_board.is_legal(move_gen) {
+                continue;
+            }
+
+            // Check if this move immediately wins (king on center)
+            let (nw, nb) = next_board.is_koth_win();
+            if (board.w_to_move && nw) || (!board.w_to_move && nb) {
+                return Some(*m);
+            }
+
+            // For n >= 2, check if the opponent can't prevent the win
+            if n >= 2 && solve_koth(&next_board, move_gen, 1, max_ply) {
+                return Some(*m);
+            }
         }
     }
     None

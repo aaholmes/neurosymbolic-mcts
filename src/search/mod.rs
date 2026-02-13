@@ -51,7 +51,7 @@ mod see;
 
 pub use history::{HistoryTable, MAX_PLY};
 pub use iterative_deepening::iterative_deepening_ab_search;
-pub use koth::koth_center_in_3;
+pub use koth::{koth_best_move, koth_center_in_3};
 pub use mate_search::mate_search;
 pub use quiescence::{
     forced_material_balance, material_qsearch, quiescence_search, quiescence_search_tactical,

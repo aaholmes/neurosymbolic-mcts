@@ -1,8 +1,9 @@
 //! Tests for King of the Hill (KOTH) win detection
 
-use kingfisher::board::Board;
+use kingfisher::board::{Board, KOTH_CENTER};
 use kingfisher::move_generation::MoveGen;
-use kingfisher::search::koth_center_in_3;
+use kingfisher::move_types::Move;
+use kingfisher::search::{koth_best_move, koth_center_in_3};
 
 fn setup() -> MoveGen {
     MoveGen::new()
@@ -141,4 +142,44 @@ fn test_koth_ke2_after_f6_reports_distance_2() {
         Some(2),
         "White king on e2 should force KOTH in 2 moves after f6"
     );
+}
+
+#[test]
+fn test_koth_best_move_king_one_away() {
+    let move_gen = setup();
+    // White king on c3, can reach d4 in one move
+    let board = Board::new_from_fen("8/8/8/8/8/2K5/8/k7 w - - 0 1");
+
+    let best = koth_best_move(&board, &move_gen);
+    assert!(best.is_some(), "Should find a KOTH-winning move");
+    let mv = best.unwrap();
+    // The move should land the king on a center square (d4, e4, d5, or e5)
+    let to_bit = 1u64 << mv.to;
+    assert!(
+        to_bit & KOTH_CENTER != 0,
+        "Best move should put king on center square, got to={}",
+        mv.to
+    );
+}
+
+#[test]
+fn test_koth_best_move_no_koth() {
+    let move_gen = setup();
+    // White king on h1, black king on d4 blocks center — no forced KOTH for white
+    let board = Board::new_from_fen("8/8/8/8/3k4/8/8/7K w - - 0 1");
+
+    let best = koth_best_move(&board, &move_gen);
+    assert!(best.is_none(), "Should not find forced KOTH win");
+}
+
+#[test]
+fn test_koth_best_move_already_on_center() {
+    let move_gen = setup();
+    // White king already on d4 — already won, no "best move" needed
+    let board = Board::new_from_fen("8/8/8/8/3K4/8/8/k7 w - - 0 1");
+
+    // koth_center_in_3 returns Some(0) here, but koth_best_move should return None
+    // because there's no move to make — game is already won
+    let best = koth_best_move(&board, &move_gen);
+    assert!(best.is_none(), "Already on center, no move needed");
 }

@@ -11,7 +11,7 @@ use kingfisher::mcts::{
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::neural_net::NeuralNetPolicy;
-use kingfisher::search::koth_center_in_3;
+use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::search::mate_search;
 use kingfisher::search::quiescence::forced_material_balance;
 use kingfisher::tensor::move_to_index;
@@ -162,6 +162,12 @@ fn main() {
     });
 }
 
+#[derive(Clone, Copy)]
+enum EarlyWinType {
+    Mate,
+    Koth,
+}
+
 fn play_game(
     game_num: usize,
     simulations: u32,
@@ -204,42 +210,49 @@ fn play_game(
     let mut move_count = 0;
     let mut previous_root = None;
     let mut early_outcome: Option<f32> = None;
-    let mut early_reason: &str = "";
+    let mut early_win_type: Option<EarlyWinType> = None;
 
     loop {
         let board = board_stack.current_state().clone();
 
         // --- Tier 1 pre-checks: skip MCTS for positions resolved by safety gates ---
-        if enable_koth && enable_tier1 {
-            if koth_center_in_3(&board, &move_gen).is_some() {
-                early_outcome = Some(if board.w_to_move { 1.0 } else { -1.0 });
-                early_reason = if board.w_to_move {
-                    "White wins (Tier1 KOTH)"
-                } else {
-                    "Black wins (Tier1 KOTH)"
-                };
-                break;
-            }
-        }
-
+        // Check both KOTH and mate, pick the fastest forced win (fewest plies).
         if enable_tier1 {
-            let mut temp_stack = BoardStack::with_board(board.clone());
-            let (score, _, _) = mate_search(&mut temp_stack, &move_gen, 5, false);
-            if score >= 1_000_000 {
-                early_outcome = Some(if board.w_to_move { 1.0 } else { -1.0 });
-                early_reason = if board.w_to_move {
-                    "White wins (Tier1 mate)"
-                } else {
-                    "Black wins (Tier1 mate)"
-                };
-                break;
-            } else if score <= -1_000_000 {
-                early_outcome = Some(if board.w_to_move { -1.0 } else { 1.0 });
-                early_reason = if board.w_to_move {
-                    "Black wins (Tier1 mate)"
-                } else {
-                    "White wins (Tier1 mate)"
-                };
+            let mut best_gate: Option<(i32, EarlyWinType, f32)> = None; // (plies, type, score_white)
+
+            // Check KOTH gate
+            if enable_koth {
+                if let Some(n) = koth_center_in_3(&board, &move_gen) {
+                    let plies = (n as i32) * 2 - 1; // n=1 -> 1 ply, n=2 -> 3 plies, etc.
+                    let score_white = if board.w_to_move { 1.0 } else { -1.0 };
+                    best_gate = Some((plies, EarlyWinType::Koth, score_white));
+                }
+            }
+
+            // Check mate gate
+            {
+                let mut temp_stack = BoardStack::with_board(board.clone());
+                let (score, _, _) = mate_search(&mut temp_stack, &move_gen, 5, false);
+                if score >= 1_000_000 {
+                    let mate_plies = score - 1_000_000;
+                    let score_white = if board.w_to_move { 1.0 } else { -1.0 };
+                    // Pick mate if faster (fewer plies), or on ties (prefer mate as more definitive)
+                    if best_gate.is_none() || mate_plies <= best_gate.unwrap().0 {
+                        best_gate = Some((mate_plies, EarlyWinType::Mate, score_white));
+                    }
+                } else if score <= -1_000_000 {
+                    // STM is being mated — KOTH can't help (it's opponent's forced win)
+                    let mate_plies = (-score) - 1_000_000;
+                    let score_white = if board.w_to_move { -1.0 } else { 1.0 };
+                    if best_gate.is_none() || mate_plies <= best_gate.unwrap().0 {
+                        best_gate = Some((mate_plies, EarlyWinType::Mate, score_white));
+                    }
+                }
+            }
+
+            if let Some((_, win_type, score_white)) = best_gate {
+                early_outcome = Some(score_white);
+                early_win_type = Some(win_type);
                 break;
             }
         }
@@ -370,43 +383,151 @@ fn play_game(
     }
 
     if verbose {
-        // If game ended by Tier1 mate, play out the forced mate sequence for display
-        if early_outcome.is_some() && enable_tier1 {
-            // Play out the forced mate from both sides using mate_search.
-            // mate_search is checks-only, so the mating side always checks.
-            // For the losing side's response, just pick the first legal move.
+        // If game ended by Tier1 gate, play out the forced sequence for display
+        let mut playout_stack = None;
+        if early_outcome.is_some() {
             let mut temp_stack = BoardStack::with_board(final_board.clone());
-            for _ in 0..20 {
-                let board = temp_stack.current_state();
-                let (is_mate, is_stalemate) = board.is_checkmate_or_stalemate(&move_gen);
-                if is_mate || is_stalemate {
-                    break;
-                }
+            match early_win_type {
+                Some(EarlyWinType::Mate) => {
+                    // Play out forced mate: mate_search for winning side, first legal for losing
+                    for _ in 0..20 {
+                        let board = temp_stack.current_state();
+                        let (is_mate, is_stalemate) =
+                            board.is_checkmate_or_stalemate(&move_gen);
+                        if is_mate || is_stalemate {
+                            break;
+                        }
 
-                let (score, mv, _) = mate_search(&mut temp_stack, &move_gen, 5, false);
-                if score >= 1_000_000 {
-                    // STM has a forced mate — play the checking move
-                    game_moves.push(mv.to_san(temp_stack.current_state(), &move_gen));
-                    temp_stack.make_move(mv);
-                } else {
-                    // STM is the losing side (can't check) — pick first legal move
-                    let board = temp_stack.current_state();
-                    let (caps, quiets) = move_gen.gen_pseudo_legal_moves(board);
-                    let legal: Vec<Move> = caps
-                        .iter()
-                        .chain(quiets.iter())
-                        .filter(|&&m| board.apply_move_to_board(m).is_legal(&move_gen))
-                        .cloned()
-                        .collect();
-                    if let Some(&response) = legal.first() {
-                        game_moves.push(response.to_san(temp_stack.current_state(), &move_gen));
-                        temp_stack.make_move(response);
-                    } else {
-                        break; // Checkmate
+                        let (score, mv, _) =
+                            mate_search(&mut temp_stack, &move_gen, 5, false);
+                        if score >= 1_000_000 {
+                            game_moves
+                                .push(mv.to_san(temp_stack.current_state(), &move_gen));
+                            temp_stack.make_move(mv);
+                        } else {
+                            // Losing side — pick first legal move
+                            let board = temp_stack.current_state();
+                            let (caps, quiets) = move_gen.gen_pseudo_legal_moves(board);
+                            let legal: Vec<Move> = caps
+                                .iter()
+                                .chain(quiets.iter())
+                                .filter(|&&m| {
+                                    board.apply_move_to_board(m).is_legal(&move_gen)
+                                })
+                                .cloned()
+                                .collect();
+                            if let Some(&response) = legal.first() {
+                                game_moves.push(
+                                    response.to_san(temp_stack.current_state(), &move_gen),
+                                );
+                                temp_stack.make_move(response);
+                            } else {
+                                break; // Checkmate
+                            }
+                        }
                     }
                 }
+                Some(EarlyWinType::Koth) => {
+                    // Play out forced KOTH: koth_best_move for winning side, first legal for losing
+                    for _ in 0..20 {
+                        let board = temp_stack.current_state();
+                        let (is_mate, is_stalemate) =
+                            board.is_checkmate_or_stalemate(&move_gen);
+                        if is_mate || is_stalemate {
+                            break;
+                        }
+                        if enable_koth {
+                            let (wk, bk) = board.is_koth_win();
+                            if wk || bk {
+                                break;
+                            }
+                        }
+
+                        if let Some(mv) = koth_best_move(board, &move_gen) {
+                            game_moves
+                                .push(mv.to_san(temp_stack.current_state(), &move_gen));
+                            temp_stack.make_move(mv);
+                        } else {
+                            // Losing side or no forced KOTH move — pick first legal
+                            let board = temp_stack.current_state();
+                            let (caps, quiets) = move_gen.gen_pseudo_legal_moves(board);
+                            let legal: Vec<Move> = caps
+                                .iter()
+                                .chain(quiets.iter())
+                                .filter(|&&m| {
+                                    board.apply_move_to_board(m).is_legal(&move_gen)
+                                })
+                                .cloned()
+                                .collect();
+                            if let Some(&response) = legal.first() {
+                                game_moves.push(
+                                    response.to_san(temp_stack.current_state(), &move_gen),
+                                );
+                                temp_stack.make_move(response);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                None => {}
             }
+            playout_stack = Some(temp_stack);
         }
+
+        // Use the post-play-out board for FEN display
+        let display_board = if let Some(ref ps) = playout_stack {
+            ps.current_state()
+        } else {
+            final_board
+        };
+
+        // Determine result label from the actual terminal state after play-out
+        let result_str = if playout_stack.is_some() {
+            let db = display_board;
+            let (is_mate, _) = db.is_checkmate_or_stalemate(&move_gen);
+            let (dkw, dkb) = if enable_koth {
+                db.is_koth_win()
+            } else {
+                (false, false)
+            };
+            if dkw {
+                "White wins (KOTH)"
+            } else if dkb {
+                "Black wins (KOTH)"
+            } else if is_mate {
+                if db.w_to_move {
+                    "Black wins (checkmate)"
+                } else {
+                    "White wins (checkmate)"
+                }
+            } else {
+                // Play-out didn't reach terminal — fall back to gate info
+                if final_score_white > 0.0 {
+                    "White wins (Tier1)"
+                } else {
+                    "Black wins (Tier1)"
+                }
+            }
+        } else if koth_white {
+            "White wins (KOTH)"
+        } else if koth_black {
+            "Black wins (KOTH)"
+        } else if mate {
+            if final_board.w_to_move {
+                "Black wins (checkmate)"
+            } else {
+                "White wins (checkmate)"
+            }
+        } else if is_repetition {
+            "Draw (repetition)"
+        } else if is_50_move {
+            "Draw (50-move rule)"
+        } else if _stalemate {
+            "Draw (stalemate)"
+        } else {
+            "Draw (move limit)"
+        };
 
         // Print per-sample training data for auditability
         eprintln!(
@@ -442,28 +563,6 @@ fn play_game(
         }
         eprintln!();
 
-        let result_str = if early_outcome.is_some() {
-            early_reason
-        } else if koth_white {
-            "White wins (KOTH)"
-        } else if koth_black {
-            "Black wins (KOTH)"
-        } else if mate {
-            if final_board.w_to_move {
-                "Black wins (checkmate)"
-            } else {
-                "White wins (checkmate)"
-            }
-        } else if is_repetition {
-            "Draw (repetition)"
-        } else if is_50_move {
-            "Draw (50-move rule)"
-        } else if _stalemate {
-            "Draw (stalemate)"
-        } else {
-            "Draw (move limit)"
-        };
-
         // Format as numbered move pairs
         let mut move_str = String::new();
         for (i, san) in game_moves.iter().enumerate() {
@@ -483,7 +582,10 @@ fn play_game(
             result_str
         );
         println!("{}", move_str);
-        println!("Final FEN: {}", final_board.to_fen().unwrap_or_default());
+        println!(
+            "Final FEN: {}",
+            display_board.to_fen().unwrap_or_default()
+        );
         println!();
     }
 
