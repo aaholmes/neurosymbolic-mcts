@@ -1,6 +1,6 @@
 # Design Decisions: A Scientific Journey
 
-This document traces the evolution of Caissawary's architecture — what was tried, what failed, and why the current design emerged. The core ideas generalize beyond chess: any MCTS domain with tractable subproblems can benefit from this approach.
+This document traces the evolution of Caissawary's architecture — what was tried, what failed, and why the current design emerged. The core pattern — exact subgame resolution injected as terminal MCTS nodes — applies to any domain with tractable subproblems.
 
 ### Why King of the Hill?
 
@@ -12,12 +12,9 @@ Standard chess is a surprisingly poor testbed for Tier 1 safety gates. Forced ch
 
 **The hypothesis.** Decompose positions into three tiers: (1) tractable subgames with exact solutions, (2) positions with useful heuristic structure, and (3) genuinely uncertain positions requiring learned evaluation. Only Tier 3 needs the neural network.
 
-**Domain-general framing.** This decomposition applies wherever MCTS encounters tractable subproblems:
-- **Theorem proving:** Lemmas provable by simple rewriting rules (Tier 1) vs. requiring creative proof search (Tier 3)
-- **Program synthesis:** Type-checkable partial programs (Tier 1) vs. open synthesis choices (Tier 3)
-- **Robotics planning:** Collision-free paths provable by geometry (Tier 1) vs. uncertain contact dynamics (Tier 3)
+**Domain-general framing.** This decomposition applies wherever MCTS encounters tractable subproblems. The most natural next domain is mathematical reasoning: automated theorem provers (Lean's `decide`, `omega`, `norm_num`) can resolve certain subgoals exactly, while a neural policy guides the high-level proof search through uncertain creative steps. The confidence scalar $k$ maps directly: high when the subgoal is prover-friendly, low when it requires creative insight.
 
-The pattern is always the same: prove what you can, heuristically order what you understand, learn what remains.
+The pattern is always the same: compute what you can exactly, heuristically order what you understand, learn what remains.
 
 ## 2. Tier 1: Safety Gates as Terminal Nodes
 
@@ -246,19 +243,18 @@ Static Exchange Evaluation (SEE) uses a lightweight `SeeBoard` struct instead of
 
 ## 8. Applicability Beyond Chess
 
-The three-tier decomposition is not chess-specific. The pattern generalizes:
+The three-tier decomposition is not chess-specific. The pattern — injecting exact solutions for tractable subproblems as terminal MCTS nodes — applies wherever a domain has classical solvers for subproblems:
 
 | Domain | Tier 1 (Exact) | Tier 2 (Heuristic) | Tier 3 (Learned) |
 |--------|---------------|-------------------|-----------------|
 | **Chess** | Mate search, KOTH geometry | MVV-LVA tactical visit ordering | Neural position evaluation |
-| **Theorem proving** | Decidable fragments, rewriting rules | Lemma relevance ranking | Proof step prediction |
-| **Program synthesis** | Type checking, partial evaluation | API frequency heuristics | Code generation model |
-| **Robotics** | Collision geometry, kinematic limits | Distance-to-goal heuristics | Contact dynamics prediction |
+| **Mathematical reasoning** | Automated theorem provers (e.g., Lean's `decide`, `omega`) resolving subgoals | Lemma relevance ranking, proof-term similarity | Neural proof step prediction |
+| **Program synthesis** | Type checking, partial evaluation, SMT solvers | API frequency heuristics | Code generation model |
 | **Game playing** | Endgame tablebases, solved subgames | Domain heuristics | Value/policy networks |
 
-The key requirement: Tier 1 solutions must be **terminal** in the MCTS tree. If a proven node can be expanded and diluted by approximate children, the proof is wasted. This terminal semantics insight is the most transferable contribution.
+The key requirement: exactly resolved nodes must be **terminal** in the MCTS tree. If a proven node can be expanded and diluted by approximate child evaluations, the proof is wasted. This terminal semantics insight is the most transferable contribution.
 
-The value function factorization ($V = \tanh(V_{learned} + k \cdot V_{computed})$) also generalizes: any domain where part of the evaluation can be computed exactly benefits from separating the learnable residual from the computable component. The learned $k$ allows the network to adaptively weight the two components based on context.
+The value function factorization ($V = \tanh(V_{learned} + k \cdot V_{computed})$) also transfers: any domain where part of the evaluation can be computed exactly benefits from separating the learnable residual from the computable component. The learned confidence scalar $k$ modulates trust in the exact component based on context — in chess, $k$ adapts to how convertible a material advantage is; in mathematical reasoning, an analogous scalar could modulate trust in a theorem prover's assessment based on how prover-friendly the current subgoal is.
 
 ## Related Work
 

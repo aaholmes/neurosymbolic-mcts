@@ -1,8 +1,8 @@
 # Caissawary
 
-**Neurosymbolic MCTS with formal verification injection for sample-efficient reinforcement learning.**
+**Neurosymbolic MCTS with exact subgame resolution for sample-efficient reinforcement learning.**
 
-Caissawary decomposes MCTS positions into tractable subgames solved exactly by classical methods and uncertain residuals evaluated by a neural network. When a subproblem is tractable, the engine *proves* the answer rather than learning it — injecting ground-truth values directly into the search tree. This reduces the sample complexity of self-play RL by reserving neural network queries for genuinely uncertain positions. The approach generalizes to any MCTS domain with tractable subproblems (theorem proving, program synthesis, robotics planning). Demonstrated here on chess and King of the Hill (KOTH).
+Caissawary decomposes MCTS positions into tractable subgames solved exactly by classical methods and uncertain residuals evaluated by a neural network. When a subproblem is tractable, the engine computes the answer exactly rather than learning it — injecting provably correct values directly into the search tree as terminal nodes. This reduces the sample complexity of self-play RL by reserving neural network queries for genuinely uncertain positions. The architecture pattern — injecting exact solutions for tractable subproblems as terminal MCTS nodes — applies wherever a domain has subproblems solvable by classical methods. The natural next domain is mathematical reasoning, where automated theorem provers can resolve subgoals exactly while a neural policy guides high-level proof search. Demonstrated here on chess and King of the Hill (KOTH).
 
 Prior work has explored parts of this space — KataGo incorporates handcrafted features alongside neural evaluation, and MCTS-Solver propagates proven game-theoretic values through the tree — but no existing system combines provably correct terminal nodes (with anti-dilution semantics), heuristic move ordering, and a factored value function where learned and computed components interact through a position-dependent confidence scalar.
 
@@ -29,7 +29,7 @@ The key insight: gate-resolved nodes are **terminal** — they are never expande
 
 **Tier 2** orders capture/promotion children by MVV-LVA scores on their first visit (e.g., PxQ = 39 is visited before QxP = 5). This is purely visit ordering — no Q-values are initialized. After the first visit, normal UCB selection takes over.
 
-**Tier 3** evaluates leaf nodes with a neurosymbolic value function:
+**Tier 3** evaluates leaf nodes with a factored value function (the symbolic component is classical chess algorithms — material-only quiescence search and piece values — not a formal system):
 
 $$V_{final} = \tanh(V_{logit} + k \cdot \Delta M)$$
 
@@ -57,20 +57,20 @@ Each pair played 30 games at 100 MCTS simulations per move (C(14,2) = 91 pairs, 
 
 | Rank | Model | Elo | Type |
 |------|-------|-----|------|
-| 1 | tiered_gen19 | 1627 | Tiered |
-| 2 | tiered_gen9 | 1623 | Tiered |
-| 3 | tiered_gen14 | 1622 | Tiered |
-| 4 | tiered_gen5 | 1592 | Tiered |
-| 5 | tiered_gen2 | 1567 | Tiered |
-| 6 | vanilla_gen33 | 1520 | Vanilla |
-| 7 | vanilla_gen40 | 1517 | Vanilla |
-| 8 | tiered_gen0 | 1495 | Tiered |
-| 9 | vanilla_gen28 | 1466 | Vanilla |
-| 10 | vanilla_gen25 | 1431 | Vanilla |
-| 11 | vanilla_gen8 | 1419 | Vanilla |
-| 12 | vanilla_gen2 | 1397 | Vanilla |
-| 13 | vanilla_gen1 | 1389 | Vanilla |
-| 14 | vanilla_gen0 | 1336 | Vanilla |
+| 1 | tiered_gen19 | 1627 ± 19 | Tiered |
+| 2 | tiered_gen9 | 1623 ± 20 | Tiered |
+| 3 | tiered_gen14 | 1622 ± 18 | Tiered |
+| 4 | tiered_gen5 | 1592 ± 17 | Tiered |
+| 5 | tiered_gen2 | 1567 ± 17 | Tiered |
+| 6 | vanilla_gen33 | 1520 ± 21 | Vanilla |
+| 7 | vanilla_gen40 | 1517 ± 21 | Vanilla |
+| 8 | tiered_gen0 | 1495 ± 16 | Tiered |
+| 9 | vanilla_gen28 | 1466 ± 21 | Vanilla |
+| 10 | vanilla_gen25 | 1431 ± 20 | Vanilla |
+| 11 | vanilla_gen8 | 1419 ± 21 | Vanilla |
+| 12 | vanilla_gen2 | 1397 ± 22 | Vanilla |
+| 13 | vanilla_gen1 | 1389 ± 23 | Vanilla |
+| 14 | vanilla_gen0 | 1336 ± 25 | Vanilla |
 
 **Key findings:**
 - All five trained tiered models outrank all vanilla models. Even tiered_gen2 (1567) beats vanilla_gen33 (1520), the best vanilla model after 33 accepted generations.
@@ -80,7 +80,7 @@ Each pair played 30 games at 100 MCTS simulations per move (C(14,2) = 91 pairs, 
 
 ### Elo Methodology
 
-Ratings are computed via Maximum Likelihood Estimation on the Bradley-Terry model. Each game outcome contributes to the log-likelihood: $\log L = \sum_{\text{pairs}} \left[ s_{ij} \log(E_i) + (n_{ij} - s_{ij}) \log(1 - E_i) \right]$ where $s_{ij}$ is the observed score (wins + draws/2), $n_{ij}$ is the number of games, and $E_i = 1/(1 + 10^{(r_j - r_i)/400})$ is the expected score given ratings $r_i, r_j$. Gradient ascent finds the ratings maximizing this joint probability (2000 iterations, lr=10, mean anchored at 1500). Pairwise 95% confidence intervals use the Wilson score interval on the score fraction, converted to Elo. Full pairwise results are in [`tournament_results_14way.csv`](tournament_results_14way.csv).
+Ratings are computed via Maximum Likelihood Estimation on the Bradley-Terry model. Each game outcome contributes to the log-likelihood: $\log L = \sum_{\text{pairs}} \left[ s_{ij} \log(E_i) + (n_{ij} - s_{ij}) \log(1 - E_i) \right]$ where $s_{ij}$ is the observed score (wins + draws/2), $n_{ij}$ is the number of games, and $E_i = 1/(1 + 10^{(r_j - r_i)/400})$ is the expected score given ratings $r_i, r_j$. Gradient ascent finds the ratings maximizing this joint probability (2000 iterations, lr=10, mean anchored at 1500). The ± values are 95% bootstrap confidence intervals from 1000 resamples — for each resample, individual games within each pair are drawn with replacement, and MLE Elo is recomputed. Full pairwise results are in [`tournament_results_14way.csv`](tournament_results_14way.csv).
 
 ## Example: Material-Aware Evaluation at Initialization
 
