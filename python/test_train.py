@@ -725,5 +725,149 @@ class TestBufferDatasetChunking:
             shutil.rmtree(buffer_dir, ignore_errors=True)
 
 
+class TestEpochDataset:
+    def test_epoch_dataset_loads_all_positions_same_elo(self, tmp_dirs):
+        """EpochDataset with same-Elo data should include all positions."""
+        _, output_dir = tmp_dirs
+        buffer_dir = tempfile.mkdtemp(prefix="epoch_buf_")
+        try:
+            source_dir = tempfile.mkdtemp(prefix="src_")
+            make_fake_bin(os.path.join(source_dir, "game.bin"), 100)
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(source_dir, model_elo=0.0)
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+            dataset = train_module.EpochDataset(buffer_dir, augment=False)
+            assert len(dataset) == 100
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_epoch_dataset_getitem_shapes(self, tmp_dirs):
+        """EpochDataset items should have correct tensor shapes."""
+        _, output_dir = tmp_dirs
+        buffer_dir = tempfile.mkdtemp(prefix="epoch_buf_")
+        try:
+            source_dir = tempfile.mkdtemp(prefix="src_")
+            make_fake_bin(os.path.join(source_dir, "game.bin"), 50)
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(source_dir, model_elo=0.0)
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+            dataset = train_module.EpochDataset(buffer_dir, augment=False)
+            board, material, value, policy = dataset[0]
+            assert board.shape == (17, 8, 8)
+            assert material.shape == (1,)
+            assert value.shape == (1,)
+            assert policy.shape == (4672,)
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_use_epochs_trains_correct_steps(self, tmp_dirs):
+        """use_epochs=True trains len(dataset)/batch_size steps per epoch."""
+        data_dir, output_dir = tmp_dirs
+
+        buffer_dir = tempfile.mkdtemp(prefix="epoch_buf_")
+        try:
+            source_dir = tempfile.mkdtemp(prefix="src_")
+            make_fake_bin(os.path.join(source_dir, "game.bin"), 100)
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(source_dir, model_elo=0.0)
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+            output_path = os.path.join(output_dir, "model.pth")
+            step_count = train_module.train_with_config(
+                data_dir=data_dir,
+                output_path=output_path,
+                resume_path=None,
+                optimizer_name="adam",
+                lr=0.001,
+                epochs=1,
+                batch_size=32,
+                minibatches=None,
+                lr_schedule="",
+                buffer_dir=buffer_dir,
+                use_epochs=True,
+            )
+            # 100 positions / 32 batch = 4 batches (3 full + 1 partial with drop_last=False)
+            expected_batches = (100 + 32 - 1) // 32  # ceil(100/32) = 4
+            assert step_count == expected_batches
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_use_epochs_multiple_epochs(self, tmp_dirs):
+        """use_epochs=True with epochs=2 trains 2x the steps."""
+        data_dir, output_dir = tmp_dirs
+
+        buffer_dir = tempfile.mkdtemp(prefix="epoch_buf_")
+        try:
+            source_dir = tempfile.mkdtemp(prefix="src_")
+            make_fake_bin(os.path.join(source_dir, "game.bin"), 100)
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(source_dir, model_elo=0.0)
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+            output_path = os.path.join(output_dir, "model.pth")
+            step_count = train_module.train_with_config(
+                data_dir=data_dir,
+                output_path=output_path,
+                resume_path=None,
+                optimizer_name="adam",
+                lr=0.001,
+                epochs=2,
+                batch_size=32,
+                minibatches=None,
+                lr_schedule="",
+                buffer_dir=buffer_dir,
+                use_epochs=True,
+            )
+            # Each epoch rebuilds indices, so counts may differ slightly
+            # But with same Elo, all 100 positions included each epoch
+            expected_per_epoch = (100 + 32 - 1) // 32  # 4
+            assert step_count == expected_per_epoch * 2
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_use_epochs_with_elo_gap_fewer_steps(self, tmp_dirs):
+        """use_epochs=True with Elo gap → fewer steps than total positions."""
+        data_dir, output_dir = tmp_dirs
+
+        buffer_dir = tempfile.mkdtemp(prefix="epoch_buf_")
+        try:
+            src1 = tempfile.mkdtemp(prefix="low_")
+            src2 = tempfile.mkdtemp(prefix="high_")
+            make_fake_bin(os.path.join(src1, "low.bin"), 1000)
+            make_fake_bin(os.path.join(src2, "high.bin"), 100)
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(src1, model_elo=0.0)
+            buf.add_games(src2, model_elo=200.0)
+            shutil.rmtree(src1, ignore_errors=True)
+            shutil.rmtree(src2, ignore_errors=True)
+
+            output_path = os.path.join(output_dir, "model.pth")
+            np.random.seed(42)
+            step_count = train_module.train_with_config(
+                data_dir=data_dir,
+                output_path=output_path,
+                resume_path=None,
+                optimizer_name="adam",
+                lr=0.001,
+                epochs=1,
+                batch_size=32,
+                minibatches=None,
+                lr_schedule="",
+                buffer_dir=buffer_dir,
+                use_epochs=True,
+            )
+            # Total buffer = 1100, but with 200 Elo gap the 1000 low-Elo positions
+            # have ~32% inclusion ≈ 320, plus 100 high-Elo = ~420 included
+            # So steps should be ~420/32 ≈ 14
+            all_positions_steps = (1100 + 32 - 1) // 32  # 35
+            assert step_count < all_positions_steps, \
+                f"Expected fewer steps than {all_positions_steps}, got {step_count}"
+            assert step_count > 0
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

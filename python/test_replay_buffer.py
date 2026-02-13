@@ -452,5 +452,86 @@ class TestEloWeighting:
             shutil.rmtree(src2, ignore_errors=True)
 
 
+class TestEpochIndices:
+    def test_build_epoch_indices_same_elo_includes_all(self, tmp_dirs):
+        """All entries at same Elo → 100% inclusion, all positions present."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+
+        total_positions = 0
+        for i in range(3):
+            src = tempfile.mkdtemp(prefix=f"src{i}_")
+            make_fake_bin(os.path.join(src, f"game.bin"), 50)
+            buf.add_games(src, model_elo=100.0)
+            total_positions += 50
+            shutil.rmtree(src, ignore_errors=True)
+
+        indices = buf.build_epoch_indices()
+        assert len(indices) == total_positions  # all 150 positions included
+
+    def test_build_epoch_indices_max_elo_fully_included(self, tmp_dirs):
+        """The max-Elo entry has 100% of its positions included."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+
+        src1 = tempfile.mkdtemp(prefix="low_")
+        src2 = tempfile.mkdtemp(prefix="high_")
+        make_fake_bin(os.path.join(src1, "low.bin"), 100)
+        buf.add_games(src1, model_elo=0.0)
+        make_fake_bin(os.path.join(src2, "high.bin"), 80)
+        buf.add_games(src2, model_elo=200.0)
+        shutil.rmtree(src1, ignore_errors=True)
+        shutil.rmtree(src2, ignore_errors=True)
+
+        indices = buf.build_epoch_indices()
+        # Count positions from the max-Elo entry (entry index 1)
+        max_elo_count = sum(1 for ei, _ in indices if ei == 1)
+        assert max_elo_count == 80  # all positions from max-Elo entry
+
+    def test_build_epoch_indices_weaker_model_partially_included(self, tmp_dirs):
+        """200 Elo gap → ~32% inclusion (statistical test with tolerance)."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+
+        src1 = tempfile.mkdtemp(prefix="low_")
+        src2 = tempfile.mkdtemp(prefix="high_")
+        make_fake_bin(os.path.join(src1, "low.bin"), 10000)
+        buf.add_games(src1, model_elo=0.0)
+        make_fake_bin(os.path.join(src2, "high.bin"), 100)
+        buf.add_games(src2, model_elo=200.0)
+        shutil.rmtree(src1, ignore_errors=True)
+        shutil.rmtree(src2, ignore_errors=True)
+
+        # 200 Elo gap: p = 1/(1+10^(200/400)) ≈ 0.240
+        # inclusion = p/(1-p) = 0.240/0.760 ≈ 0.316
+        np.random.seed(42)
+        indices = buf.build_epoch_indices()
+        low_elo_count = sum(1 for ei, _ in indices if ei == 0)
+        inclusion_rate = low_elo_count / 10000
+        assert 0.25 < inclusion_rate < 0.40, f"Inclusion rate {inclusion_rate:.3f} should be ~0.32"
+
+    def test_build_epoch_indices_returns_valid_entry_and_position_indices(self, tmp_dirs):
+        """All returned indices are in valid range."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+
+        src = tempfile.mkdtemp(prefix="src_")
+        make_fake_bin(os.path.join(src, "game.bin"), 50)
+        buf.add_games(src, model_elo=0.0)
+        shutil.rmtree(src, ignore_errors=True)
+
+        indices = buf.build_epoch_indices()
+        for entry_idx, pos_idx in indices:
+            assert 0 <= entry_idx < len(buf.entries)
+            assert 0 <= pos_idx < buf.entries[entry_idx]["num_positions"]
+
+    def test_build_epoch_indices_empty_buffer_returns_empty(self, tmp_dirs):
+        """Empty buffer → empty list."""
+        buffer_dir, _ = tmp_dirs
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+        indices = buf.build_epoch_indices()
+        assert indices == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -146,6 +146,60 @@ class BufferDataset(Dataset):
                 torch.from_numpy(np.ascontiguousarray(policy_np)))
 
 
+class EpochDataset(Dataset):
+    """Dataset for epoch-based training with Elo-weighted inclusion.
+
+    Uses build_epoch_indices() to probabilistically include positions
+    based on the Elo of the model that produced them. Reads positions
+    from disk on demand (one file open per __getitem__).
+    """
+
+    def __init__(self, buffer_dir, augment=False):
+        from replay_buffer import ReplayBuffer, BYTES_PER_SAMPLE as BPS, INPUT_CHANNELS as IC, BOARD_SIZE as BS, POLICY_SIZE as PS
+        self.buffer = ReplayBuffer(capacity_positions=10**9, buffer_dir=buffer_dir)
+        self.buffer.load_manifest()
+        self._bps = BPS
+        self._ic = IC
+        self._bs = BS
+        self._ps = PS
+        self._board_end = IC * BS
+        self.augment = augment
+        self._rng = np.random.default_rng()
+        self.indices = self.buffer.build_epoch_indices()
+        total = self.buffer.total_positions()
+        print(f"Epoch dataset: {len(self.indices)} positions included from {total} total "
+              f"({len(self.buffer.entries)} files)")
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        entry_idx, pos_idx = self.indices[idx]
+        entry = self.buffer.entries[entry_idx]
+        offset = pos_idx * self._bps
+
+        with open(entry["path"], "rb") as f:
+            f.seek(offset)
+            raw = np.frombuffer(f.read(self._bps), dtype=np.float32)
+
+        board_np = raw[:self._board_end].reshape(self._ic, 8, 8)
+        material = raw[self._board_end]
+        value = raw[self._board_end + 1]
+        policy_np = raw[self._board_end + 2:]
+
+        if self.augment:
+            transforms = augment_all_transforms(board_np, material, value, policy_np)
+            t_idx = self._rng.integers(len(transforms))
+            board_np, material, value, policy_np = transforms[t_idx]
+
+        board_tensor = torch.from_numpy(np.ascontiguousarray(board_np))
+        material_scalar = torch.tensor([material])
+        value_target = torch.tensor([value])
+        policy_target = torch.from_numpy(np.ascontiguousarray(policy_np))
+
+        return board_tensor, material_scalar, value_target, policy_target
+
+
 def parse_lr_schedule(schedule_str):
     """Parse LR schedule string like '500:0.01,1000:0.001' into sorted list of (step, lr) tuples."""
     if not schedule_str:
@@ -228,6 +282,7 @@ def train_with_config(
     train_heads="all",
     num_blocks=6,
     hidden_dim=128,
+    use_epochs=False,
 ):
     """Core training function. Returns number of minibatches trained.
 
@@ -236,7 +291,9 @@ def train_with_config(
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Data
-    if buffer_dir:
+    if use_epochs and buffer_dir:
+        dataset = EpochDataset(buffer_dir, augment=augment)
+    elif buffer_dir:
         dataset = BufferDataset(buffer_dir, augment=augment)
     else:
         dataset = ChessDataset(data_dir, augment=augment)
@@ -290,6 +347,10 @@ def train_with_config(
     model.train()
     steps_this_run = 0
     lr_history = {}
+
+    # use_epochs forces epoch-based training (ignoring minibatches)
+    if use_epochs:
+        minibatches = None
 
     if minibatches is not None:
         # Minibatch-count mode: run exactly N minibatches
@@ -450,6 +511,8 @@ def parse_args():
                         help='Number of residual blocks in OracleNet (default: 6)')
     parser.add_argument('--hidden-dim', type=int, default=128,
                         help='Hidden dimension of OracleNet (default: 128)')
+    parser.add_argument('--use-epochs', action='store_true',
+                        help='Epoch-based training with Elo-weighted inclusion (ignores --minibatches)')
     return parser.parse_args()
 
 
@@ -466,7 +529,9 @@ def train():
     print(f"Data Dir: {args.data_dir}")
     print(f"Output Model: {args.output_path}")
     print(f"Optimizer: {args.optimizer} (lr={lr})")
-    if args.minibatches:
+    if args.use_epochs:
+        print(f"Epoch-based training: {args.epochs} epoch(s)")
+    elif args.minibatches:
         print(f"Minibatches: {args.minibatches}")
     else:
         print(f"Epochs: {args.epochs}")
@@ -492,6 +557,7 @@ def train():
         train_heads=args.train_heads,
         num_blocks=args.num_blocks,
         hidden_dim=args.hidden_dim,
+        use_epochs=args.use_epochs,
     )
 
 

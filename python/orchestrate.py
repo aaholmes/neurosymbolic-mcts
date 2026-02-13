@@ -37,6 +37,7 @@ class TrainingConfig:
 
     # Training
     minibatches_per_generation: int = 1000
+    n_epochs: int = 1
     batch_size: int = 64
     optimizer: str = "muon"
     lr_schedule: str = ""
@@ -80,6 +81,8 @@ class TrainingConfig:
         parser.add_argument("--buffer-capacity", type=int, default=100_000)
         parser.add_argument("--buffer-dir", type=str, default="data/buffer")
         parser.add_argument("--minibatches-per-gen", type=int, default=1000)
+        parser.add_argument("--n-epochs", type=int, default=1,
+                            help="Number of epochs per generation (epoch-based training, default: 1)")
         parser.add_argument("--batch-size", type=int, default=64)
         parser.add_argument("--optimizer", type=str, default="muon",
                             choices=["adam", "adamw", "muon"])
@@ -133,6 +136,7 @@ class TrainingConfig:
             buffer_capacity=args.buffer_capacity,
             buffer_dir=args.buffer_dir,
             minibatches_per_generation=args.minibatches_per_gen,
+            n_epochs=args.n_epochs,
             batch_size=args.batch_size,
             optimizer=args.optimizer,
             lr_schedule=args.lr_schedule,
@@ -434,15 +438,6 @@ class Orchestrator:
         candidate_pth = os.path.join(self.config.weights_dir, f"candidate_{generation}{suffix}.pth")
         candidate_pt = os.path.join(self.config.weights_dir, f"candidate_{generation}{suffix}.pt")
 
-        # Adaptive minibatches: scale to buffer size to prevent overfitting
-        if buffer_positions is not None and buffer_positions > 0:
-            minibatches = self._compute_adaptive_minibatches(buffer_positions)
-            effective_epochs = (minibatches * self.config.batch_size) / buffer_positions
-            print(f"Adaptive training: {minibatches} minibatches "
-                  f"(~{effective_epochs:.1f} epochs over {buffer_positions} positions)")
-        else:
-            minibatches = self.config.minibatches_per_generation
-
         lr = self.config.initial_lr
 
         cmd = [
@@ -454,7 +449,8 @@ class Orchestrator:
             "--optimizer", self.config.optimizer,
             "--lr", str(lr),
             "--batch-size", str(self.config.batch_size),
-            "--minibatches", str(minibatches),
+            "--use-epochs",
+            "--epochs", str(self.config.n_epochs),
         ]
         if self.config.lr_schedule:
             cmd.extend(["--lr-schedule", self.config.lr_schedule])
@@ -468,7 +464,7 @@ class Orchestrator:
         if train_heads != "all":
             cmd.extend(["--train-heads", train_heads])
 
-        print(f"Training ({train_heads}): {minibatches} minibatches, "
+        print(f"Training ({train_heads}): {self.config.n_epochs} epoch(s), "
               f"optimizer={self.config.optimizer}, lr={lr}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
@@ -479,8 +475,8 @@ class Orchestrator:
         with open(stats_path, "w") as f:
             f.write(result.stdout)
 
-        # Store actual minibatches used for logging
-        self._last_training_losses = {"actual_minibatches": minibatches}
+        # Store training config used for logging
+        self._last_training_losses = {"n_epochs": self.config.n_epochs}
         for line in reversed(result.stdout.splitlines()):
             if "Loss=" in line and "P=" in line and "V=" in line:
                 import re
@@ -777,6 +773,7 @@ class Orchestrator:
                 log["training_policy_loss"] = self._last_training_losses.get("policy_loss")
                 log["training_value_loss"] = self._last_training_losses.get("value_loss")
                 log["training_k_mean"] = self._last_training_losses.get("k_mean")
+                log["n_epochs"] = self._last_training_losses.get("n_epochs")
                 log["actual_minibatches"] = self._last_training_losses.get("actual_minibatches")
             self.log_entry(log)
 

@@ -105,6 +105,42 @@ class ReplayBuffer:
 
         return boards, materials, values, policies
 
+    def build_epoch_indices(self):
+        """Build indices for one epoch with Elo-weighted probabilistic inclusion.
+
+        Returns list of (entry_idx, pos_idx) tuples.
+        - Max-Elo entries: 100% inclusion (all positions)
+        - Older entries: inclusion_prob = min(1.0, p/(1-p))
+          where p = 1/(1+10^((max_elo-elo)/400))
+        """
+        if not self.entries:
+            return []
+
+        elos = np.array([e.get("model_elo", 0.0) for e in self.entries])
+        max_elo = elos.max()
+
+        indices = []
+        for entry_idx, entry in enumerate(self.entries):
+            n = entry["num_positions"]
+            elo = entry.get("model_elo", 0.0)
+            delta = max_elo - elo
+
+            if delta <= 0:
+                # Max Elo: include all positions
+                indices.extend((entry_idx, pos_idx) for pos_idx in range(n))
+            else:
+                # p = expected score, inclusion = p/(1-p) = odds ratio
+                p = 1.0 / (1.0 + 10.0 ** (delta / 400.0))
+                inclusion = min(1.0, p / (1.0 - p))
+                if inclusion >= 1.0:
+                    indices.extend((entry_idx, pos_idx) for pos_idx in range(n))
+                else:
+                    mask = np.random.random(n) < inclusion
+                    for pos_idx in np.where(mask)[0]:
+                        indices.append((entry_idx, int(pos_idx)))
+
+        return indices
+
     def evict_oldest(self):
         """Remove oldest files until total positions <= capacity."""
         while self.total_positions() > self.capacity and self.entries:
