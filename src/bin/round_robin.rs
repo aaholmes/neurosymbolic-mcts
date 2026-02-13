@@ -177,6 +177,7 @@ fn build_config(model: &ModelEntry, simulations: u32) -> TacticalMctsConfig {
         enable_tier1_gate: model.enable_tier1,
         enable_material_value: model.enable_material,
         enable_tier3_neural: true,
+        randomize_move_order: true,
         ..Default::default()
     }
 }
