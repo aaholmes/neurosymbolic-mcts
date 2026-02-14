@@ -171,7 +171,7 @@ This produces sampling ratios proportional to actual measured strength differenc
 
 $$p_{include} = \min\left(1, \frac{E_i}{1 - E_i}\right) \quad \text{where} \quad E_i = \frac{1}{1 + 10^{(\text{Elo}_{max} - \text{Elo}_i) / 400}}$$
 
-This is the odds ratio of the expected score — the probability of winning divided by the probability of losing. Max-Elo data has 100% inclusion. At 100 Elo weaker: 56%. At 200 Elo: 32%. At 400 Elo: 10%. The number of epochs per generation is configurable via `--n-epochs` (default: 1).
+This is the odds ratio of the expected score — the probability of winning divided by the probability of losing. Max-Elo data has 100% inclusion. At 100 Elo weaker: 56%. At 200 Elo: 32%. At 400 Elo: 10%. The number of epochs per generation is configurable via `--max-epochs` (default: 10), with validation-based early stopping selecting the optimal count automatically.
 
 **Why odds ratio, not expected score.** Expected score ranges from 0.5 (equal) to ~0 (much weaker), which would include only half of max-Elo data. The odds ratio maps equal strength to 1.0 (full inclusion) and decays smoothly to 0 for very weak data, giving the desired semantics: "include this position with probability proportional to how much we trust the model that generated it."
 
@@ -179,7 +179,25 @@ This is the odds ratio of the expected score — the probability of winning divi
 
 **How many epochs?** The optimal number depends on the ratio of model capacity to buffer size. AlphaZero and ELF OpenGo train on thousands of GPUs generating data far faster than they consume it (ELF reports a 13:1 self-play-to-training ratio), so each position is rarely seen twice. Running on a single GPU, we need to extract maximum signal from every position — multiple epochs are the natural lever.
 
-Early experiments with the 2M parameter model at 1 epoch showed rapid initial gains (+67 Elo in 2 generations) followed by 4 consecutive rejections — the model had capacity to learn more but wasn't getting enough gradient updates per generation. Switching to 2 epochs broke through the plateau: the 2-epoch run reached +88 Elo in 3 generations where the 1-epoch run stalled at +67. The risk of overfitting increases with more epochs, but with 100K+ samples and a 2M parameter model that's clearly underfitting, 2 epochs is well within the safe regime. Whether 3+ epochs would help further is an open question — diminishing returns are expected, and the answer likely depends on how quickly the buffer grows relative to model capacity.
+Early experiments with the 2M parameter model at 1 epoch showed rapid initial gains (+67 Elo in 2 generations) followed by 4 consecutive rejections — the model had capacity to learn more but wasn't getting enough gradient updates per generation. Switching to 2 epochs broke through the plateau: the 2-epoch run reached +88 Elo in 3 generations where the 1-epoch run stalled at +67. The risk of overfitting increases with more epochs, but with 100K+ samples and a 2M parameter model that's clearly underfitting, 2 epochs is well within the safe regime.
+
+### Adaptive epochs: validation-based early stopping (current)
+
+Rather than fixing the epoch count as a hyperparameter, the current approach uses a 90/10 train/validation split with patience-1 early stopping. Each generation trains up to `--max-epochs` (default 10), evaluating on the held-out 10% after each epoch. If validation loss fails to improve for 1 epoch, training stops and the best-epoch checkpoint is restored. When `--max-epochs 1` is specified, the validation split is skipped entirely (single epoch trains on 100% of data).
+
+**Why this is better than a fixed count.** The optimal epoch count varies across training: early generations have small buffers and benefit from multiple passes (the model typically selects 2-3 epochs), while later generations with large buffers may need only 1 epoch before validation loss plateaus. A fixed count either underfits early or overfits late. Adaptive selection automatically adjusts.
+
+**Empirical results.** In the 2M parameter scale-up experiment, the adaptive approach consistently selected 2 epochs in early generations (gens 1-6, small buffer) and 1 epoch in later generations (gens 7+, buffer >100K positions). This matched the manually-tuned finding that "2 epochs is about right" while automatically transitioning as the buffer grew.
+
+### Train-from-latest: tried and reverted
+
+**The hypothesis.** When a candidate is rejected by SPRT, it's probably slightly better than the current best — just not statistically provably so. Discarding it and training the next generation from the last *accepted* checkpoint wastes this incremental progress. Training from the most recent candidate (accepted or rejected) should produce a continuous improvement trajectory.
+
+**What happened.** The "train-from-latest" run (adaptive epochs + train from rejected candidates) significantly underperformed the "train-from-best" run (fixed 2 epochs + train from last accepted): 152 Elo at gen 15 vs 340 Elo at gen 27. The adaptive run showed a distinctive pattern: after a string of rejections, it consistently selected only 1 training epoch, suggesting the validation loss was already near-optimal after minimal training.
+
+**The diagnosis.** A rejected candidate has already been trained on most of the buffer. Training from it again on the same (or similar) buffer is effectively adding more epochs on the same data — cumulative overfitting across generations. Each rejection compounds: gen N trains 2 epochs from best, gen N+1 trains from that rejected candidate (effectively epoch 3-4 on the same data), gen N+2 trains from *that* rejected candidate (effectively epoch 5-6), and so on. The adaptive early stopping correctly detected this by selecting 1 epoch — but even 1 additional epoch on an already-overfit checkpoint wasn't enough to overcome the accumulated staleness.
+
+**The lesson.** "Always train from the last accepted checkpoint" is not just a safety measure — it's actively beneficial. Each new training run starts from a clean baseline, avoiding cumulative overfitting. The "wasted" progress from rejected candidates is genuinely wasted: the information that made them slightly better is already encoded in the buffer data, and a fresh training run from the accepted checkpoint will rediscover it (along with newer data).
 
 ### Data augmentation: exploiting board symmetries
 

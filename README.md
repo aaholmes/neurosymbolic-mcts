@@ -137,16 +137,16 @@ python python/orchestrate.py --num-blocks 2 --hidden-dim 64
 # Skip self-play after gen 1 (eval games produce training data)
 python python/orchestrate.py --skip-self-play
 
-# Multiple epochs per generation (helps larger models absorb more signal)
-python python/orchestrate.py --n-epochs 2
+# Adaptive epochs with early stopping (default: up to 10 epochs)
+python python/orchestrate.py --max-epochs 10
 
 # Quick smoke test
 python python/orchestrate.py \
   --games-per-generation 2 --simulations-per-move 50 \
-  --n-epochs 1 --eval-max-games 4 --buffer-capacity 1000
+  --max-epochs 1 --eval-max-games 4 --buffer-capacity 1000
 ```
 
-Training uses epoch-based iteration with Elo-weighted probabilistic inclusion: each position's inclusion probability per epoch is the odds ratio of its model's expected score against the strongest model in the buffer, so max-Elo data is always fully included while weaker data is proportionally downsampled (200 Elo gap → ~32% inclusion, 400 Elo gap → ~10%). The number of epochs per generation (`--n-epochs`) should scale with model capacity: the 240K parameter model trains well with 1 epoch, while the 2M parameter model benefits from 2 epochs to extract maximum signal from every position on a single GPU (the 1-epoch 2M run plateaued at +67 Elo; the 2-epoch run broke through to +88 Elo in the same number of generations). The orchestrator uses the Muon optimizer by default. Model architecture is configurable via `--num-blocks` and `--hidden-dim`.
+Training uses epoch-based iteration with Elo-weighted probabilistic inclusion: each position's inclusion probability per epoch is the odds ratio of its model's expected score against the strongest model in the buffer, so max-Elo data is always fully included while weaker data is proportionally downsampled (200 Elo gap → ~32% inclusion, 400 Elo gap → ~10%). The number of training epochs is determined adaptively: a 90/10 train/validation split with patience-1 early stopping automatically selects the right epoch count per generation (`--max-epochs` sets the ceiling, default 10). This avoids both underfitting (too few epochs for a large model) and overfitting (too many epochs on a small buffer). The orchestrator uses the Muon optimizer by default. Model architecture is configurable via `--num-blocks` and `--hidden-dim`.
 
 Evaluation uses SPRT (Sequential Probability Ratio Test) with early stopping — clear winners/losers decided in ~30 games, marginal cases use up to 400 (needed for statistical power at the ~84% draw rate typical of self-play). Data augmentation exploits board symmetry: positions without castling rights are expanded into both the original and horizontal flip (2x data), with pawnless endgames getting the full D4 dihedral group (8x data).
 
