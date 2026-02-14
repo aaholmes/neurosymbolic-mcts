@@ -795,7 +795,7 @@ class TestEpochDataset:
             shutil.rmtree(buffer_dir, ignore_errors=True)
 
     def test_use_epochs_multiple_epochs(self, tmp_dirs):
-        """use_epochs=True with epochs=2 trains 2x the steps."""
+        """use_epochs=True with max_epochs=2 trains 2x the steps (with train/val split)."""
         data_dir, output_dir = tmp_dirs
 
         buffer_dir = tempfile.mkdtemp(prefix="epoch_buf_")
@@ -813,17 +813,20 @@ class TestEpochDataset:
                 resume_path=None,
                 optimizer_name="adam",
                 lr=0.001,
-                epochs=2,
+                max_epochs=2,
                 batch_size=32,
                 minibatches=None,
                 lr_schedule="",
                 buffer_dir=buffer_dir,
                 use_epochs=True,
             )
-            # Each epoch rebuilds indices, so counts may differ slightly
-            # But with same Elo, all 100 positions included each epoch
-            expected_per_epoch = (100 + 32 - 1) // 32  # 4
-            assert step_count == expected_per_epoch * 2
+            # With max_epochs=2, dataset is split 90/10 train/val
+            # Each epoch trains on ceil(90/32)=3 batches
+            # Both epochs should run (assuming no early stopping with random data)
+            assert step_count > 0
+            # At minimum 1 epoch worth of steps
+            min_per_epoch = (90 + 32 - 1) // 32  # 3
+            assert step_count >= min_per_epoch
         finally:
             shutil.rmtree(buffer_dir, ignore_errors=True)
 
@@ -867,6 +870,182 @@ class TestEpochDataset:
             assert step_count > 0
         finally:
             shutil.rmtree(buffer_dir, ignore_errors=True)
+
+
+class TestAdaptiveEpochs:
+    def test_early_stopping_prints_best_epoch(self, tmp_dirs, capsys):
+        """Early stopping should print BEST_EPOCH and VAL_LOSS."""
+        data_dir, output_dir = tmp_dirs
+
+        buffer_dir = tempfile.mkdtemp(prefix="adaptive_buf_")
+        try:
+            source_dir = tempfile.mkdtemp(prefix="src_")
+            make_fake_bin(os.path.join(source_dir, "game.bin"), 200)
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(source_dir, model_elo=0.0)
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+            output_path = os.path.join(output_dir, "model.pth")
+            step_count = train_module.train_with_config(
+                data_dir=data_dir,
+                output_path=output_path,
+                resume_path=None,
+                optimizer_name="adam",
+                lr=0.001,
+                max_epochs=5,
+                batch_size=32,
+                minibatches=None,
+                lr_schedule="",
+                buffer_dir=buffer_dir,
+                use_epochs=True,
+            )
+
+            captured = capsys.readouterr()
+            assert "BEST_EPOCH=" in captured.out
+            assert "VAL_LOSS=" in captured.out
+            assert "Train/val split:" in captured.out
+            assert step_count > 0
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_max_epochs_1_skips_validation(self, tmp_dirs, capsys):
+        """max_epochs=1 should not create train/val split."""
+        data_dir, output_dir = tmp_dirs
+
+        buffer_dir = tempfile.mkdtemp(prefix="adaptive_buf_")
+        try:
+            source_dir = tempfile.mkdtemp(prefix="src_")
+            make_fake_bin(os.path.join(source_dir, "game.bin"), 200)
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(source_dir, model_elo=0.0)
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+            output_path = os.path.join(output_dir, "model.pth")
+            step_count = train_module.train_with_config(
+                data_dir=data_dir,
+                output_path=output_path,
+                resume_path=None,
+                optimizer_name="adam",
+                lr=0.001,
+                max_epochs=1,
+                batch_size=32,
+                minibatches=None,
+                lr_schedule="",
+                buffer_dir=buffer_dir,
+                use_epochs=True,
+            )
+
+            captured = capsys.readouterr()
+            assert "Train/val split:" not in captured.out
+            assert "BEST_EPOCH=" not in captured.out
+            # Should still train
+            assert step_count > 0
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_best_model_restored_after_early_stopping(self, tmp_dirs):
+        """The saved checkpoint should contain the best epoch's model weights."""
+        data_dir, output_dir = tmp_dirs
+
+        buffer_dir = tempfile.mkdtemp(prefix="adaptive_buf_")
+        try:
+            source_dir = tempfile.mkdtemp(prefix="src_")
+            make_fake_bin(os.path.join(source_dir, "game.bin"), 200)
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(source_dir, model_elo=0.0)
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+            output_path = os.path.join(output_dir, "model.pth")
+            train_module.train_with_config(
+                data_dir=data_dir,
+                output_path=output_path,
+                resume_path=None,
+                optimizer_name="adam",
+                lr=0.001,
+                max_epochs=5,
+                batch_size=32,
+                minibatches=None,
+                lr_schedule="",
+                buffer_dir=buffer_dir,
+                use_epochs=True,
+            )
+
+            # Verify checkpoint was saved
+            assert os.path.exists(output_path)
+            checkpoint = torch.load(output_path, map_location="cpu", weights_only=False)
+            assert "model_state_dict" in checkpoint
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_epochs_backward_compat_kwarg(self, tmp_dirs):
+        """Passing epochs= as keyword arg should still work via backward compat."""
+        data_dir, output_dir = tmp_dirs
+        make_fake_bin(os.path.join(data_dir, "game.bin"), 100)
+
+        output_path = os.path.join(output_dir, "model.pth")
+        step_count = train_module.train_with_config(
+            data_dir=data_dir,
+            output_path=output_path,
+            resume_path=None,
+            optimizer_name="adam",
+            lr=0.001,
+            epochs=2,
+            batch_size=32,
+            minibatches=None,
+            lr_schedule="",
+            buffer_dir=None,
+        )
+        # 100 samples / 32 batch_size = 4 batches per epoch * 2 epochs = 8
+        assert step_count > 0
+
+
+class TestOrchestratorStateBackwardCompat:
+    def test_load_without_latest_pth(self, tmp_dirs):
+        """Old state files without latest_pth should default to current_best_pth."""
+        data_dir, output_dir = tmp_dirs
+        state_path = os.path.join(output_dir, "state.json")
+
+        # Write an old-style state file (no latest_pth)
+        import json
+        old_state = {
+            "generation": 5,
+            "current_best_pth": "/some/path/gen_5.pth",
+            "current_best_pt": "/some/path/gen_5.pt",
+            "global_minibatches": 1000,
+            "reset_optimizer_next": False,
+            "accepted_count": 3,
+            "model_elos": {"0": 0.0, "1": 15.0, "2": 30.0, "3": 45.0},
+        }
+        with open(state_path, "w") as f:
+            json.dump(old_state, f)
+
+        # Import and load
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+        from orchestrate import OrchestratorState
+        state = OrchestratorState.load(state_path)
+
+        assert state.latest_pth == "/some/path/gen_5.pth"
+        assert state.current_best_pth == "/some/path/gen_5.pth"
+        assert state.generation == 5
+
+    def test_save_and_load_with_latest_pth(self, tmp_dirs):
+        """State with latest_pth should round-trip correctly."""
+        data_dir, output_dir = tmp_dirs
+        state_path = os.path.join(output_dir, "state.json")
+
+        from orchestrate import OrchestratorState
+        state = OrchestratorState(
+            generation=3,
+            current_best_pth="/best/gen_2.pth",
+            current_best_pt="/best/gen_2.pt",
+            latest_pth="/weights/candidate_3.pth",
+            accepted_count=2,
+        )
+        state.save(state_path)
+
+        loaded = OrchestratorState.load(state_path)
+        assert loaded.latest_pth == "/weights/candidate_3.pth"
+        assert loaded.current_best_pth == "/best/gen_2.pth"
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
+import copy
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 import numpy as np
 import os
 import struct
@@ -270,7 +272,7 @@ def train_with_config(
     resume_path=None,
     optimizer_name="adam",
     lr=0.001,
-    epochs=2,
+    max_epochs=2,
     batch_size=64,
     minibatches=None,
     lr_schedule="",
@@ -283,11 +285,16 @@ def train_with_config(
     num_blocks=6,
     hidden_dim=128,
     use_epochs=False,
+    # Backward compat alias
+    epochs=None,
 ):
     """Core training function. Returns number of minibatches trained.
 
     When _return_lr_history=True, returns (step_count, lr_history_dict) for testing.
     """
+    # Handle backward compat: if caller passes epochs= but not max_epochs=, use it
+    if epochs is not None:
+        max_epochs = epochs
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Data
@@ -302,10 +309,32 @@ def train_with_config(
         print("No training data found.")
         return 0
 
-    dataloader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=True, drop_last=False,
-        num_workers=2, pin_memory=True, persistent_workers=True,
-    )
+    # For epoch mode with max_epochs > 1, split into train/val
+    val_loader = None
+    if use_epochs and max_epochs > 1 and len(dataset) >= 20:
+        n = len(dataset)
+        n_val = max(1, int(n * 0.1))
+        n_train = n - n_val
+        rng = torch.Generator().manual_seed(42)
+        indices = torch.randperm(n, generator=rng).tolist()
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:]
+        train_dataset = Subset(dataset, train_indices)
+        val_dataset = Subset(dataset, val_indices)
+        dataloader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, drop_last=False,
+            num_workers=2, pin_memory=True, persistent_workers=True,
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False, drop_last=False,
+            num_workers=0, pin_memory=True,
+        )
+        print(f"Train/val split: {n_train} train, {n_val} val")
+    else:
+        dataloader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=True, drop_last=False,
+            num_workers=2, pin_memory=True, persistent_workers=True,
+        )
 
     # Model
     model = OracleNet(num_blocks=num_blocks, hidden_dim=hidden_dim).to(DEVICE)
@@ -406,8 +435,15 @@ def train_with_config(
                     "global_minibatch": global_minibatch,
                 }, output_path)
     else:
-        # Epoch mode (original behavior)
-        for epoch in range(epochs):
+        # Epoch mode with optional early stopping via validation loss
+        best_val_loss = float('inf')
+        best_epoch = 0
+        best_state = None
+        patience = 1  # stop after 1 epoch of no improvement
+
+        for epoch in range(max_epochs):
+            # --- Train ---
+            model.train()
             total_policy_loss = 0
             total_value_loss = 0
             total_k = 0
@@ -456,7 +492,61 @@ def train_with_config(
                 avg_policy = total_policy_loss / n_batches
                 avg_value = total_value_loss / n_batches
                 avg_k = total_k / n_batches
-                print(f"Epoch {epoch+1} Average: Policy={avg_policy:.4f} Value={avg_value:.4f} K={avg_k:.4f}")
+
+            # --- Validation ---
+            if val_loader is not None:
+                model.eval()
+                val_policy_total = 0
+                val_value_total = 0
+                val_batches = 0
+                with torch.no_grad():
+                    for boards, materials, values, policies in val_loader:
+                        boards = boards.to(DEVICE)
+                        materials = materials.to(DEVICE)
+                        if disable_material:
+                            materials = torch.zeros_like(materials)
+                        values = values.to(DEVICE)
+                        policies = policies.to(DEVICE)
+
+                        pred_policy, pred_value, k_val = model(boards, materials)
+                        p_loss = F.kl_div(pred_policy, policies, reduction='none').sum(dim=1).mean()
+                        v_loss = F.mse_loss(pred_value, values)
+                        val_policy_total += p_loss.item()
+                        val_value_total += v_loss.item()
+                        val_batches += 1
+
+                if val_batches > 0:
+                    val_p = val_policy_total / val_batches
+                    val_v = val_value_total / val_batches
+                    val_loss_avg = val_p + val_v
+                    if n_batches > 0:
+                        print(f"Epoch {epoch+1} Train: P={avg_policy:.4f} V={avg_value:.4f} | "
+                              f"Val: P={val_p:.4f} V={val_v:.4f} (total={val_loss_avg:.4f})")
+                    else:
+                        print(f"Epoch {epoch+1} Val: P={val_p:.4f} V={val_v:.4f} (total={val_loss_avg:.4f})")
+
+                    # Handle NaN: treat as no improvement but don't early stop
+                    if math.isnan(val_loss_avg):
+                        if best_state is None:
+                            best_epoch = epoch + 1
+                            best_state = copy.deepcopy(model.state_dict())
+                    elif val_loss_avg < best_val_loss:
+                        best_val_loss = val_loss_avg
+                        best_epoch = epoch + 1
+                        best_state = copy.deepcopy(model.state_dict())
+                    elif (epoch + 1) - best_epoch >= patience:
+                        print(f"Early stopping at epoch {epoch+1} (best was epoch {best_epoch})")
+                        break
+            else:
+                # No validation — just log train averages
+                if n_batches > 0:
+                    print(f"Epoch {epoch+1} Average: Policy={avg_policy:.4f} Value={avg_value:.4f} K={avg_k:.4f}")
+
+        # Restore best model if we did validation
+        if best_state is not None:
+            model.load_state_dict(best_state)
+            print(f"BEST_EPOCH={best_epoch}")
+            print(f"VAL_LOSS={best_val_loss:.6f}")
 
     # Save full checkpoint
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
@@ -486,8 +576,10 @@ def parse_args():
                         help='Optimizer to use (default: adam)')
     parser.add_argument('--lr', type=float, default=None,
                         help='Learning rate (default: 0.001 for adam/adamw, 0.02 for muon)')
-    parser.add_argument('--epochs', type=int, default=2,
-                        help='Number of training epochs (default: 2)')
+    parser.add_argument('--max-epochs', type=int, default=10, dest='max_epochs',
+                        help='Maximum training epochs with early stopping (default: 10)')
+    parser.add_argument('--epochs', type=int, default=None, dest='epochs_alias',
+                        help=argparse.SUPPRESS)  # hidden backward compat alias
     parser.add_argument('--batch-size', type=int, default=64,
                         help='Batch size (default: 64)')
     parser.add_argument('--minibatches', type=int, default=None,
@@ -519,6 +611,9 @@ def parse_args():
 def train():
     args = parse_args()
 
+    # Resolve max_epochs: --epochs alias overrides --max-epochs if provided
+    max_epochs = args.epochs_alias if args.epochs_alias is not None else args.max_epochs
+
     # Set default LR based on optimizer
     if args.lr is None:
         lr = 0.02 if args.optimizer == 'muon' else 0.001
@@ -530,11 +625,11 @@ def train():
     print(f"Output Model: {args.output_path}")
     print(f"Optimizer: {args.optimizer} (lr={lr})")
     if args.use_epochs:
-        print(f"Epoch-based training: {args.epochs} epoch(s)")
+        print(f"Epoch-based training: up to {max_epochs} epoch(s)")
     elif args.minibatches:
         print(f"Minibatches: {args.minibatches}")
     else:
-        print(f"Epochs: {args.epochs}")
+        print(f"Epochs: {max_epochs}")
     if args.lr_schedule:
         print(f"LR Schedule: {args.lr_schedule}")
     if args.buffer_dir:
@@ -546,7 +641,7 @@ def train():
         resume_path=args.resume_path,
         optimizer_name=args.optimizer,
         lr=lr,
-        epochs=args.epochs,
+        max_epochs=max_epochs,
         batch_size=args.batch_size,
         minibatches=args.minibatches,
         lr_schedule=args.lr_schedule,

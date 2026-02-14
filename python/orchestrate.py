@@ -37,7 +37,7 @@ class TrainingConfig:
 
     # Training
     minibatches_per_generation: int = 1000
-    n_epochs: int = 1
+    max_epochs: int = 10
     batch_size: int = 64
     optimizer: str = "muon"
     lr_schedule: str = ""
@@ -81,8 +81,10 @@ class TrainingConfig:
         parser.add_argument("--buffer-capacity", type=int, default=100_000)
         parser.add_argument("--buffer-dir", type=str, default="data/buffer")
         parser.add_argument("--minibatches-per-gen", type=int, default=1000)
-        parser.add_argument("--n-epochs", type=int, default=1,
-                            help="Number of epochs per generation (epoch-based training, default: 1)")
+        parser.add_argument("--max-epochs", type=int, default=10,
+                            help="Max epochs per generation with early stopping (default: 10)")
+        parser.add_argument("--n-epochs", type=int, default=None, dest="n_epochs_alias",
+                            help="Backward compat alias for --max-epochs")
         parser.add_argument("--batch-size", type=int, default=64)
         parser.add_argument("--optimizer", type=str, default="muon",
                             choices=["adam", "adamw", "muon"])
@@ -126,6 +128,8 @@ class TrainingConfig:
                             help="Hidden dimension of OracleNet (default: 128)")
 
         args = parser.parse_args()
+        # Resolve max_epochs: --n-epochs alias overrides --max-epochs if provided
+        max_epochs = args.n_epochs_alias if args.n_epochs_alias is not None else args.max_epochs
         return cls(
             games_per_generation=args.games_per_generation,
             simulations_per_move=args.simulations_per_move,
@@ -136,7 +140,7 @@ class TrainingConfig:
             buffer_capacity=args.buffer_capacity,
             buffer_dir=args.buffer_dir,
             minibatches_per_generation=args.minibatches_per_gen,
-            n_epochs=args.n_epochs,
+            max_epochs=max_epochs,
             batch_size=args.batch_size,
             optimizer=args.optimizer,
             lr_schedule=args.lr_schedule,
@@ -167,6 +171,7 @@ class OrchestratorState:
     generation: int = 0
     current_best_pth: str = ""
     current_best_pt: str = ""
+    latest_pth: str = ""  # most recent candidate .pth (accepted or rejected) — train from this
     global_minibatches: int = 0
     reset_optimizer_next: bool = False
     accepted_count: int = 0  # number of models accepted
@@ -183,6 +188,9 @@ class OrchestratorState:
         # Backward compat: old state files may not have model_elos
         if "model_elos" not in data:
             data["model_elos"] = {}
+        # Backward compat: old state files may not have latest_pth
+        if "latest_pth" not in data:
+            data["latest_pth"] = data.get("current_best_pth", "")
         return cls(**data)
 
 
@@ -263,6 +271,7 @@ class Orchestrator:
 
         self.state.current_best_pt = gen0_pt
         self.state.current_best_pth = gen0_pth
+        self.state.latest_pth = gen0_pth
         self.state.model_elos = {"0": 0.0}
 
     def log_entry(self, entry: dict):
@@ -282,6 +291,7 @@ class Orchestrator:
 
             self.state.current_best_pt = gen_pt
             self.state.current_best_pth = gen_pth
+            self.state.latest_pth = gen_pth
 
             # Compute cumulative Elo for new model
             winrate = max(0.01, min(0.99, eval_results.get("winrate", 0.5)))
@@ -300,6 +310,8 @@ class Orchestrator:
                   f"L:{eval_results['losses']} D:{eval_results['draws']} "
                   f"Elo: {self.state.model_elos[str(self.state.accepted_count)]:.1f})")
         else:
+            # Rejected — keep candidate as training base for next generation
+            self.state.latest_pth = candidate_pth
             print(f"Generation {generation} REJECTED (W:{eval_results['wins']} "
                   f"L:{eval_results['losses']} D:{eval_results['draws']})")
 
@@ -440,17 +452,18 @@ class Orchestrator:
 
         lr = self.config.initial_lr
 
+        resume_path = self.state.latest_pth or self.state.current_best_pth
         cmd = [
             "python3", "python/train.py",
             "--buffer-dir", self.config.buffer_dir,
             self.config.buffer_dir,   # data_dir (ignored when --buffer-dir set)
             candidate_pth,             # output_path
-            self.state.current_best_pth,  # resume_path
+            resume_path,               # resume_path (latest candidate, not necessarily best)
             "--optimizer", self.config.optimizer,
             "--lr", str(lr),
             "--batch-size", str(self.config.batch_size),
             "--use-epochs",
-            "--epochs", str(self.config.n_epochs),
+            "--max-epochs", str(self.config.max_epochs),
         ]
         if self.config.lr_schedule:
             cmd.extend(["--lr-schedule", self.config.lr_schedule])
@@ -464,8 +477,8 @@ class Orchestrator:
         if train_heads != "all":
             cmd.extend(["--train-heads", train_heads])
 
-        print(f"Training ({train_heads}): {self.config.n_epochs} epoch(s), "
-              f"optimizer={self.config.optimizer}, lr={lr}")
+        print(f"Training ({train_heads}): up to {self.config.max_epochs} epoch(s), "
+              f"optimizer={self.config.optimizer}, lr={lr}, resume={resume_path}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         # Save full training output
@@ -476,10 +489,20 @@ class Orchestrator:
             f.write(result.stdout)
 
         # Store training config used for logging
-        self._last_training_losses = {"n_epochs": self.config.n_epochs}
+        self._last_training_losses = {"max_epochs": self.config.max_epochs}
+
+        # Parse BEST_EPOCH and VAL_LOSS from train.py output
+        import re
+        for line in result.stdout.splitlines():
+            m_be = re.match(r'BEST_EPOCH=(\d+)', line)
+            if m_be:
+                self._last_training_losses["best_epoch"] = int(m_be.group(1))
+            m_vl = re.match(r'VAL_LOSS=([\d.]+)', line)
+            if m_vl:
+                self._last_training_losses["val_loss"] = float(m_vl.group(1))
+
         for line in reversed(result.stdout.splitlines()):
             if "Loss=" in line and "P=" in line and "V=" in line:
-                import re
                 m_loss = re.search(r'Loss=([\d.]+)', line)
                 m_ploss = re.search(r'P=([\d.]+)', line)
                 m_vloss = re.search(r'V=([\d.]+)', line)
@@ -773,8 +796,9 @@ class Orchestrator:
                 log["training_policy_loss"] = self._last_training_losses.get("policy_loss")
                 log["training_value_loss"] = self._last_training_losses.get("value_loss")
                 log["training_k_mean"] = self._last_training_losses.get("k_mean")
-                log["n_epochs"] = self._last_training_losses.get("n_epochs")
-                log["actual_minibatches"] = self._last_training_losses.get("actual_minibatches")
+                log["max_epochs"] = self._last_training_losses.get("max_epochs")
+                log["best_epoch"] = self._last_training_losses.get("best_epoch")
+                log["val_loss"] = self._last_training_losses.get("val_loss")
             self.log_entry(log)
 
             # 6. Write overview file
