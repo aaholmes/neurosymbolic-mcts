@@ -48,6 +48,7 @@ fn main() {
         use_neural_policy: false,
         inference_server: Some(Arc::new(server)),
         logger: Some(Arc::new(logger)),
+        enable_koth: true,
         ..Default::default()
     };
 

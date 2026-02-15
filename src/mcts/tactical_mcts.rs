@@ -15,7 +15,7 @@ use crate::mcts::selection::select_child_with_tactical_priority;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use crate::search::forced_material_balance;
-use crate::search::koth_center_in_3;
+use crate::search::{koth_best_move, koth_center_in_3};
 use crate::search::mate_search;
 use crate::transposition::TranspositionTable;
 use rand_distr::{Distribution, Gamma};
@@ -166,25 +166,15 @@ pub fn tactical_mcts_search_with_tt(
 
     if config.enable_koth && config.enable_tier1_gate {
         if let Some(dist) = koth_center_in_3(&board, move_gen) {
-            let (captures, moves) = move_gen.gen_pseudo_legal_moves(&board);
-            for m in captures.iter().chain(moves.iter()) {
-                let next = board.apply_move_to_board(*m);
-                if !next.is_legal(move_gen) {
-                    continue;
+            if let Some(best) = koth_best_move(&board, move_gen) {
+                if let Some(log) = logger {
+                    log.log_tier1_gate(&GateReason::KothWin { distance: dist }, Some(best));
                 }
-                let (white_won, black_won) = next.is_koth_win();
-                // Check if the side that just moved won (white moved if w_to_move was true)
-                let stm_won = (board.w_to_move && white_won) || (!board.w_to_move && black_won);
-                if stm_won {
-                    if let Some(log) = logger {
-                        log.log_tier1_gate(&GateReason::KothWin { distance: dist }, Some(*m));
-                    }
-                    stats.tier1_solutions += 1;
-                    stats.search_time = start_time.elapsed();
-                    let root_node = MctsNode::new_root(board, move_gen);
-                    root_node.borrow_mut().origin = NodeOrigin::Gate;
-                    return (Some(*m), stats, root_node);
-                }
+                stats.tier1_solutions += 1;
+                stats.search_time = start_time.elapsed();
+                let root_node = MctsNode::new_root(board, move_gen);
+                root_node.borrow_mut().origin = NodeOrigin::Gate;
+                return (Some(best), stats, root_node);
             }
         }
     }

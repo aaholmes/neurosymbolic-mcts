@@ -1,9 +1,11 @@
 //! Tests for King of the Hill (KOTH) win detection
 
 use kingfisher::board::{Board, KOTH_CENTER};
+use kingfisher::mcts::tactical_mcts::{tactical_mcts_search, TacticalMctsConfig};
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::search::{koth_best_move, koth_center_in_3};
+use std::time::Duration;
 
 fn setup() -> MoveGen {
     MoveGen::new()
@@ -182,4 +184,54 @@ fn test_koth_best_move_already_on_center() {
     // because there's no move to make — game is already won
     let best = koth_best_move(&board, &move_gen);
     assert!(best.is_none(), "Already on center, no move needed");
+}
+
+#[test]
+fn test_koth_in_2_detected_at_root() {
+    let move_gen = setup();
+    // After 1. e3 h6 2. Ke2 a6 — White has forced KOTH-in-2: Kd3 then Kd4/Ke4
+    // No black piece can block both d4 and e4 in one move
+    let board =
+        Board::new_from_fen("rnbqkbnr/1pppppp1/p6p/8/8/4P3/PPPPKPPP/RNBQ1BNR w kq - 0 3");
+
+    // koth_center_in_3 should detect it
+    let dist = koth_center_in_3(&board, &move_gen);
+    assert_eq!(dist, Some(2), "Should detect forced KOTH-in-2");
+
+    // koth_best_move should return Kd3 (the first step)
+    let best = koth_best_move(&board, &move_gen);
+    assert!(best.is_some(), "Should find KOTH-winning first move");
+    // d3 = square 19 (LERF: a1=0, d3=19)
+    let mv = best.unwrap();
+    assert_eq!(mv.from, 12, "Move should be from e2 (sq 12)");
+    assert_eq!(mv.to, 19, "Move should be to d3 (sq 19)");
+
+    // MCTS root-level gate should catch this with 0 iterations
+    let config = TacticalMctsConfig {
+        max_iterations: 100,
+        time_limit: Duration::from_secs(5),
+        enable_koth: true,
+        ..Default::default()
+    };
+    let (best_move, stats, _) = tactical_mcts_search(board, &move_gen, config);
+    assert!(best_move.is_some(), "MCTS should find KOTH move");
+    assert_eq!(
+        stats.iterations, 0,
+        "Root-level KOTH gate should abort search with 0 iterations"
+    );
+    let mv = best_move.unwrap();
+    assert_eq!(mv.to, 19, "MCTS should play Kd3 (sq 19) for KOTH-in-2");
+}
+
+#[test]
+fn test_koth_in_2_blocked_by_queen_diagonal() {
+    let move_gen = setup();
+    // After 1. e3 h6 2. Ke2 e6 — e6 opens the d8-h4 diagonal.
+    // After Kd3, black plays Qh4 which controls BOTH d4 and e4 along rank 4.
+    // So KOTH-in-2 is NOT forced (unlike the a6 position).
+    let board =
+        Board::new_from_fen("rnbqkbnr/pppp1pp1/4p2p/8/8/4P3/PPPPKPPP/RNBQ1BNR w kq - 0 3");
+
+    let dist = koth_center_in_3(&board, &move_gen);
+    assert_eq!(dist, None, "Qh4 defense blocks forced KOTH — no forced win in 3");
 }
