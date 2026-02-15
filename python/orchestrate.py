@@ -46,6 +46,7 @@ class TrainingConfig:
     # Evaluation (SPRT)
     eval_max_games: int = 400
     eval_simulations: int = 800
+    eval_top_p_base: float = 0.95
     sprt_elo0: float = 0.0
     sprt_elo1: float = 10.0
     sprt_alpha: float = 0.05
@@ -93,6 +94,8 @@ class TrainingConfig:
         parser.add_argument("--eval-max-games", type=int, default=400,
                             help="Max games for SPRT evaluation (default: 400)")
         parser.add_argument("--eval-simulations", type=int, default=800)
+        parser.add_argument("--eval-top-p-base", type=float, default=0.95,
+                            help="Top-p sampling base for eval move selection (default: 0.95)")
         parser.add_argument("--sprt-elo0", type=float, default=0.0,
                             help="SPRT H0 elo (default: 0.0)")
         parser.add_argument("--sprt-elo1", type=float, default=10.0,
@@ -147,6 +150,7 @@ class TrainingConfig:
             initial_lr=args.initial_lr,
             eval_max_games=args.eval_max_games,
             eval_simulations=args.eval_simulations,
+            eval_top_p_base=args.eval_top_p_base,
             sprt_elo0=args.sprt_elo0,
             sprt_elo1=args.sprt_elo1,
             sprt_alpha=args.sprt_alpha,
@@ -564,6 +568,7 @@ class Orchestrator:
         if not self.config.enable_material_value:
             cmd.append("--disable-material")
         cmd.extend(["--batch-size", str(self.config.inference_batch_size)])
+        cmd.extend(["--top-p-base", str(self.config.eval_top_p_base)])
         if self.config.game_threads > 0:
             cmd.extend(["--threads", str(self.config.game_threads)])
         if generation is not None:

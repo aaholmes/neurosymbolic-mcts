@@ -64,9 +64,9 @@ pub struct EvalGameData {
     pub current_samples: Vec<TrainingSample>,
 }
 
-/// Base for top-p decay: p = TOP_P_BASE^move_number.
+/// Default base for top-p decay: p = top_p_base^move_number.
 /// Move number = (ply / 2) + 1 (same for both white and black on the same turn).
-const TOP_P_BASE: f64 = 0.95;
+const DEFAULT_TOP_P_BASE: f64 = 0.95;
 
 /// Select a move for evaluation: deterministic for forced wins,
 /// top-p sampling (decaying with move number) otherwise.
@@ -74,6 +74,7 @@ fn select_eval_move(
     root: &Rc<RefCell<MctsNode>>,
     rng: &mut impl Rng,
     move_count: u32,
+    top_p_base: f64,
 ) -> Option<Move> {
     let root_ref = root.borrow();
 
@@ -115,7 +116,7 @@ fn select_eval_move(
     // Top-p decays with move number (1-indexed, same for both sides)
     // p = 0.95^(move_number - 1), so move 1 gets p=1.0 (full sampling)
     let move_number = (move_count / 2) + 1;
-    let top_p = TOP_P_BASE.powi((move_number - 1) as i32);
+    let top_p = top_p_base.powi((move_number - 1) as i32);
     sample_top_p(&visit_pairs, top_p, rng)
 }
 
@@ -209,6 +210,7 @@ pub fn play_evaluation_game_koth(
         enable_material,
         game_seed,
         false,
+        DEFAULT_TOP_P_BASE,
     )
     .result
 }
@@ -224,6 +226,7 @@ pub fn play_evaluation_game_with_servers(
     enable_material: bool,
     game_seed: u64,
     collect_training_data: bool,
+    top_p_base: f64,
 ) -> EvalGameData {
     let mut rng = StdRng::seed_from_u64(game_seed);
     let move_gen = MoveGen::new();
@@ -343,7 +346,7 @@ pub fn play_evaluation_game_with_servers(
             drop(root_ref);
         }
 
-        let selected_move = select_eval_move(&root, &mut rng, move_count);
+        let selected_move = select_eval_move(&root, &mut rng, move_count, top_p_base);
         match selected_move {
             None => break,
             Some(mv) => {
@@ -500,6 +503,7 @@ pub fn evaluate_models(
         true,
         8,
         0,
+        DEFAULT_TOP_P_BASE,
     )
 }
 
@@ -514,6 +518,7 @@ pub fn evaluate_models_koth(
     enable_material: bool,
     inference_batch_size: usize,
     seed_offset: u64,
+    top_p_base: f64,
 ) -> EvalResults {
     // Load each model once, create shared InferenceServers
     let candidate_server: Option<Arc<InferenceServer>> = {
@@ -561,6 +566,7 @@ pub fn evaluate_models_koth(
             enable_material,
             seed_offset + game_idx as u64,
             false,
+            top_p_base,
         );
 
         let mut r = results.lock().unwrap();
@@ -603,6 +609,7 @@ pub fn evaluate_models_koth_sprt(
     sprt_config: &SprtConfig,
     seed_offset: u64,
     save_training_data: Option<&str>,
+    top_p_base: f64,
 ) -> (EvalResults, Option<f64>, SprtResult) {
     let collect = save_training_data.is_some();
 
@@ -669,6 +676,7 @@ pub fn evaluate_models_koth_sprt(
             enable_material,
             seed_offset + game_idx as u64,
             collect,
+            top_p_base,
         );
 
         // Collect training samples
@@ -827,6 +835,8 @@ fn main() {
     let enable_tier1 = !args.iter().any(|a| a == "--disable-tier1");
     let enable_material = !args.iter().any(|a| a == "--disable-material");
 
+    let top_p_base: f64 = parse_arg_f64(&args, "--top-p-base", DEFAULT_TOP_P_BASE);
+
     let inference_batch_size: usize = args
         .iter()
         .position(|a| a == "--batch-size")
@@ -907,6 +917,7 @@ fn main() {
             &sprt_config,
             seed_offset,
             save_training_data.as_deref(),
+            top_p_base,
         );
 
         let win_rate = results.win_rate();
@@ -947,6 +958,7 @@ fn main() {
             enable_material,
             inference_batch_size,
             seed_offset,
+            top_p_base,
         );
         let win_rate = results.win_rate();
         let games_played = results.wins + results.losses + results.draws;
@@ -1068,10 +1080,10 @@ mod tests {
     #[test]
     fn test_top_p_decay_formula() {
         // p = 0.95^(move_number - 1), so move 1 gets p=1.0
-        let p_move1 = TOP_P_BASE.powi(0);   // move 1
-        let p_move2 = TOP_P_BASE.powi(1);   // move 2
-        let p_move11 = TOP_P_BASE.powi(10); // move 11
-        let p_move31 = TOP_P_BASE.powi(30); // move 31
+        let p_move1 = DEFAULT_TOP_P_BASE.powi(0);   // move 1
+        let p_move2 = DEFAULT_TOP_P_BASE.powi(1);   // move 2
+        let p_move11 = DEFAULT_TOP_P_BASE.powi(10); // move 11
+        let p_move31 = DEFAULT_TOP_P_BASE.powi(30); // move 31
 
         assert!((p_move1 - 1.0).abs() < 1e-9);
         assert!((p_move2 - 0.95).abs() < 1e-9);
