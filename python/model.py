@@ -90,7 +90,7 @@ class OracleNet(nn.Module):
         # them from raw convolutions.
         self.k_stm_patch_fc = nn.Linear(12 * 25, 32)   # STM king 5x5 neighborhood
         self.k_opp_patch_fc = nn.Linear(12 * 25, 32)   # Opponent king 5x5 neighborhood
-        self.k_combine = nn.Linear(12 + 32 + 32, 32)   # scalars + both king patches
+        self.k_combine = nn.Linear(13 + 32 + 32, 32)   # scalars(12) + qsearch_flag(1) + both king patches
         self.k_out = nn.Linear(32, 1)                   # k_logit -> K_net (Confidence)
 
         # Light/dark square mask for bishop color detection
@@ -197,16 +197,27 @@ class OracleNet(nn.Module):
         patches = padded[batch_idx, ch_idx, row_idx, col_idx]  # [B, 12, 5, 5]
         return patches.view(B, -1)  # [B, 300]
 
-    def forward(self, x, material_scalar):
-        # K path: handcrafted scalars + king patches (independent of backbone)
-        scalars = self._extract_k_scalars(x)                        # [B, 8]
+    def forward(self, x, scalars_input):
+        # scalars_input: [B, 2] — column 0 = material_scalar, column 1 = qsearch_completed flag
+        # Ensure shape [B, 2]
+        if scalars_input.dim() == 1:
+            scalars_input = scalars_input.unsqueeze(1)
+        if scalars_input.size(1) == 1:
+            # Backward compat: pad with 1.0 (assume completed) if only material provided
+            scalars_input = torch.cat([scalars_input, torch.ones_like(scalars_input)], dim=1)
+
+        material_scalar = scalars_input[:, 0:1]   # [B, 1]
+        qsearch_flag = scalars_input[:, 1:2]      # [B, 1]
+
+        # K path: handcrafted scalars + qsearch flag + king patches (independent of backbone)
+        board_scalars = self._extract_k_scalars(x)                   # [B, 12]
         stm_patch = self._extract_king_patch(x, king_plane=5)       # [B, 300]
         opp_patch = self._extract_king_patch(x, king_plane=11)      # [B, 300]
 
         stm_feat = F.relu(self.k_stm_patch_fc(stm_patch))           # [B, 32]
         opp_feat = F.relu(self.k_opp_patch_fc(opp_patch))           # [B, 32]
 
-        k_feat = torch.cat([scalars, stm_feat, opp_feat], dim=1)    # [B, 72]
+        k_feat = torch.cat([board_scalars, qsearch_flag, stm_feat, opp_feat], dim=1)  # [B, 77]
         k_feat = F.relu(self.k_combine(k_feat))                     # [B, 32]
         k_logit = self.k_out(k_feat)                                # [B, 1]
 
@@ -235,10 +246,6 @@ class OracleNet(nn.Module):
         # k = Softplus(k_logit) / (2 * ln2)
         k = F.softplus(k_logit) / self.k_scale
         
-        # Ensure material_scalar matches shape [B, 1]
-        if material_scalar.dim() == 1:
-            material_scalar = material_scalar.unsqueeze(1)
-            
         # Residual Recombination
         # V_final = Tanh( V_net + k * DeltaM )
         total_logit = v_logit + (k * material_scalar)

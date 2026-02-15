@@ -7,7 +7,7 @@ use kingfisher::mcts::InferenceServer;
 fn test_mock_server_returns_result() {
     let server = InferenceServer::new_mock();
     let board = Board::new();
-    let receiver = server.predict_async(board);
+    let receiver = server.predict_async(board, true);
     let result = receiver.recv().expect("Should receive a response");
     assert!(result.is_some(), "Mock server should return Some");
     let (policy, v_logit, k) = result.unwrap();
@@ -24,7 +24,7 @@ fn test_mock_server_returns_result() {
 fn test_mock_biased_returns_correct_v_logit() {
     let server = InferenceServer::new_mock_biased(0.5);
     let board = Board::new();
-    let receiver = server.predict_async(board);
+    let receiver = server.predict_async(board, true);
     let result = receiver.recv().expect("Should receive a response");
     let (_, v_logit, k) = result.unwrap();
     assert!(
@@ -43,7 +43,7 @@ fn test_mock_server_handles_multiple_requests() {
     let board = Board::new();
 
     for i in 0..5 {
-        let receiver = server.predict_async(board.clone());
+        let receiver = server.predict_async(board.clone(), true);
         let result = receiver
             .recv()
             .expect(&format!("Request {i} should get response"));
@@ -55,7 +55,7 @@ fn test_mock_server_handles_multiple_requests() {
 fn test_mock_server_policy_length() {
     let server = InferenceServer::new_mock_biased(0.0);
     let board = Board::new();
-    let receiver = server.predict_async(board);
+    let receiver = server.predict_async(board, true);
     let (policy, _, _) = receiver.recv().unwrap().unwrap();
     assert_eq!(
         policy.len(),

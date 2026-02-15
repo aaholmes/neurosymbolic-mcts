@@ -489,11 +489,19 @@ fn evaluate_leaf_node(
         let mut k_val: f32 = 0.5;
         let mut v_logit: f64 = f64::NEG_INFINITY; // sentinel: no NN result yet
 
-        // 1. Batched Inference — NN now returns raw v_logit (unbounded)
+        // 1. Run Q-search FIRST so completion flag is available for NN inference
+        let (delta_m, qsearch_completed) = if config.enable_material_value {
+            let mut board_stack = BoardStack::with_board(node_ref.state.clone());
+            forced_material_balance(&mut board_stack, move_gen)
+        } else {
+            (0, true)
+        };
+
+        // 2. Batched Inference — NN now returns raw v_logit (unbounded)
         if config.enable_tier3_neural {
             if let Some(server) = &config.inference_server {
                 if config.use_neural_policy {
-                    let receiver = server.predict_async(node_ref.state.clone());
+                    let receiver = server.predict_async(node_ref.state.clone(), qsearch_completed);
                     if let Ok(Some((policy, nn_v_logit, k))) = receiver.recv() {
                         v_logit = nn_v_logit as f64;
                         k_val = k;
@@ -504,9 +512,6 @@ fn evaluate_leaf_node(
         }
 
         if config.enable_material_value {
-            // 2. Compute delta_M via material-only Q-search
-            let mut board_stack = BoardStack::with_board(node_ref.state.clone());
-            let delta_m = forced_material_balance(&mut board_stack, move_gen);
 
             if v_logit.is_finite() {
                 // NN path: combine v_logit + k * delta_M

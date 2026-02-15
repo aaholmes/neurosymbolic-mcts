@@ -72,45 +72,64 @@ use std::time::{Duration, Instant};
 /// no Pesto, no positional terms. Searches captures + promotions to find the
 /// best material balance achievable through forced tactical exchanges.
 ///
-/// Returns the best material balance (in pawn units) from STM perspective.
+/// Returns `(score, completed)` where:
+/// - `score`: best material balance (pawn units) from STM perspective
+/// - `completed`: `true` if search resolved naturally (ran out of captures or
+///   stand-pat cutoff), `false` if depth limit was hit with captures remaining
 pub fn material_qsearch(
     board: &mut BoardStack,
     move_gen: &MoveGen,
     mut alpha: i32,
     beta: i32,
     max_depth: u8,
-) -> i32 {
+) -> (i32, bool) {
     let stand_pat = board.current_state().material_imbalance();
     if stand_pat >= beta {
-        return beta;
+        return (beta, true); // Stand-pat cutoff — position is quiescent from search perspective
     }
     alpha = alpha.max(stand_pat);
-    if max_depth == 0 {
-        return alpha;
-    }
 
     let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
+
+    if max_depth == 0 {
+        // Check if there were legal captures we couldn't explore
+        let has_legal_capture = captures.iter().any(|&cap| {
+            board.make_move(cap);
+            let legal = board.current_state().is_legal(move_gen);
+            board.undo_move();
+            legal
+        });
+        return (alpha, !has_legal_capture);
+    }
+
+    let mut all_completed = true;
     for capture in captures {
         board.make_move(capture);
         if !board.current_state().is_legal(move_gen) {
             board.undo_move();
             continue;
         }
-        let score = -material_qsearch(board, move_gen, -beta, -alpha, max_depth - 1);
+        let (score, child_completed) =
+            material_qsearch(board, move_gen, -beta, -alpha, max_depth - 1);
+        let score = -score;
+        if !child_completed {
+            all_completed = false;
+        }
         board.undo_move();
         if score >= beta {
-            return beta;
+            return (beta, all_completed);
         }
         if score > alpha {
             alpha = score;
         }
     }
-    alpha
+    (alpha, all_completed)
 }
 
-/// Convenience wrapper: returns the material balance (pawn units, STM perspective)
-/// after optimal forced captures/promotions from this position.
-pub fn forced_material_balance(board: &mut BoardStack, move_gen: &MoveGen) -> i32 {
+/// Convenience wrapper: returns `(material_balance, completed)` where material_balance
+/// is in pawn units (STM perspective) after optimal forced captures/promotions.
+/// `completed` is true if the Q-search resolved all captures within its depth limit.
+pub fn forced_material_balance(board: &mut BoardStack, move_gen: &MoveGen) -> (i32, bool) {
     material_qsearch(board, move_gen, -1000, 1000, 8)
 }
 

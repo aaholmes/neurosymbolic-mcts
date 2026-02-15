@@ -326,7 +326,8 @@ pub fn play_evaluation_game_with_servers(
                 }
 
                 let mut temp_stack = BoardStack::with_board(board.clone());
-                let material_scalar = forced_material_balance(&mut temp_stack, &move_gen) as f32;
+                let (material_balance, qsearch_completed) = forced_material_balance(&mut temp_stack, &move_gen);
+                let material_scalar = material_balance as f32;
 
                 let sample = TrainingSample {
                     board: board.clone(),
@@ -334,6 +335,7 @@ pub fn play_evaluation_game_with_servers(
                     policy_moves,
                     value_target: 0.0, // Backfilled after game ends
                     material_scalar,
+                    qsearch_completed,
                     w_to_move: board.w_to_move,
                 };
 

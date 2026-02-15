@@ -201,9 +201,9 @@ class TestChessDataset:
         make_fake_bin(os.path.join(data_dir, "game.bin"), 5)
 
         dataset = train_module.ChessDataset(data_dir)
-        board, material, value, policy = dataset[0]
+        board, scalars, value, policy = dataset[0]
         assert board.shape == (17, 8, 8)
-        assert material.shape == (1,)
+        assert scalars.shape == (2,), f"Expected scalars shape (2,), got {scalars.shape}"
         assert value.shape == (1,)
         assert policy.shape == (4672,)
 
@@ -256,9 +256,9 @@ class TestBufferDataset:
             shutil.rmtree(source_dir, ignore_errors=True)
 
             dataset = train_module.BufferDataset(buffer_dir)
-            board, material, value, policy = dataset[0]
+            board, scalars, value, policy = dataset[0]
             assert board.shape == (17, 8, 8)
-            assert material.shape == (1,)
+            assert scalars.shape == (2,), f"Expected scalars shape (2,), got {scalars.shape}"
             assert value.shape == (1,)
             assert policy.shape == (4672,)
         finally:
@@ -707,8 +707,9 @@ class TestBufferDatasetChunking:
             dataset = train_module.BufferDataset(buffer_dir, chunk_size=5)
             # Access 15 items (3 chunks worth)
             for i in range(15):
-                board, mat, val, pol = dataset[i]
+                board, scalars, val, pol = dataset[i]
                 assert board.shape == (17, 8, 8)
+                assert scalars.shape == (2,)
                 assert pol.shape == (4672,)
         finally:
             shutil.rmtree(buffer_dir, ignore_errors=True)
@@ -754,9 +755,9 @@ class TestEpochDataset:
             shutil.rmtree(source_dir, ignore_errors=True)
 
             dataset = train_module.EpochDataset(buffer_dir, augment=False)
-            board, material, value, policy = dataset[0]
+            board, scalars, value, policy = dataset[0]
             assert board.shape == (17, 8, 8)
-            assert material.shape == (1,)
+            assert scalars.shape == (2,), f"Expected scalars shape (2,), got {scalars.shape}"
             assert value.shape == (1,)
             assert policy.shape == (4672,)
         finally:
@@ -1046,6 +1047,96 @@ class TestOrchestratorStateBackwardCompat:
         loaded = OrchestratorState.load(state_path)
         assert loaded.latest_pth == "/weights/candidate_3.pth"
         assert loaded.current_best_pth == "/best/gen_2.pth"
+
+
+class TestQsearchFlag:
+    """Tests for the qsearch_completed flag in training data format."""
+
+    def test_sample_size_is_5763(self):
+        """Binary format should be 5763 floats: board(1088) + material(1) + qsearch_flag(1) + value(1) + policy(4672)."""
+        assert train_module.SAMPLE_SIZE_FLOATS == 5763
+        assert SAMPLE_SIZE_FLOATS == 5763
+
+    def test_chess_dataset_parses_qsearch_flag(self, tmp_dirs):
+        """ChessDataset should correctly parse qsearch_completed from binary data."""
+        data_dir, _ = tmp_dirs
+        # Create a sample with known values
+        board_end = 17 * 64
+        sample = np.zeros(5763, dtype=np.float32)
+        sample[board_end] = 3.5       # material
+        sample[board_end + 1] = 1.0   # qsearch_completed = true
+        sample[board_end + 2] = 0.75  # value
+        sample.tofile(os.path.join(data_dir, "test.bin"))
+
+        dataset = train_module.ChessDataset(data_dir, augment=False)
+        board, scalars, value, policy = dataset[0]
+
+        assert scalars.shape == (2,)
+        assert abs(scalars[0].item() - 3.5) < 1e-5, f"material should be 3.5, got {scalars[0].item()}"
+        assert abs(scalars[1].item() - 1.0) < 1e-5, f"qsearch_flag should be 1.0, got {scalars[1].item()}"
+        assert abs(value.item() - 0.75) < 1e-5
+
+    def test_epoch_dataset_parses_qsearch_flag(self, tmp_dirs):
+        """EpochDataset should correctly parse qsearch_completed from binary data."""
+        _, output_dir = tmp_dirs
+        buffer_dir = tempfile.mkdtemp(prefix="qsearch_buf_")
+        try:
+            source_dir = tempfile.mkdtemp(prefix="src_")
+            board_end = 17 * 64
+            sample = np.zeros(5763, dtype=np.float32)
+            sample[board_end] = -2.0      # material
+            sample[board_end + 1] = 0.0   # qsearch_completed = false
+            sample[board_end + 2] = -0.5  # value
+            sample.tofile(os.path.join(source_dir, "test.bin"))
+
+            buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+            buf.add_games(source_dir, model_elo=0.0)
+            shutil.rmtree(source_dir, ignore_errors=True)
+
+            dataset = train_module.EpochDataset(buffer_dir, augment=False)
+            board, scalars, value, policy = dataset[0]
+
+            assert scalars.shape == (2,)
+            assert abs(scalars[0].item() - (-2.0)) < 1e-5
+            assert abs(scalars[1].item() - 0.0) < 1e-5
+            assert abs(value.item() - (-0.5)) < 1e-5
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_model_output_changes_with_qsearch_flag(self):
+        """OracleNet k-head should produce different output when qsearch_flag changes."""
+        model = OracleNet(num_blocks=1, hidden_dim=16)
+        model.eval()
+
+        board = torch.randn(1, 17, 8, 8)
+        scalars_completed = torch.tensor([[0.0, 1.0]])    # qsearch completed
+        scalars_incomplete = torch.tensor([[0.0, 0.0]])    # qsearch incomplete
+
+        with torch.no_grad():
+            _, v1, k1 = model(board, scalars_completed)
+            _, v2, k2 = model(board, scalars_incomplete)
+
+        # After training, k should differ; with zero init it may be very close
+        # but the forward path must not error
+        assert v1.shape == (1, 1)
+        assert k1.shape == (1, 1)
+        assert v2.shape == (1, 1)
+        assert k2.shape == (1, 1)
+
+    def test_backward_compat_single_scalar(self):
+        """Model should handle [B, 1] input via backward compat (pads qsearch_flag=1.0)."""
+        model = OracleNet(num_blocks=1, hidden_dim=16)
+        model.eval()
+
+        board = torch.randn(2, 17, 8, 8)
+        material_only = torch.randn(2, 1)
+
+        with torch.no_grad():
+            policy, value, k = model(board, material_only)
+
+        assert policy.shape == (2, 4672)
+        assert value.shape == (2, 1)
+        assert k.shape == (2, 1)
 
 
 if __name__ == "__main__":

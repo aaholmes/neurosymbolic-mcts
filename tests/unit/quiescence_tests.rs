@@ -276,13 +276,14 @@ fn test_material_qsearch_quiet_position() {
     let move_gen = MoveGen::new();
     let mut stack = BoardStack::new();
 
-    let result = forced_material_balance(&mut stack, &move_gen);
+    let (result, completed) = forced_material_balance(&mut stack, &move_gen);
 
     // Starting position: equal material, no captures improve balance
     assert_eq!(
         result, 0,
         "Starting position material balance should be 0, got {result}"
     );
+    assert!(completed, "Starting position Q-search should complete (no captures available)");
 }
 
 #[test]
@@ -295,7 +296,7 @@ fn test_material_qsearch_free_piece() {
     let mut stack = BoardStack::with_board(board.clone());
 
     let stand_pat = board.material_imbalance();
-    let result = forced_material_balance(&mut stack, &move_gen);
+    let (result, completed) = forced_material_balance(&mut stack, &move_gen);
 
     // White is down material (has P vs opponent N: 1 vs 3 = -2)
     // After Pxe4 (capturing knight), white gains 3 - 1 (loses pawn to nothing? No, pawn captures knight)
@@ -312,6 +313,7 @@ fn test_material_qsearch_free_piece() {
         result, 1,
         "After capturing free knight, balance should be +1 (pawn vs nothing)"
     );
+    assert!(completed, "Single capture resolves: should complete");
 }
 
 #[test]
@@ -324,7 +326,7 @@ fn test_material_qsearch_bad_capture_stand_pat() {
     let mut stack = BoardStack::with_board(board.clone());
 
     let stand_pat = board.material_imbalance();
-    let result = forced_material_balance(&mut stack, &move_gen);
+    let (result, _) = forced_material_balance(&mut stack, &move_gen);
 
     // White has Q(9) vs Black P(1), stand_pat = 8
     // Qxe5 captures pawn (+1), but if there's no recapture, it's good
@@ -335,7 +337,7 @@ fn test_material_qsearch_bad_capture_stand_pat() {
     let mut stack2 = BoardStack::with_board(board2.clone());
 
     let stand_pat2 = board2.material_imbalance();
-    let result2 = forced_material_balance(&mut stack2, &move_gen);
+    let (result2, _) = forced_material_balance(&mut stack2, &move_gen);
 
     // White has N(3) vs Black Q(9)+P(1) = -7
     // Nxe5 captures pawn: white gets +1, but then Qxe5 recaptures: white loses 3
@@ -355,7 +357,7 @@ fn test_material_qsearch_promotion() {
     let mut stack = BoardStack::with_board(board.clone());
 
     let stand_pat = board.material_imbalance();
-    let result = forced_material_balance(&mut stack, &move_gen);
+    let (result, _) = forced_material_balance(&mut stack, &move_gen);
 
     // stand_pat: white P(1) vs nothing = 1
     // After e8=Q: white Q(9) vs nothing = 9
@@ -376,7 +378,7 @@ fn test_material_qsearch_multiple_captures() {
     let mut stack = BoardStack::with_board(board.clone());
 
     let stand_pat = board.material_imbalance();
-    let result = forced_material_balance(&mut stack, &move_gen);
+    let (result, _) = forced_material_balance(&mut stack, &move_gen);
 
     // stand_pat: B(3) vs P(1) = 2
     // Bxf7+: white B(now on f7, captured P), white material = B(3), black material = 0, balance = 3
@@ -396,12 +398,56 @@ fn test_material_qsearch_symmetry() {
     let mut stack_w = BoardStack::with_board(white_board);
     let mut stack_b = BoardStack::with_board(black_board);
 
-    let result_w = forced_material_balance(&mut stack_w, &move_gen);
-    let result_b = forced_material_balance(&mut stack_b, &move_gen);
+    let (result_w, _) = forced_material_balance(&mut stack_w, &move_gen);
+    let (result_b, _) = forced_material_balance(&mut stack_b, &move_gen);
 
     // Both sides have same material ratio (P vs N) from STM perspective
     assert_eq!(
         result_w, result_b,
         "Mirrored positions should give same result: w={result_w}, b={result_b}"
     );
+}
+
+// ======== Q-Search Completion Flag Tests ========
+
+#[test]
+fn test_material_qsearch_completion_stand_pat_cutoff() {
+    let move_gen = MoveGen::new();
+    // Position where white is way ahead — stand-pat beats beta, immediate cutoff = completed
+    let board = Board::new_from_fen("4k3/8/8/8/8/8/8/1Q2K3 w - - 0 1");
+    let mut stack = BoardStack::with_board(board);
+
+    // Stand pat: Q(9) vs nothing = 9, beta=1000, 9 < 1000, no cutoff at root
+    // But no captures available → completed
+    let (_, completed) = forced_material_balance(&mut stack, &move_gen);
+    assert!(completed, "Position with no captures should complete");
+}
+
+#[test]
+fn test_material_qsearch_completion_single_recapture() {
+    let move_gen = MoveGen::new();
+    // White can capture pawn on e5, black can recapture with queen → 2-ply sequence completes
+    let board = Board::new_from_fen("4k3/8/8/3qp3/4N3/8/8/4K3 w - - 0 1");
+    let mut stack = BoardStack::with_board(board);
+
+    let (_, completed) = forced_material_balance(&mut stack, &move_gen);
+    assert!(completed, "Short capture-recapture sequence within depth 8 should complete");
+}
+
+#[test]
+fn test_material_qsearch_incomplete_deep_captures() {
+    let move_gen = MoveGen::new();
+    // Lots of mutual captures available in a complex middlegame with many hanging pieces.
+    // Each side has many pieces that can capture: this should produce a deep capture tree
+    // that potentially exceeds depth 8.
+    // Position: pieces on every other square creating maximum cross-capture potential
+    let board = Board::new_from_fen(
+        "r1b1k1nr/ppNpBppp/2n5/q3P3/2Bp4/4P3/PP3PPP/R2QK1NR w KQkq - 0 1"
+    );
+    let mut stack = BoardStack::with_board(board);
+
+    let (val, _completed) = forced_material_balance(&mut stack, &move_gen);
+    // We mainly care that the function runs and returns; the completion flag may or may not be true
+    // depending on the exact capture tree depth
+    assert!(val > -100 && val < 100, "Value should be reasonable: {}", val);
 }

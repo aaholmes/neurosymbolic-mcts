@@ -17,7 +17,7 @@ from augmentation import augment_sample, augment_all_transforms
 INPUT_CHANNELS = 17
 BOARD_SIZE = 8 * 8
 POLICY_SIZE = 4672
-SAMPLE_SIZE_FLOATS = (INPUT_CHANNELS * BOARD_SIZE) + 1 + 1 + POLICY_SIZE
+SAMPLE_SIZE_FLOATS = (INPUT_CHANNELS * BOARD_SIZE) + 1 + 1 + 1 + POLICY_SIZE  # board + material + qsearch_flag + value + policy
 
 class ChessDataset(Dataset):
     def __init__(self, data_dir, augment=False):
@@ -64,26 +64,30 @@ class ChessDataset(Dataset):
         material_idx = board_end
         material = flat_data[material_idx]
 
-        # 3. Value Target [1]
-        value_idx = material_idx + 1
+        # 3. Q-search Completed Flag [1]
+        qsearch_idx = material_idx + 1
+        qsearch_flag = flat_data[qsearch_idx]
+
+        # 4. Value Target [1]
+        value_idx = qsearch_idx + 1
         value = flat_data[value_idx]
 
-        # 4. Policy Target [4672]
+        # 5. Policy Target [4672]
         policy_start = value_idx + 1
         policy_np = flat_data[policy_start:]
 
-        # 5. Augmentation (randomly pick one transform, weight 1.0)
+        # 6. Augmentation (randomly pick one transform, weight 1.0)
         if self.augment:
             transforms = augment_all_transforms(board_np, material, value, policy_np)
             idx = self._rng.integers(len(transforms))
             board_np, material, value, policy_np = transforms[idx]
 
         board_tensor = torch.from_numpy(np.ascontiguousarray(board_np))
-        material_scalar = torch.tensor([material])
+        scalars = torch.tensor([material, qsearch_flag])  # [2]
         value_target = torch.tensor([value])
         policy_target = torch.from_numpy(np.ascontiguousarray(policy_np))
 
-        return board_tensor, material_scalar, value_target, policy_target
+        return board_tensor, scalars, value_target, policy_target
 
 
 class BufferDataset(Dataset):
@@ -106,25 +110,25 @@ class BufferDataset(Dataset):
         print(f"Buffer dataset: {self._total} positions from {len(self.buffer.entries)} files")
 
     def _refresh_chunk(self):
-        boards, materials, values, policies = self.buffer.sample_batch(self.chunk_size)
+        boards, scalars, values, policies = self.buffer.sample_batch(self.chunk_size)
         if self.augment:
-            aug_boards, aug_mats, aug_vals, aug_pols = [], [], [], []
+            aug_boards, aug_scalars, aug_vals, aug_pols = [], [], [], []
             for i in range(len(boards)):
                 for b, m, v, p in augment_all_transforms(
-                    boards[i], materials[i], values[i], policies[i]
+                    boards[i], scalars[i, 0], values[i], policies[i]
                 ):
                     aug_boards.append(b)
-                    aug_mats.append(m)
+                    aug_scalars.append([m, scalars[i, 1]])  # preserve qsearch_flag
                     aug_vals.append(v)
                     aug_pols.append(p)
             self._chunk = (
                 np.array(aug_boards),
-                np.array(aug_mats),
+                np.array(aug_scalars),
                 np.array(aug_vals),
                 np.array(aug_pols),
             )
         else:
-            self._chunk = (boards, materials, values, policies)
+            self._chunk = (boards, scalars, values, policies)
         self._chunk_len = len(self._chunk[0])
         self._chunk_idx = 0
 
@@ -138,12 +142,12 @@ class BufferDataset(Dataset):
         self._chunk_idx += 1
 
         board_np = self._chunk[0][i]
-        material = self._chunk[1][i]
+        scalars_np = self._chunk[1][i]  # [2] array: [material, qsearch_flag]
         value = self._chunk[2][i]
         policy_np = self._chunk[3][i]
 
         return (torch.from_numpy(np.ascontiguousarray(board_np)),
-                torch.tensor([material.item()]) if hasattr(material, 'item') else torch.tensor([material]),
+                torch.from_numpy(np.ascontiguousarray(scalars_np).astype(np.float32)),
                 torch.tensor([value.item()]) if hasattr(value, 'item') else torch.tensor([value]),
                 torch.from_numpy(np.ascontiguousarray(policy_np)))
 
@@ -186,8 +190,9 @@ class EpochDataset(Dataset):
 
         board_np = raw[:self._board_end].reshape(self._ic, 8, 8)
         material = raw[self._board_end]
-        value = raw[self._board_end + 1]
-        policy_np = raw[self._board_end + 2:]
+        qsearch_flag = raw[self._board_end + 1]
+        value = raw[self._board_end + 2]
+        policy_np = raw[self._board_end + 3:]
 
         if self.augment:
             transforms = augment_all_transforms(board_np, material, value, policy_np)
@@ -195,11 +200,11 @@ class EpochDataset(Dataset):
             board_np, material, value, policy_np = transforms[t_idx]
 
         board_tensor = torch.from_numpy(np.ascontiguousarray(board_np))
-        material_scalar = torch.tensor([material])
+        scalars = torch.tensor([material, qsearch_flag])  # [2]
         value_target = torch.tensor([value])
         policy_target = torch.from_numpy(np.ascontiguousarray(policy_np))
 
-        return board_tensor, material_scalar, value_target, policy_target
+        return board_tensor, scalars, value_target, policy_target
 
 
 def parse_lr_schedule(schedule_str):
@@ -399,15 +404,16 @@ def train_with_config(
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
 
-            boards, materials, values, policies = batch
+            boards, scalars, values, policies = batch
             boards = boards.to(DEVICE)
-            materials = materials.to(DEVICE)
+            scalars = scalars.to(DEVICE)
             if disable_material:
-                materials = torch.zeros_like(materials)
+                scalars = scalars.clone()
+                scalars[:, 0] = 0.0  # zero out material column only
             values = values.to(DEVICE)
             policies = policies.to(DEVICE)
 
-            pred_policy, pred_value, k = model(boards, materials)
+            pred_policy, pred_value, k = model(boards, scalars)
             policy_loss_per = F.kl_div(pred_policy, policies, reduction='none').sum(dim=1)
             value_loss_per = F.mse_loss(pred_value, values, reduction='none').squeeze(1)
             loss = (policy_loss_per + value_loss_per).mean()
@@ -448,7 +454,7 @@ def train_with_config(
             total_value_loss = 0
             total_k = 0
 
-            for batch_idx, (boards, materials, values, policies) in enumerate(dataloader):
+            for batch_idx, (boards, scalars, values, policies) in enumerate(dataloader):
                 # Apply LR schedule
                 current_lr = get_lr_for_step(schedule, lr, global_minibatch)
                 for pg in optimizer.param_groups:
@@ -458,13 +464,14 @@ def train_with_config(
                     lr_history[steps_this_run] = current_lr
 
                 boards = boards.to(DEVICE)
-                materials = materials.to(DEVICE)
+                scalars = scalars.to(DEVICE)
                 if disable_material:
-                    materials = torch.zeros_like(materials)
+                    scalars = scalars.clone()
+                    scalars[:, 0] = 0.0  # zero out material column only
                 values = values.to(DEVICE)
                 policies = policies.to(DEVICE)
 
-                pred_policy, pred_value, k = model(boards, materials)
+                pred_policy, pred_value, k = model(boards, scalars)
                 policy_loss_per = F.kl_div(pred_policy, policies, reduction='none').sum(dim=1)
                 value_loss_per = F.mse_loss(pred_value, values, reduction='none').squeeze(1)
                 loss = (policy_loss_per + value_loss_per).mean()
@@ -500,15 +507,16 @@ def train_with_config(
                 val_value_total = 0
                 val_batches = 0
                 with torch.no_grad():
-                    for boards, materials, values, policies in val_loader:
+                    for boards, scalars, values, policies in val_loader:
                         boards = boards.to(DEVICE)
-                        materials = materials.to(DEVICE)
+                        scalars = scalars.to(DEVICE)
                         if disable_material:
-                            materials = torch.zeros_like(materials)
+                            scalars = scalars.clone()
+                            scalars[:, 0] = 0.0
                         values = values.to(DEVICE)
                         policies = policies.to(DEVICE)
 
-                        pred_policy, pred_value, k_val = model(boards, materials)
+                        pred_policy, pred_value, k_val = model(boards, scalars)
                         p_loss = F.kl_div(pred_policy, policies, reduction='none').sum(dim=1).mean()
                         v_loss = F.mse_loss(pred_value, values)
                         val_policy_total += p_loss.item()

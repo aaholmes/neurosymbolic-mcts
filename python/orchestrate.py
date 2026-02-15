@@ -208,8 +208,8 @@ def export_model_for_rust(model, output_path):
     device = next(model.parameters()).device
     model.eval()
     example_board = torch.randn(1, 17, 8, 8, device=device)
-    example_material = torch.randn(1, 1, device=device)
-    traced = torch.jit.trace(model, (example_board, example_material))
+    example_scalars = torch.randn(1, 2, device=device)  # [material, qsearch_flag]
+    traced = torch.jit.trace(model, (example_board, example_scalars))
     traced.save(output_path)
     print(f"Exported TorchScript model to {output_path} (traced on {device})")
 

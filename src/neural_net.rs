@@ -133,18 +133,23 @@ mod real {
         }
 
         /// Runs inference on the board. Returns (policy_probs, value, k).
-        pub fn predict(&mut self, board: &Board) -> Option<(Vec<f32>, f32, f32)> {
+        pub fn predict(&mut self, board: &Board, qsearch_completed: bool) -> Option<(Vec<f32>, f32, f32)> {
             let model = self.model.as_ref()?;
             let input = self.board_to_tensor(board).unsqueeze(0);
 
+            // Build [1, 2] scalars tensor: [material=0.0, qsearch_flag]
             // Material scalar is unused by the traced eval-mode model (it returns
             // raw v_logit; Rust combines with k * delta_M separately). Pass zero.
-            let mat_tensor = Tensor::zeros(&[1, 1], (Kind::Float, self.device));
+            let scalars_data = [0.0f32, if qsearch_completed { 1.0 } else { 0.0 }];
+            let scalars_tensor = Tensor::from_slice(&scalars_data)
+                .view([1, 2])
+                .to_device(self.device)
+                .to_kind(Kind::Float);
 
             let ivalue = model
                 .method_is(
                     "forward",
-                    &[tch::IValue::Tensor(input), tch::IValue::Tensor(mat_tensor)],
+                    &[tch::IValue::Tensor(input), tch::IValue::Tensor(scalars_tensor)],
                 )
                 .ok()?;
 
@@ -184,7 +189,11 @@ mod real {
         }
 
         /// Runs inference on a batch of boards. Returns Vec<(policy_probs, value, k)>.
-        pub fn predict_batch(&mut self, boards: &[Board]) -> Vec<Option<(Vec<f32>, f32, f32)>> {
+        pub fn predict_batch(
+            &mut self,
+            boards: &[Board],
+            qsearch_flags: &[bool],
+        ) -> Vec<Option<(Vec<f32>, f32, f32)>> {
             let model = match self.model.as_ref() {
                 Some(m) => m,
                 None => return vec![None; boards.len()],
@@ -198,15 +207,25 @@ mod real {
 
             // Stack inputs into [B, 17, 8, 8]
             let input_batch = Tensor::stack(&input_tensors, 0);
+            // Build [B, 2] scalars tensor: [material=0.0, qsearch_flag]
             // Material scalar is unused by the traced eval-mode model (it returns
             // raw v_logit; Rust combines with k * delta_M separately). Pass zeros.
-            let mat_batch = Tensor::zeros(&[boards.len() as i64, 1], (Kind::Float, self.device));
+            let b = boards.len();
+            let mut scalars_data = vec![0.0f32; b * 2];
+            for i in 0..b {
+                // scalars_data[i*2 + 0] = 0.0 (material, already zero)
+                scalars_data[i * 2 + 1] = if qsearch_flags[i] { 1.0 } else { 0.0 };
+            }
+            let scalars_batch = Tensor::from_slice(&scalars_data)
+                .view([b as i64, 2])
+                .to_device(self.device)
+                .to_kind(Kind::Float);
 
             let ivalue = model.method_is(
                 "forward",
                 &[
                     tch::IValue::Tensor(input_batch),
-                    tch::IValue::Tensor(mat_batch),
+                    tch::IValue::Tensor(scalars_batch),
                 ],
             );
 
@@ -278,7 +297,7 @@ mod real {
         }
 
         pub fn get_position_value(&mut self, board: &Board) -> Option<i32> {
-            let (_, value, _) = self.predict(board)?;
+            let (_, value, _) = self.predict(board, true)?;
             Some((value * 1000.0) as i32)
         }
 
@@ -317,10 +336,10 @@ mod stub {
         pub fn board_to_tensor(&self, _board: &Board) -> () {
             ()
         }
-        pub fn predict(&mut self, _board: &Board) -> Option<(Vec<f32>, f32, f32)> {
+        pub fn predict(&mut self, _board: &Board, _qsearch_completed: bool) -> Option<(Vec<f32>, f32, f32)> {
             None
         }
-        pub fn predict_batch(&mut self, boards: &[Board]) -> Vec<Option<(Vec<f32>, f32, f32)>> {
+        pub fn predict_batch(&mut self, boards: &[Board], _qsearch_flags: &[bool]) -> Vec<Option<(Vec<f32>, f32, f32)>> {
             vec![None; boards.len()]
         }
         pub fn policy_to_move_priors(

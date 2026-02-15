@@ -39,7 +39,7 @@ fn test_neural_network_integration() {
 
     // Test neural network prediction
     println!("\n🔮 Testing neural network prediction...");
-    if let Some((policy, value, k)) = nn_policy.predict(&board) {
+    if let Some((policy, value, k)) = nn_policy.predict(&board, true) {
         println!("✅ Policy prediction: {} values", policy.len());
         println!("✅ Value prediction: {:.4}", value);
         println!("✅ K prediction: {:.4}", k);
@@ -116,7 +116,7 @@ fn test_neural_network_stub_behavior() {
         "Neural network should not be available without \"neural\" feature."
     );
     assert!(
-        nn_policy.predict(&Board::new()).is_none(),
+        nn_policy.predict(&Board::new(), true).is_none(),
         "Stub predict should return None."
     );
     assert_eq!(

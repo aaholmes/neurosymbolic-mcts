@@ -15,7 +15,7 @@ import numpy as np
 INPUT_CHANNELS = 17
 BOARD_SIZE = 64
 POLICY_SIZE = 4672
-SAMPLE_SIZE_FLOATS = (INPUT_CHANNELS * BOARD_SIZE) + 1 + 1 + POLICY_SIZE  # 5762
+SAMPLE_SIZE_FLOATS = (INPUT_CHANNELS * BOARD_SIZE) + 1 + 1 + 1 + POLICY_SIZE  # 5763 (board + material + qsearch_flag + value + policy)
 BYTES_PER_SAMPLE = SAMPLE_SIZE_FLOATS * 4
 
 
@@ -62,7 +62,10 @@ class ReplayBuffer:
         return total_added
 
     def sample_batch(self, batch_size: int) -> tuple:
-        """Random sample across all files. Returns (boards, materials, values, policies) as numpy arrays."""
+        """Random sample across all files. Returns (boards, scalars, values, policies) as numpy arrays.
+
+        scalars is [B, 2] containing [material, qsearch_flag] per position.
+        """
         total = self.total_positions()
         if total == 0:
             raise ValueError("Cannot sample from empty buffer")
@@ -80,7 +83,7 @@ class ReplayBuffer:
         weights /= weights.sum()
 
         boards = np.empty((batch_size, INPUT_CHANNELS, 8, 8), dtype=np.float32)
-        materials = np.empty((batch_size, 1), dtype=np.float32)
+        scalars = np.empty((batch_size, 2), dtype=np.float32)
         values = np.empty((batch_size, 1), dtype=np.float32)
         policies = np.empty((batch_size, POLICY_SIZE), dtype=np.float32)
 
@@ -99,11 +102,12 @@ class ReplayBuffer:
 
             board_end = INPUT_CHANNELS * BOARD_SIZE
             boards[i] = raw[:board_end].reshape(INPUT_CHANNELS, 8, 8)
-            materials[i, 0] = raw[board_end]
-            values[i, 0] = raw[board_end + 1]
-            policies[i] = raw[board_end + 2:]
+            scalars[i, 0] = raw[board_end]       # material
+            scalars[i, 1] = raw[board_end + 1]   # qsearch_flag
+            values[i, 0] = raw[board_end + 2]
+            policies[i] = raw[board_end + 3:]
 
-        return boards, materials, values, policies
+        return boards, scalars, values, policies
 
     def build_epoch_indices(self):
         """Build indices for one epoch with Elo-weighted probabilistic inclusion.

@@ -297,7 +297,7 @@ fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &TacticalMctsCon
     // 2. If inference server available, call it synchronously and cache the result
     if config.enable_tier3_neural {
         if let Some(ref server) = config.inference_server {
-            let receiver = server.predict_async(node_ref.state.clone());
+            let receiver = server.predict_async(node_ref.state.clone(), true);
             if let Ok(Some((policy, _v_logit, k))) = receiver.recv() {
                 let priors = crate::tensor::policy_to_move_priors(
                     &policy,

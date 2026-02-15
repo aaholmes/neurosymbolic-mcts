@@ -309,7 +309,7 @@ fn test_stub_nn_not_available() {
 fn test_stub_nn_predict_returns_none() {
     let mut nn = NeuralNetPolicy::new();
     let board = Board::new();
-    assert!(nn.predict(&board).is_none());
+    assert!(nn.predict(&board, true).is_none());
 }
 
 #[test]

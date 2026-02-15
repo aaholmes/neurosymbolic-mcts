@@ -55,11 +55,11 @@ def test_model_shapes():
     batch_size = 4
     # Random chess board input: [Batch, Channels, Height, Width]
     dummy_input = torch.randn(batch_size, 17, 8, 8)
-    dummy_material = torch.randn(batch_size, 1)
-    
+    dummy_scalars = torch.randn(batch_size, 2)  # [material, qsearch_flag]
+
     try:
         model = OracleNet()
-        policy, value, k = model(dummy_input, dummy_material)
+        policy, value, k = model(dummy_input, dummy_scalars)
         
         # Check Policy Shape
         # OracleNet uses 4672 for policy output size
@@ -86,11 +86,11 @@ def test_overfitting():
     
     # Use Adam for faster convergence in overfitting test
     optimizer = optim.Adam(model.parameters(), lr=0.01)
-    
+
     # Create a fixed batch of random data
     batch_size = 4 # Smaller batch to make memorization easier
     inputs = torch.randn(batch_size, 17, 8, 8)
-    materials = torch.randn(batch_size, 1)
+    materials = torch.randn(batch_size, 2)  # [material, qsearch_flag]
     
     # Target Policy: Random probabilities
     target_policy = torch.randn(batch_size, 4672).softmax(dim=1)
@@ -206,8 +206,8 @@ def test_k_feature_extraction():
     errors = []
 
     # --- Test scalar features ---
-    scalars = model._extract_k_scalars(board)  # [1, 8]
-    assert scalars.shape == (1, 8), f"Scalars shape {scalars.shape} != (1, 8)"
+    scalars = model._extract_k_scalars(board)  # [1, 12]
+    assert scalars.shape == (1, 12), f"Scalars shape {scalars.shape} != (1, 12)"
 
     total_pawns = scalars[0, 0].item()
     stm_pieces = scalars[0, 1].item()
@@ -258,8 +258,8 @@ def test_k_feature_extraction():
 
     # --- Test k output on starting position ---
     with torch.no_grad():
-        material = torch.zeros(1, 1)
-        _, _, k = model(board, material)
+        scalars_input = torch.zeros(1, 2)  # [material=0, qsearch_flag=0]
+        _, _, k = model(board, scalars_input)
 
     if abs(k.item() - 0.5) > 0.05:
         errors.append(f"k={k.item():.4f}, expected ~0.5 with zero init")
@@ -286,7 +286,7 @@ def sample_output_demo():
     
     # Use starting position
     input_board = get_starting_position_tensor()
-    input_material = torch.zeros(1, 1) # Equal material
+    input_material = torch.zeros(1, 2) # [material=0, qsearch_flag=0]
     
     # Visualize
     print_tensor_as_board(input_board)
