@@ -781,9 +781,9 @@ class Orchestrator:
                 winner_dir, loser_dir = candidate_eval_dir, current_eval_dir
             else:
                 # Don't clear — accumulate between accepts
-                # Winner = current, Loser = candidate (current_elo + negative delta)
+                # Winner = current, Loser = candidate (capped at current_elo)
                 winner_elo = current_elo
-                loser_elo = current_elo + elo_delta  # negative since WR < 0.5
+                loser_elo = current_elo + min(0.0, elo_delta)
                 winner_dir, loser_dir = current_eval_dir, candidate_eval_dir
 
             # Ingest both sides

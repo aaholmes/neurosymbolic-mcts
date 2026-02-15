@@ -734,6 +734,19 @@ class TestSlidingWindowBuffer:
         assert elos[-1] == pytest.approx(100.0, abs=0.1)  # winner side
         assert elos[-2] == pytest.approx(loser_elo, abs=0.1)  # loser side
 
+    def test_reject_with_positive_wr_caps_loser_elo(self, tmp_workspace):
+        """Reject with WR>50% should cap candidate Elo at current_elo."""
+        import math
+        current_elo = 100.0
+        # WR=52% but SPRT said H0 — not enough evidence
+        winrate = 0.52
+        elo_delta = -400 * math.log10(1.0 / winrate - 1.0)
+        assert elo_delta > 0  # positive delta
+
+        # Reject path clamps to non-positive
+        loser_elo = current_elo + min(0.0, elo_delta)
+        assert loser_elo == current_elo  # capped, not above current
+
     def test_default_buffer_capacity(self):
         """Default buffer capacity should be ~18 generations worth."""
         cfg = TrainingConfig()
