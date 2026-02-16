@@ -779,8 +779,6 @@ class Orchestrator:
             elo_delta = -400 * math.log10(1.0 / winrate_clamped - 1.0)
 
             if accepted:
-                # Buffer was cleared in handle_eval_result
-                buffer_size = 0
                 # Winner = candidate (new_elo), Loser = current (current_elo)
                 winner_elo = self.state.model_elos.get(str(self.state.accepted_count), 0.0)
                 loser_elo = current_elo
