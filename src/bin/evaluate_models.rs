@@ -353,7 +353,7 @@ pub fn play_evaluation_game_with_servers(
         match selected_move {
             None => break,
             Some(mv) => {
-                game_moves.push(mv.to_uci());
+                game_moves.push(mv.to_san(&board, &move_gen));
                 board_stack.make_move(mv);
                 move_count += 1;
             }
