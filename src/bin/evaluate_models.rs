@@ -64,17 +64,18 @@ pub struct EvalGameData {
     pub current_samples: Vec<TrainingSample>,
 }
 
-/// Default base for top-p decay: p = top_p_base^move_number.
+/// Default base for exploration probability decay: p = explore_base^(move_number - 1).
 /// Move number = (ply / 2) + 1 (same for both white and black on the same turn).
-const DEFAULT_TOP_P_BASE: f64 = 0.95;
+/// With probability p, sample proportionally (visits-1); with probability 1-p, play greedy.
+const DEFAULT_EXPLORE_BASE: f64 = 0.90;
 
 /// Select a move for evaluation: deterministic for forced wins,
-/// top-p sampling (decaying with move number) otherwise.
+/// proportional-or-greedy mix (decaying with move number) otherwise.
 fn select_eval_move(
     root: &Rc<RefCell<MctsNode>>,
     rng: &mut impl Rng,
     move_count: u32,
-    top_p_base: f64,
+    explore_base: f64,
 ) -> Option<Move> {
     let root_ref = root.borrow();
 
@@ -113,61 +114,45 @@ fn select_eval_move(
         })
         .collect();
 
-    // Top-p decays with move number (1-indexed, same for both sides)
-    // p = 0.95^(move_number - 1), so move 1 gets p=1.0 (full sampling)
+    // Exploration probability decays with move number (1-indexed, same for both sides)
+    // p = explore_base^(move_number - 1), so move 1 gets p=1.0 (full proportional)
     let move_number = (move_count / 2) + 1;
-    let top_p = top_p_base.powi((move_number - 1) as i32);
-    sample_top_p(&visit_pairs, top_p, rng)
+    let explore_prob = explore_base.powi((move_number - 1) as i32);
+
+    // With probability explore_prob: sample proportionally (visits-1)
+    // With probability 1-explore_prob: play greedy (most-visited)
+    if rng.gen::<f64>() < explore_prob {
+        sample_proportional(&visit_pairs, rng)
+    } else {
+        select_greedy(&visit_pairs)
+    }
 }
 
-/// Sample a move using top-p (nucleus) sampling on the counts-1 distribution.
-///
-/// Sorts moves by visit count descending, accumulates probability mass until
-/// it reaches `top_p`, then samples proportionally among the included moves.
-/// When `top_p` is very low, this naturally becomes greedy.
-fn sample_top_p(policy: &[(Move, u32)], top_p: f64, rng: &mut impl Rng) -> Option<Move> {
+/// Sample a move proportionally from visit counts (visits-1 distribution).
+fn sample_proportional(policy: &[(Move, u32)], rng: &mut impl Rng) -> Option<Move> {
     if policy.is_empty() {
         return None;
     }
 
-    // Build (move, adjusted_count) sorted by count descending
-    let mut sorted: Vec<(Move, u32)> = policy
-        .iter()
-        .map(|(mv, v)| (*mv, v.saturating_sub(1)))
-        .collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let total: u32 = sorted.iter().map(|(_, c)| c).sum();
+    let total: u32 = policy.iter().map(|(_, v)| v.saturating_sub(1)).sum();
     if total == 0 {
         // All moves have 0 or 1 visit — fall back to most-visited
-        return policy.iter().max_by_key(|(_, v)| *v).map(|(mv, _)| *mv);
+        return select_greedy(policy);
     }
-
-    // Find the nucleus: include moves until cumulative mass >= top_p
-    let mut cumulative_mass = 0.0;
-    let mut nucleus: Vec<(Move, u32)> = Vec::new();
-    for (mv, count) in &sorted {
-        nucleus.push((*mv, *count));
-        cumulative_mass += *count as f64 / total as f64;
-        if cumulative_mass >= top_p {
-            break;
-        }
-    }
-
-    // Sample proportionally within the nucleus
-    let nucleus_total: u32 = nucleus.iter().map(|(_, c)| c).sum();
-    if nucleus_total == 0 {
-        return Some(nucleus[0].0);
-    }
-    let threshold = rng.gen_range(0..nucleus_total);
+    let threshold = rng.gen_range(0..total);
     let mut cumulative = 0u32;
-    for (mv, count) in &nucleus {
-        cumulative += count;
+    for (mv, visits) in policy {
+        cumulative += visits.saturating_sub(1);
         if cumulative > threshold {
             return Some(*mv);
         }
     }
-    Some(nucleus.last().unwrap().0)
+    policy.last().map(|(mv, _)| *mv)
+}
+
+/// Select the most-visited move (greedy).
+fn select_greedy(policy: &[(Move, u32)]) -> Option<Move> {
+    policy.iter().max_by_key(|(_, v)| *v).map(|(mv, _)| *mv)
 }
 
 /// Play a single evaluation game between two models.
@@ -210,7 +195,7 @@ pub fn play_evaluation_game_koth(
         enable_material,
         game_seed,
         false,
-        DEFAULT_TOP_P_BASE,
+        DEFAULT_EXPLORE_BASE,
     )
     .result
 }
@@ -226,7 +211,7 @@ pub fn play_evaluation_game_with_servers(
     enable_material: bool,
     game_seed: u64,
     collect_training_data: bool,
-    top_p_base: f64,
+    explore_base: f64,
 ) -> EvalGameData {
     let mut rng = StdRng::seed_from_u64(game_seed);
     let move_gen = MoveGen::new();
@@ -349,7 +334,7 @@ pub fn play_evaluation_game_with_servers(
             drop(root_ref);
         }
 
-        let selected_move = select_eval_move(&root, &mut rng, move_count, top_p_base);
+        let selected_move = select_eval_move(&root, &mut rng, move_count, explore_base);
         match selected_move {
             None => break,
             Some(mv) => {
@@ -506,7 +491,7 @@ pub fn evaluate_models(
         true,
         8,
         0,
-        DEFAULT_TOP_P_BASE,
+        DEFAULT_EXPLORE_BASE,
     )
 }
 
@@ -521,7 +506,7 @@ pub fn evaluate_models_koth(
     enable_material: bool,
     inference_batch_size: usize,
     seed_offset: u64,
-    top_p_base: f64,
+    explore_base: f64,
 ) -> EvalResults {
     // Load each model once, create shared InferenceServers
     let candidate_server: Option<Arc<InferenceServer>> = {
@@ -569,7 +554,7 @@ pub fn evaluate_models_koth(
             enable_material,
             seed_offset + game_idx as u64,
             false,
-            top_p_base,
+            explore_base,
         );
 
         let mut r = results.lock().unwrap();
@@ -612,7 +597,7 @@ pub fn evaluate_models_koth_sprt(
     sprt_config: &SprtConfig,
     seed_offset: u64,
     save_training_data: Option<&str>,
-    top_p_base: f64,
+    explore_base: f64,
 ) -> (EvalResults, Option<f64>, SprtResult) {
     let collect = save_training_data.is_some();
 
@@ -679,7 +664,7 @@ pub fn evaluate_models_koth_sprt(
             enable_material,
             seed_offset + game_idx as u64,
             collect,
-            top_p_base,
+            explore_base,
         );
 
         // Collect training samples
@@ -838,7 +823,7 @@ fn main() {
     let enable_tier1 = !args.iter().any(|a| a == "--disable-tier1");
     let enable_material = !args.iter().any(|a| a == "--disable-material");
 
-    let top_p_base: f64 = parse_arg_f64(&args, "--top-p-base", DEFAULT_TOP_P_BASE);
+    let explore_base: f64 = parse_arg_f64(&args, "--explore-base", DEFAULT_EXPLORE_BASE);
 
     let inference_batch_size: usize = args
         .iter()
@@ -920,7 +905,7 @@ fn main() {
             &sprt_config,
             seed_offset,
             save_training_data.as_deref(),
-            top_p_base,
+            explore_base,
         );
 
         let win_rate = results.win_rate();
@@ -961,7 +946,7 @@ fn main() {
             enable_material,
             inference_batch_size,
             seed_offset,
-            top_p_base,
+            explore_base,
         );
         let win_rate = results.win_rate();
         let games_played = results.wins + results.losses + results.draws;
@@ -992,8 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn test_top_p_1_samples_all_moves() {
-        // With p=1.0, all moves are in the nucleus
+    fn test_proportional_samples_all_moves() {
         let policy = vec![
             (make_move(0, 8), 100), // ~50%
             (make_move(1, 9), 60),  // ~30%
@@ -1002,102 +986,56 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let mut seen = std::collections::HashSet::new();
         for _ in 0..200 {
-            let mv = sample_top_p(&policy, 1.0, &mut rng).unwrap();
+            let mv = sample_proportional(&policy, &mut rng).unwrap();
             seen.insert((mv.from, mv.to));
         }
-        // All 3 moves should appear with p=1.0
-        assert_eq!(seen.len(), 3, "All moves should be sampled with p=1.0");
+        assert_eq!(seen.len(), 3, "All moves should be sampled proportionally");
     }
 
     #[test]
-    fn test_top_p_tiny_is_greedy() {
-        // With very small p, only the top move should be selected
+    fn test_greedy_picks_most_visited() {
         let policy = vec![
             (make_move(0, 8), 200),
             (make_move(1, 9), 100),
             (make_move(2, 10), 50),
         ];
-        let mut rng = StdRng::seed_from_u64(42);
-        for _ in 0..50 {
-            let mv = sample_top_p(&policy, 0.01, &mut rng).unwrap();
-            assert_eq!(mv.from, 0, "Only top move should be selected with tiny p");
-            assert_eq!(mv.to, 8);
-        }
+        let mv = select_greedy(&policy).unwrap();
+        assert_eq!(mv.from, 0);
+        assert_eq!(mv.to, 8);
     }
 
     #[test]
-    fn test_top_p_excludes_low_count_moves() {
-        // p=0.5 should include only the top move (which has ~57% mass)
-        let policy = vec![
-            (make_move(0, 8), 201), // 200 adjusted, ~57%
-            (make_move(1, 9), 101), // 100 adjusted, ~29%
-            (make_move(2, 10), 51), // 50 adjusted, ~14%
-        ];
-        let mut rng = StdRng::seed_from_u64(42);
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..100 {
-            let mv = sample_top_p(&policy, 0.5, &mut rng).unwrap();
-            seen.insert((mv.from, mv.to));
-        }
-        // Only the top move should appear (57% >= 50%)
-        assert_eq!(
-            seen.len(),
-            1,
-            "Only top move should appear with p=0.5 when top has 57%"
-        );
+    fn test_greedy_empty_policy() {
+        assert!(select_greedy(&[]).is_none());
     }
 
     #[test]
-    fn test_top_p_includes_second_move_when_needed() {
-        // Two moves with equal counts — p=0.5 needs both (each is 50%)
-        // First move reaches exactly 50%, so it gets included and loop breaks
-        let policy = vec![
-            (make_move(0, 8), 101), // 100 adjusted, 50%
-            (make_move(1, 9), 101), // 100 adjusted, 50%
-        ];
-        let mut rng = StdRng::seed_from_u64(42);
-        let mut count_first = 0;
-        let trials = 200;
-        for _ in 0..trials {
-            let mv = sample_top_p(&policy, 0.5, &mut rng).unwrap();
-            if mv.from == 0 {
-                count_first += 1;
-            }
-        }
-        // With p=0.5 and first move at 50%, only first move is in nucleus
-        assert_eq!(
-            count_first, trials,
-            "First move at exactly 50% should satisfy p=0.5"
-        );
-    }
-
-    #[test]
-    fn test_top_p_fallback_on_zero_counts() {
-        // All moves with 1 visit (0 adjusted) — should fall back to most-visited
+    fn test_proportional_fallback_on_zero_counts() {
+        // All moves with 1 visit (0 adjusted) — should fall back to greedy
         let policy = vec![(make_move(0, 8), 1), (make_move(1, 9), 1)];
         let mut rng = StdRng::seed_from_u64(42);
-        let mv = sample_top_p(&policy, 1.0, &mut rng);
+        let mv = sample_proportional(&policy, &mut rng);
         assert!(mv.is_some());
     }
 
     #[test]
-    fn test_top_p_empty_policy() {
+    fn test_proportional_empty_policy() {
         let mut rng = StdRng::seed_from_u64(42);
-        assert!(sample_top_p(&[], 1.0, &mut rng).is_none());
+        assert!(sample_proportional(&[], &mut rng).is_none());
     }
 
     #[test]
-    fn test_top_p_decay_formula() {
-        // p = 0.95^(move_number - 1), so move 1 gets p=1.0
-        let p_move1 = DEFAULT_TOP_P_BASE.powi(0); // move 1
-        let p_move2 = DEFAULT_TOP_P_BASE.powi(1); // move 2
-        let p_move11 = DEFAULT_TOP_P_BASE.powi(10); // move 11
-        let p_move31 = DEFAULT_TOP_P_BASE.powi(30); // move 31
+    fn test_explore_decay_formula() {
+        // p = 0.90^(move_number - 1), so move 1 gets p=1.0
+        let p_move1 = DEFAULT_EXPLORE_BASE.powi(0); // move 1
+        let p_move2 = DEFAULT_EXPLORE_BASE.powi(1); // move 2
+        let p_move11 = DEFAULT_EXPLORE_BASE.powi(10); // move 11
+        let p_move31 = DEFAULT_EXPLORE_BASE.powi(30); // move 31
 
         assert!((p_move1 - 1.0).abs() < 1e-9);
-        assert!((p_move2 - 0.95).abs() < 1e-9);
-        assert!((p_move11 - 0.5987).abs() < 0.001);
-        assert!((p_move31 - 0.2146).abs() < 0.001);
+        assert!((p_move2 - 0.90).abs() < 1e-9);
+        assert!(p_move11 < 0.36); // 0.9^10 ≈ 0.349
+        assert!(p_move31 < 0.05); // 0.9^30 ≈ 0.042
     }
 
     #[test]
