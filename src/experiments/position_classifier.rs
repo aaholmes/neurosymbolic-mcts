@@ -68,7 +68,7 @@ impl<'a> PositionClassifier<'a> {
         use crate::search::mate_search;
 
         let mut stack = BoardStack::with_board(board.clone());
-        let (score, _, _) = mate_search(&mut stack, self.move_gen, depth, false);
+        let (score, _, _) = mate_search(&mut stack, self.move_gen, depth, false, 3);
 
         score.abs() >= 1_000_000
     }

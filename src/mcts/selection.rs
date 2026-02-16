@@ -415,7 +415,10 @@ mod tests {
             .map(|c| c.borrow().action.unwrap())
             .collect();
 
-        assert_eq!(order1, order2, "Non-shuffled expansion should be deterministic");
+        assert_eq!(
+            order1, order2,
+            "Non-shuffled expansion should be deterministic"
+        );
     }
 
     #[test]
@@ -438,10 +441,7 @@ mod tests {
         }
 
         // At least 2 out of 5 should differ (probability of all identical = 1/20!^4 ≈ 0)
-        let distinct = orderings
-            .iter()
-            .filter(|o| **o != orderings[0])
-            .count();
+        let distinct = orderings.iter().filter(|o| **o != orderings[0]).count();
         assert!(
             distinct >= 1,
             "Shuffled expansion should produce varied orderings"

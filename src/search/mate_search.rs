@@ -1,12 +1,18 @@
-//! Checks-only mate search algorithm.
+//! Mate search algorithm with configurable exhaustive depth.
 //!
-//! Searches for forced mates where every move by the attacker gives check.
-//! At depth 5 (the default), this finds mate-in-3: 3 checking moves by the
-//! attacker interleaved with 2 escape attempts by the defender.
+//! Searches for forced mates using iterative deepening with alpha-beta pruning.
+//! The `exhaustive_depth` parameter controls which depths use exhaustive search
+//! (all legal moves) vs checks-only search (only checking moves):
 //!
-//! The search uses iterative deepening with alpha-beta pruning. On the
-//! attacker's plies only checking moves are generated, keeping the branching
-//! factor very small. On the defender's plies all legal moves are tried.
+//! - depth ≤ exhaustive_depth: **exhaustive** — all legal attacker moves tried
+//! - depth > exhaustive_depth: **checks-only** — only checking moves on attacker plies
+//!
+//! With the default exhaustive_depth=3, this gives:
+//! - Mate-in-1 (depth 1): exhaustive
+//! - Mate-in-2 (depth 3): exhaustive — catches quiet-first mates like 1.Qg7! Kh8 2.Qh7#
+//! - Mate-in-3 (depth 5): checks-only — keeps branching manageable
+//!
+//! On the defender's plies all legal moves are always tried.
 //!
 //! # Integration with MCTS
 //!
@@ -34,7 +40,7 @@
 //! let move_gen = MoveGen::new();
 //!
 //! // Search for mate up to depth 6 (3 moves each side)
-//! let (score, best_move, nodes) = mate_search(&mut board, &move_gen, 6, false);
+//! let (score, best_move, nodes) = mate_search(&mut board, &move_gen, 6, false, 3);
 //!
 //! if score >= 1_000_000 {
 //!     println!("Forced mate found! Play: {:?}", best_move);
@@ -105,21 +111,25 @@ impl SearchContext {
     }
 }
 
-/// Public API: Checks-only mate search (Spearhead strategy).
+/// Public API: Mate search with configurable exhaustive depth.
 ///
-/// Searches for forced mates where every move by the side to move gives check.
-/// At depth 5 this finds mate-in-3 (3 checking moves, 2 opponent replies).
+/// Searches for forced mates using iterative deepening. Depths ≤ `exhaustive_depth`
+/// use exhaustive search (all legal attacker moves), while deeper levels use
+/// checks-only search. Default exhaustive_depth=3 makes mate-in-1 and mate-in-2
+/// exhaustive, and mate-in-3 checks-only.
+///
 /// Single-threaded to avoid rayon/mutex overhead on every MCTS leaf node.
 pub fn mate_search(
     board: &mut BoardStack,
     move_gen: &MoveGen,
     max_depth: i32,
     _verbose: bool,
+    exhaustive_depth: i32,
 ) -> (i32, Move, i32) {
     let total_budget = 100_000;
     let context = SearchContext::new(total_budget);
 
-    iterative_deepening_wrapper(&context, board, move_gen, max_depth);
+    iterative_deepening_wrapper(&context, board, move_gen, max_depth, exhaustive_depth);
 
     let final_res = context.best_result.lock().unwrap().clone();
     let nodes_searched = total_budget - context.nodes_remaining.load(Ordering::Relaxed);
@@ -147,6 +157,7 @@ fn iterative_deepening_wrapper(
     board: &mut BoardStack,
     move_gen: &MoveGen,
     max_depth: i32,
+    exhaustive_depth: i32,
 ) {
     for d in 1..=max_depth {
         if ctx.should_stop() {
@@ -154,9 +165,18 @@ fn iterative_deepening_wrapper(
         }
 
         let depth = 2 * d - 1; // Only check odd depths (mate for us)
+        let checks_only = depth > exhaustive_depth;
 
-        let (score, best_move) =
-            mate_search_recursive(ctx, board, move_gen, depth, -1_000_001, 1_000_001, true);
+        let (score, best_move) = mate_search_recursive(
+            ctx,
+            board,
+            move_gen,
+            depth,
+            -1_000_001,
+            1_000_001,
+            true,
+            checks_only,
+        );
 
         // If we found a forced mate at the root, report it
         if score >= 1_000_000 && best_move != Move::null() {
@@ -176,11 +196,11 @@ fn iterative_deepening_wrapper(
     }
 }
 
-/// Checks-only recursive mate search with alpha-beta pruning.
+/// Recursive mate search with alpha-beta pruning.
 ///
-/// At root plies (side_to_move_is_root's color), only checking moves are
-/// considered. At opponent plies, all legal moves are searched (the opponent
-/// tries to escape). This finds forced mates where every attacker move is check.
+/// When `checks_only` is true, only checking moves are considered on the
+/// attacker's plies. When false, all legal moves are tried (exhaustive).
+/// On the defender's plies, all legal moves are always searched.
 fn mate_search_recursive(
     ctx: &SearchContext,
     board: &mut BoardStack,
@@ -189,6 +209,7 @@ fn mate_search_recursive(
     mut alpha: i32,
     beta: i32,
     is_attackers_turn: bool,
+    checks_only: bool,
 ) -> (i32, Move) {
     ctx.decrement_nodes();
     if ctx.should_stop() {
@@ -223,8 +244,9 @@ fn mate_search_recursive(
             board.make_move(m);
             if board.current_state().is_legal(move_gen) {
                 if is_attackers_turn {
-                    // Only keep checking moves
-                    if board.current_state().is_check(move_gen) {
+                    // In checks-only mode, only keep checking moves
+                    // In exhaustive mode, keep all legal moves
+                    if !checks_only || board.current_state().is_check(move_gen) {
                         legal_moves.push(m);
                     }
                 } else {
@@ -257,6 +279,7 @@ fn mate_search_recursive(
             -beta,
             -alpha,
             !is_attackers_turn,
+            checks_only,
         );
 
         score = -score;

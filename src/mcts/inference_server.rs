@@ -54,7 +54,8 @@ impl InferenceServer {
 
                 // 3. Process Batch
                 let boards: Vec<Board> = requests.iter().map(|r| r.board.clone()).collect();
-                let qsearch_flags: Vec<bool> = requests.iter().map(|r| r.qsearch_completed).collect();
+                let qsearch_flags: Vec<bool> =
+                    requests.iter().map(|r| r.qsearch_completed).collect();
                 let results = nn.predict_batch(&boards, &qsearch_flags);
 
                 // 4. Dispatch Results

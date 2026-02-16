@@ -283,7 +283,10 @@ fn test_material_qsearch_quiet_position() {
         result, 0,
         "Starting position material balance should be 0, got {result}"
     );
-    assert!(completed, "Starting position Q-search should complete (no captures available)");
+    assert!(
+        completed,
+        "Starting position Q-search should complete (no captures available)"
+    );
 }
 
 #[test]
@@ -431,7 +434,10 @@ fn test_material_qsearch_completion_single_recapture() {
     let mut stack = BoardStack::with_board(board);
 
     let (_, completed) = forced_material_balance(&mut stack, &move_gen);
-    assert!(completed, "Short capture-recapture sequence within depth 8 should complete");
+    assert!(
+        completed,
+        "Short capture-recapture sequence within depth 8 should complete"
+    );
 }
 
 #[test]
@@ -441,13 +447,16 @@ fn test_material_qsearch_incomplete_deep_captures() {
     // Each side has many pieces that can capture: this should produce a deep capture tree
     // that potentially exceeds depth 8.
     // Position: pieces on every other square creating maximum cross-capture potential
-    let board = Board::new_from_fen(
-        "r1b1k1nr/ppNpBppp/2n5/q3P3/2Bp4/4P3/PP3PPP/R2QK1NR w KQkq - 0 1"
-    );
+    let board =
+        Board::new_from_fen("r1b1k1nr/ppNpBppp/2n5/q3P3/2Bp4/4P3/PP3PPP/R2QK1NR w KQkq - 0 1");
     let mut stack = BoardStack::with_board(board);
 
     let (val, _completed) = forced_material_balance(&mut stack, &move_gen);
     // We mainly care that the function runs and returns; the completion flag may or may not be true
     // depending on the exact capture tree depth
-    assert!(val > -100 && val < 100, "Value should be reasonable: {}", val);
+    assert!(
+        val > -100 && val < 100,
+        "Value should be reasonable: {}",
+        val
+    );
 }

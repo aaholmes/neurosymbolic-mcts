@@ -14,7 +14,7 @@ pub struct TrainingSample {
     pub value_target: f32,              // +1 (Win), -1 (Loss), 0 (Draw)
     pub material_scalar: f32,
     pub qsearch_completed: bool, // True if Q-search resolved all captures within depth limit
-    pub w_to_move: bool, // Side to move when sample was taken
+    pub w_to_move: bool,         // Side to move when sample was taken
 }
 
 /// Serialize training samples to a binary file compatible with the Python training script.

@@ -19,14 +19,14 @@ fn test_mate_search_checks_only() {
         "h5f7",
     );
 
-    // Test 2: Quiet setup move required — checks-only should NOT find this
+    // Test 2: Quiet setup move required — exhaustive mate-in-2 finds this
     // King + Rook vs King. Requires 1. Kg6 (quiet) before Ra8#.
     run_mate_test_case(
-        "Quiet Move Required (should miss)",
+        "Quiet Move Required (found by exhaustive)",
         "7k/R7/5K2/8/8/8/8/8 w - - 0 1",
         &move_gen,
-        false,
-        "",
+        true,
+        "f6g6",
     );
 
     // Test 3: Starting position — no mate exists
@@ -60,7 +60,7 @@ fn run_mate_test_case(
     let mut stack = BoardStack::with_board(board);
 
     let start = Instant::now();
-    let (score, best_move, _nodes) = mate_search(&mut stack, move_gen, 5, false);
+    let (score, best_move, _nodes) = mate_search(&mut stack, move_gen, 5, false, 3);
     let duration = start.elapsed();
 
     println!(

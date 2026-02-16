@@ -11,9 +11,9 @@ use kingfisher::mcts::{
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::neural_net::NeuralNetPolicy;
-use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::search::mate_search;
 use kingfisher::search::quiescence::forced_material_balance;
+use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
 use kingfisher::transposition::TranspositionTable;
@@ -232,7 +232,7 @@ fn play_game(
             // Check mate gate
             {
                 let mut temp_stack = BoardStack::with_board(board.clone());
-                let (score, _, _) = mate_search(&mut temp_stack, &move_gen, 5, false);
+                let (score, _, _) = mate_search(&mut temp_stack, &move_gen, 5, false, 3);
                 if score >= 1_000_000 {
                     let mate_plies = score - 1_000_000;
                     let score_white = if board.w_to_move { 1.0 } else { -1.0 };
@@ -291,7 +291,8 @@ fn play_game(
         }
 
         let mut temp_stack = BoardStack::with_board(board.clone());
-        let (material_balance, qsearch_completed) = forced_material_balance(&mut temp_stack, &move_gen);
+        let (material_balance, qsearch_completed) =
+            forced_material_balance(&mut temp_stack, &move_gen);
         let material_scalar = material_balance as f32;
 
         samples.push(TrainingSample {
@@ -394,17 +395,14 @@ fn play_game(
                     // Play out forced mate: mate_search for winning side, first legal for losing
                     for _ in 0..20 {
                         let board = temp_stack.current_state();
-                        let (is_mate, is_stalemate) =
-                            board.is_checkmate_or_stalemate(&move_gen);
+                        let (is_mate, is_stalemate) = board.is_checkmate_or_stalemate(&move_gen);
                         if is_mate || is_stalemate {
                             break;
                         }
 
-                        let (score, mv, _) =
-                            mate_search(&mut temp_stack, &move_gen, 5, false);
+                        let (score, mv, _) = mate_search(&mut temp_stack, &move_gen, 5, false, 3);
                         if score >= 1_000_000 {
-                            game_moves
-                                .push(mv.to_san(temp_stack.current_state(), &move_gen));
+                            game_moves.push(mv.to_san(temp_stack.current_state(), &move_gen));
                             temp_stack.make_move(mv);
                         } else {
                             // Losing side — pick first legal move
@@ -413,15 +411,12 @@ fn play_game(
                             let legal: Vec<Move> = caps
                                 .iter()
                                 .chain(quiets.iter())
-                                .filter(|&&m| {
-                                    board.apply_move_to_board(m).is_legal(&move_gen)
-                                })
+                                .filter(|&&m| board.apply_move_to_board(m).is_legal(&move_gen))
                                 .cloned()
                                 .collect();
                             if let Some(&response) = legal.first() {
-                                game_moves.push(
-                                    response.to_san(temp_stack.current_state(), &move_gen),
-                                );
+                                game_moves
+                                    .push(response.to_san(temp_stack.current_state(), &move_gen));
                                 temp_stack.make_move(response);
                             } else {
                                 break; // Checkmate
@@ -433,8 +428,7 @@ fn play_game(
                     // Play out forced KOTH: koth_best_move for winning side, first legal for losing
                     for _ in 0..20 {
                         let board = temp_stack.current_state();
-                        let (is_mate, is_stalemate) =
-                            board.is_checkmate_or_stalemate(&move_gen);
+                        let (is_mate, is_stalemate) = board.is_checkmate_or_stalemate(&move_gen);
                         if is_mate || is_stalemate {
                             break;
                         }
@@ -446,8 +440,7 @@ fn play_game(
                         }
 
                         if let Some(mv) = koth_best_move(board, &move_gen) {
-                            game_moves
-                                .push(mv.to_san(temp_stack.current_state(), &move_gen));
+                            game_moves.push(mv.to_san(temp_stack.current_state(), &move_gen));
                             temp_stack.make_move(mv);
                         } else {
                             // Losing side or no forced KOTH move — pick first legal
@@ -456,15 +449,12 @@ fn play_game(
                             let legal: Vec<Move> = caps
                                 .iter()
                                 .chain(quiets.iter())
-                                .filter(|&&m| {
-                                    board.apply_move_to_board(m).is_legal(&move_gen)
-                                })
+                                .filter(|&&m| board.apply_move_to_board(m).is_legal(&move_gen))
                                 .cloned()
                                 .collect();
                             if let Some(&response) = legal.first() {
-                                game_moves.push(
-                                    response.to_san(temp_stack.current_state(), &move_gen),
-                                );
+                                game_moves
+                                    .push(response.to_san(temp_stack.current_state(), &move_gen));
                                 temp_stack.make_move(response);
                             } else {
                                 break;
@@ -584,10 +574,7 @@ fn play_game(
             result_str
         );
         println!("{}", move_str);
-        println!(
-            "Final FEN: {}",
-            display_board.to_fen().unwrap_or_default()
-        );
+        println!("Final FEN: {}", display_board.to_fen().unwrap_or_default());
         println!();
     }
 

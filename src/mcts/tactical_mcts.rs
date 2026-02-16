@@ -15,8 +15,8 @@ use crate::mcts::selection::select_child_with_tactical_priority;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use crate::search::forced_material_balance;
-use crate::search::{koth_best_move, koth_center_in_3};
 use crate::search::mate_search;
+use crate::search::{koth_best_move, koth_center_in_3};
 use crate::transposition::TranspositionTable;
 use rand_distr::{Distribution, Gamma};
 use std::cell::RefCell;
@@ -30,6 +30,9 @@ pub struct TacticalMctsConfig {
     pub max_iterations: u32,
     pub time_limit: Duration,
     pub mate_search_depth: i32,
+    /// Max ply depth for exhaustive (all-moves) mate search. Depths above this use checks-only.
+    /// Default 3 = exhaustive mate-in-1 and mate-in-2, checks-only mate-in-3.
+    pub exhaustive_mate_depth: i32,
     pub exploration_constant: f64,
     pub use_neural_policy: bool,
     pub inference_server: Option<Arc<InferenceServer>>,
@@ -61,6 +64,7 @@ impl Default for TacticalMctsConfig {
             max_iterations: 1000,
             time_limit: Duration::from_secs(5),
             mate_search_depth: 5,
+            exhaustive_mate_depth: 3,
             exploration_constant: 1.414,
             use_neural_policy: true,
             inference_server: None,
@@ -218,6 +222,7 @@ pub fn tactical_mcts_search_with_tt(
             move_gen,
             config.mate_search_depth,
             false,
+            config.exhaustive_mate_depth,
         );
 
         if let Some(log) = logger {
@@ -453,8 +458,13 @@ fn evaluate_leaf_node(
         } else {
             stats.tt_mate_misses += 1;
             let mut board_stack = BoardStack::with_board(board.clone());
-            let mate_result =
-                mate_search(&mut board_stack, move_gen, config.mate_search_depth, false);
+            let mate_result = mate_search(
+                &mut board_stack,
+                move_gen,
+                config.mate_search_depth,
+                false,
+                config.exhaustive_mate_depth,
+            );
             transposition_table.store_mate_result(
                 board,
                 mate_result.0.abs(),
@@ -502,7 +512,6 @@ fn evaluate_leaf_node(
         }
 
         if config.enable_material_value {
-
             if v_logit.is_finite() {
                 // NN path: combine v_logit + k * delta_M
                 let final_value = (v_logit + k_val as f64 * delta_m as f64).tanh();

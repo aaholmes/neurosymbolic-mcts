@@ -326,7 +326,8 @@ pub fn play_evaluation_game_with_servers(
                 }
 
                 let mut temp_stack = BoardStack::with_board(board.clone());
-                let (material_balance, qsearch_completed) = forced_material_balance(&mut temp_stack, &move_gen);
+                let (material_balance, qsearch_completed) =
+                    forced_material_balance(&mut temp_stack, &move_gen);
                 let material_scalar = material_balance as f32;
 
                 let sample = TrainingSample {
@@ -994,9 +995,9 @@ mod tests {
     fn test_top_p_1_samples_all_moves() {
         // With p=1.0, all moves are in the nucleus
         let policy = vec![
-            (make_move(0, 8), 100),  // ~50%
-            (make_move(1, 9), 60),   // ~30%
-            (make_move(2, 10), 40),  // ~20%
+            (make_move(0, 8), 100), // ~50%
+            (make_move(1, 9), 60),  // ~30%
+            (make_move(2, 10), 40), // ~20%
         ];
         let mut rng = StdRng::seed_from_u64(42);
         let mut seen = std::collections::HashSet::new();
@@ -1028,9 +1029,9 @@ mod tests {
     fn test_top_p_excludes_low_count_moves() {
         // p=0.5 should include only the top move (which has ~57% mass)
         let policy = vec![
-            (make_move(0, 8), 201),  // 200 adjusted, ~57%
-            (make_move(1, 9), 101),  // 100 adjusted, ~29%
-            (make_move(2, 10), 51),  // 50 adjusted, ~14%
+            (make_move(0, 8), 201), // 200 adjusted, ~57%
+            (make_move(1, 9), 101), // 100 adjusted, ~29%
+            (make_move(2, 10), 51), // 50 adjusted, ~14%
         ];
         let mut rng = StdRng::seed_from_u64(42);
         let mut seen = std::collections::HashSet::new();
@@ -1039,7 +1040,11 @@ mod tests {
             seen.insert((mv.from, mv.to));
         }
         // Only the top move should appear (57% >= 50%)
-        assert_eq!(seen.len(), 1, "Only top move should appear with p=0.5 when top has 57%");
+        assert_eq!(
+            seen.len(),
+            1,
+            "Only top move should appear with p=0.5 when top has 57%"
+        );
     }
 
     #[test]
@@ -1047,27 +1052,29 @@ mod tests {
         // Two moves with equal counts — p=0.5 needs both (each is 50%)
         // First move reaches exactly 50%, so it gets included and loop breaks
         let policy = vec![
-            (make_move(0, 8), 101),  // 100 adjusted, 50%
-            (make_move(1, 9), 101),  // 100 adjusted, 50%
+            (make_move(0, 8), 101), // 100 adjusted, 50%
+            (make_move(1, 9), 101), // 100 adjusted, 50%
         ];
         let mut rng = StdRng::seed_from_u64(42);
         let mut count_first = 0;
         let trials = 200;
         for _ in 0..trials {
             let mv = sample_top_p(&policy, 0.5, &mut rng).unwrap();
-            if mv.from == 0 { count_first += 1; }
+            if mv.from == 0 {
+                count_first += 1;
+            }
         }
         // With p=0.5 and first move at 50%, only first move is in nucleus
-        assert_eq!(count_first, trials, "First move at exactly 50% should satisfy p=0.5");
+        assert_eq!(
+            count_first, trials,
+            "First move at exactly 50% should satisfy p=0.5"
+        );
     }
 
     #[test]
     fn test_top_p_fallback_on_zero_counts() {
         // All moves with 1 visit (0 adjusted) — should fall back to most-visited
-        let policy = vec![
-            (make_move(0, 8), 1),
-            (make_move(1, 9), 1),
-        ];
+        let policy = vec![(make_move(0, 8), 1), (make_move(1, 9), 1)];
         let mut rng = StdRng::seed_from_u64(42);
         let mv = sample_top_p(&policy, 1.0, &mut rng);
         assert!(mv.is_some());
@@ -1082,8 +1089,8 @@ mod tests {
     #[test]
     fn test_top_p_decay_formula() {
         // p = 0.95^(move_number - 1), so move 1 gets p=1.0
-        let p_move1 = DEFAULT_TOP_P_BASE.powi(0);   // move 1
-        let p_move2 = DEFAULT_TOP_P_BASE.powi(1);   // move 2
+        let p_move1 = DEFAULT_TOP_P_BASE.powi(0); // move 1
+        let p_move2 = DEFAULT_TOP_P_BASE.powi(1); // move 2
         let p_move11 = DEFAULT_TOP_P_BASE.powi(10); // move 11
         let p_move31 = DEFAULT_TOP_P_BASE.powi(30); // move 31
 
@@ -1096,10 +1103,10 @@ mod tests {
     #[test]
     fn test_move_number_from_ply() {
         // Both sides on the same move get the same move_number
-        assert_eq!((0u32 / 2) + 1, 1);  // ply 0 (white move 1) → move 1
-        assert_eq!((1u32 / 2) + 1, 1);  // ply 1 (black move 1) → move 1
-        assert_eq!((2u32 / 2) + 1, 2);  // ply 2 (white move 2) → move 2
-        assert_eq!((3u32 / 2) + 1, 2);  // ply 3 (black move 2) → move 2
+        assert_eq!((0u32 / 2) + 1, 1); // ply 0 (white move 1) → move 1
+        assert_eq!((1u32 / 2) + 1, 1); // ply 1 (black move 1) → move 1
+        assert_eq!((2u32 / 2) + 1, 2); // ply 2 (white move 2) → move 2
+        assert_eq!((3u32 / 2) + 1, 2); // ply 3 (black move 2) → move 2
         assert_eq!((18u32 / 2) + 1, 10); // ply 18 (white move 10) → move 10
         assert_eq!((19u32 / 2) + 1, 10); // ply 19 (black move 10) → move 10
     }

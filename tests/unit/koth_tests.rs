@@ -191,8 +191,7 @@ fn test_koth_in_2_detected_at_root() {
     let move_gen = setup();
     // After 1. e3 h6 2. Ke2 a6 — White has forced KOTH-in-2: Kd3 then Kd4/Ke4
     // No black piece can block both d4 and e4 in one move
-    let board =
-        Board::new_from_fen("rnbqkbnr/1pppppp1/p6p/8/8/4P3/PPPPKPPP/RNBQ1BNR w kq - 0 3");
+    let board = Board::new_from_fen("rnbqkbnr/1pppppp1/p6p/8/8/4P3/PPPPKPPP/RNBQ1BNR w kq - 0 3");
 
     // koth_center_in_3 should detect it
     let dist = koth_center_in_3(&board, &move_gen);
@@ -229,9 +228,11 @@ fn test_koth_in_2_blocked_by_queen_diagonal() {
     // After 1. e3 h6 2. Ke2 e6 — e6 opens the d8-h4 diagonal.
     // After Kd3, black plays Qh4 which controls BOTH d4 and e4 along rank 4.
     // So KOTH-in-2 is NOT forced (unlike the a6 position).
-    let board =
-        Board::new_from_fen("rnbqkbnr/pppp1pp1/4p2p/8/8/4P3/PPPPKPPP/RNBQ1BNR w kq - 0 3");
+    let board = Board::new_from_fen("rnbqkbnr/pppp1pp1/4p2p/8/8/4P3/PPPPKPPP/RNBQ1BNR w kq - 0 3");
 
     let dist = koth_center_in_3(&board, &move_gen);
-    assert_eq!(dist, None, "Qh4 defense blocks forced KOTH — no forced win in 3");
+    assert_eq!(
+        dist, None,
+        "Qh4 defense blocks forced KOTH — no forced win in 3"
+    );
 }

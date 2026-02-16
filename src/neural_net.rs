@@ -133,7 +133,11 @@ mod real {
         }
 
         /// Runs inference on the board. Returns (policy_probs, value, k).
-        pub fn predict(&mut self, board: &Board, qsearch_completed: bool) -> Option<(Vec<f32>, f32, f32)> {
+        pub fn predict(
+            &mut self,
+            board: &Board,
+            qsearch_completed: bool,
+        ) -> Option<(Vec<f32>, f32, f32)> {
             let model = self.model.as_ref()?;
             let input = self.board_to_tensor(board).unsqueeze(0);
 
@@ -149,7 +153,10 @@ mod real {
             let ivalue = model
                 .method_is(
                     "forward",
-                    &[tch::IValue::Tensor(input), tch::IValue::Tensor(scalars_tensor)],
+                    &[
+                        tch::IValue::Tensor(input),
+                        tch::IValue::Tensor(scalars_tensor),
+                    ],
                 )
                 .ok()?;
 
@@ -336,10 +343,18 @@ mod stub {
         pub fn board_to_tensor(&self, _board: &Board) -> () {
             ()
         }
-        pub fn predict(&mut self, _board: &Board, _qsearch_completed: bool) -> Option<(Vec<f32>, f32, f32)> {
+        pub fn predict(
+            &mut self,
+            _board: &Board,
+            _qsearch_completed: bool,
+        ) -> Option<(Vec<f32>, f32, f32)> {
             None
         }
-        pub fn predict_batch(&mut self, boards: &[Board], _qsearch_flags: &[bool]) -> Vec<Option<(Vec<f32>, f32, f32)>> {
+        pub fn predict_batch(
+            &mut self,
+            boards: &[Board],
+            _qsearch_flags: &[bool],
+        ) -> Vec<Option<(Vec<f32>, f32, f32)>> {
             vec![None; boards.len()]
         }
         pub fn policy_to_move_priors(
