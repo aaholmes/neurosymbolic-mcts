@@ -159,6 +159,7 @@ def main():
     ax.set_title('Caissawary: Tiered vs Vanilla MCTS on KOTH Chess', fontsize=14)
     ax.legend(fontsize=11, loc='lower right')
     ax.set_xlim(-0.5, max_gen + 0.5)
+    ax.set_xticks(range(0, max_gen + 1, 5))
     ax.set_ylim(1400, None)
     ax.grid(True, alpha=0.3)
 

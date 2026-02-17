@@ -45,44 +45,15 @@ OracleNet is a configurable SE-ResNet (default: 6 blocks, 128 channels, ~2M para
 
 The $k$ head uses domain knowledge rather than learned convolutions: 12 scalar features (pawn counts, piece counts, queen presence, pawn contacts, castling rights, king rank, and bishop square-color presence for detecting opposite-colored bishop endgames and bishop pair advantage), a Q-search completion flag (indicating whether the depth-8 quiescence search resolved naturally or hit its depth limit — letting $k$ discount unreliable material in deeply tactical positions), plus two 5x5 spatial patches centered on each king, combined via small FC layers (~22k parameters). This lets $k$ reason about king safety, material convertibility, Q-search reliability, and piece-specific endgame dynamics without needing to learn these patterns from scratch.
 
-## Tournament Results: Tiered vs Vanilla
+## Tournament Results: Caissawary vs Vanilla MCTS
 
-A 14-model round-robin tournament compared two training runs using the same small architecture (2 blocks, 64 channels, ~240K parameters):
-- **Tiered** (6 models): trained with all three tiers (safety gates + material + KOTH)
-- **Vanilla** (8 models): trained with KOTH only (no tier 1, no material — pure AlphaZero-style)
+A 10-model adaptive round-robin tournament compared two training runs using 6 blocks, 128 channels (~2M parameters) at 400 MCTS simulations per move:
+- **Caissawary** (4 models): trained with all three tiers (safety gates + quiescence search + neural network)
+- **Vanilla** (6 models): trained with KOTH only (no tier 1, no material — pure AlphaZero-style)
 
-Each pair played 30 games at 100 MCTS simulations per move (C(14,2) = 91 pairs, 2,730 total games). Move selection used proportional sampling for the first 10 plies and greedy (most-visited child) thereafter.
+The adaptive tournament uses bootstrap CI to focus games on consecutive-rank pairs with the most uncertain Elo gaps, achieving all 95% CIs below 50 Elo.
 
-![Elo vs Generation](tournament_results_14way_elo_plot.png)
-
-| Rank | Model | Elo | Type |
-|------|-------|-----|------|
-| 1 | tiered_gen19 | 1627 ± 19 | Tiered |
-| 2 | tiered_gen9 | 1623 ± 20 | Tiered |
-| 3 | tiered_gen14 | 1622 ± 18 | Tiered |
-| 4 | tiered_gen5 | 1592 ± 17 | Tiered |
-| 5 | tiered_gen2 | 1567 ± 17 | Tiered |
-| 6 | vanilla_gen33 | 1520 ± 21 | Vanilla |
-| 7 | vanilla_gen40 | 1517 ± 21 | Vanilla |
-| 8 | tiered_gen0 | 1495 ± 16 | Tiered |
-| 9 | vanilla_gen28 | 1466 ± 21 | Vanilla |
-| 10 | vanilla_gen25 | 1431 ± 20 | Vanilla |
-| 11 | vanilla_gen8 | 1419 ± 21 | Vanilla |
-| 12 | vanilla_gen2 | 1397 ± 22 | Vanilla |
-| 13 | vanilla_gen1 | 1389 ± 23 | Vanilla |
-| 14 | vanilla_gen0 | 1336 ± 25 | Vanilla |
-
-**Key findings:**
-- All five trained tiered models outrank all vanilla models. Even tiered_gen2 (1567) beats vanilla_gen33 (1520), the best vanilla model after 33 accepted generations.
-- Vanilla training improved substantially (+184 Elo from gen0 to gen33), but the tiered system's classical components provide a head start that pure NN training cannot overcome with this architecture and compute budget.
-- Tiered training plateaus early: gen9 (1623) through gen19 (1627) are statistically indistinguishable, suggesting the safety gates and material evaluation front-load much of the playing strength.
-- tiered_gen0 (1495), with a *zero-initialized* NN, already outperforms all vanilla models through gen8 (1419). The classical fallback $\tanh(0.5 \cdot \Delta M)$ alone provides meaningful play.
-
-### Scale-Up: 2M Parameters, 400 Simulations
-
-A follow-up 10-model adaptive tournament used a larger architecture (6 blocks, 128 channels, ~2M parameters) at 400 MCTS simulations per move — 8x the compute per move and 8x the model capacity. The adaptive tournament uses bootstrap CI to focus games on consecutive-rank pairs with the most uncertain Elo gaps, achieving all CIs below 50 Elo.
-
-![Elo vs Generation (2M params)](tournament_results_10model_elo_plot.png)
+![Elo vs Generation](tournament_results_10model_elo_plot.png)
 
 | Rank | Model | Elo | 95% CI | Type |
 |------|-------|-----|--------|------|
@@ -97,7 +68,10 @@ A follow-up 10-model adaptive tournament used a larger architecture (6 blocks, 1
 | 9 | vanilla_gen6 | 1616 | [1569, 1667] | Vanilla |
 | 10 | vanilla_gen0 | 1500 | (anchor) | Vanilla |
 
-The gap widens with scale: tiered_gen0 (1844) with a *zero-initialized* NN exceeds vanilla_gen18 (1726), the best vanilla model after 18 accepted generations. Tiered continues gaining through gen17 (+354 Elo over tiered_gen0), while vanilla plateaus around 1620 from gen2–13 before a late bump to 1726 at gen18.
+**Key findings:**
+- All Caissawary models outrank all vanilla models. Even tiered_gen0 (1844) with a *zero-initialized* NN exceeds vanilla_gen18 (1726), the best vanilla model after 18 accepted generations.
+- Caissawary continues gaining through gen17 (+354 Elo over tiered_gen0), while vanilla plateaus around 1620 from gen2–13 before a late bump to 1726 at gen18.
+- The classical fallback alone ($V_{logit}=0$, $k=0.5$: $V_{final} = \tanh(0.5 \cdot \Delta M)$) provides stronger play than 18 generations of pure NN training.
 
 ### Elo Methodology
 
