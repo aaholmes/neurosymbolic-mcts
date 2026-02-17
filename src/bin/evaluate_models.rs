@@ -23,6 +23,7 @@ use rand::SeedableRng;
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -41,6 +42,7 @@ pub struct EvalResults {
     pub wins: u32,
     pub losses: u32,
     pub draws: u32,
+    pub reasons: HashMap<&'static str, u32>,
 }
 
 impl EvalResults {
@@ -55,11 +57,22 @@ impl EvalResults {
     pub fn accepted(&self, threshold: f64) -> bool {
         self.win_rate() >= threshold
     }
+
+    pub fn reason_summary(&self) -> String {
+        let mut reasons: Vec<_> = self.reasons.iter().collect();
+        reasons.sort_by(|a, b| b.1.cmp(a.1));
+        reasons
+            .iter()
+            .map(|(reason, count)| format!("{}:{}", reason, count))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// Result of a single evaluation game with optional training data.
 pub struct EvalGameData {
     pub result: GameResult,
+    pub reason: &'static str,
     pub candidate_samples: Vec<TrainingSample>,
     pub current_samples: Vec<TrainingSample>,
 }
@@ -469,6 +482,7 @@ pub fn play_evaluation_game_with_servers(
 
     EvalGameData {
         result,
+        reason: result_str,
         candidate_samples,
         current_samples,
     }
@@ -517,6 +531,7 @@ pub fn evaluate_models_koth(
                 wins: 0,
                 losses: 0,
                 draws: 0,
+                reasons: HashMap::new(),
             };
         }
         Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
@@ -530,6 +545,7 @@ pub fn evaluate_models_koth(
                 wins: 0,
                 losses: 0,
                 draws: 0,
+                reasons: HashMap::new(),
             };
         }
         Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
@@ -539,6 +555,7 @@ pub fn evaluate_models_koth(
         wins: 0,
         losses: 0,
         draws: 0,
+        reasons: HashMap::new(),
     });
 
     (0..num_games).into_par_iter().for_each(|game_idx| {
@@ -563,6 +580,7 @@ pub fn evaluate_models_koth(
             GameResult::CurrentWin => r.losses += 1,
             GameResult::Draw => r.draws += 1,
         }
+        *r.reasons.entry(game_data.reason).or_insert(0) += 1;
 
         let color_str = if candidate_is_white { "White" } else { "Black" };
         eprintln!(
@@ -611,6 +629,7 @@ pub fn evaluate_models_koth_sprt(
                     wins: 0,
                     losses: 0,
                     draws: 0,
+                    reasons: HashMap::new(),
                 },
                 None,
                 SprtResult::Inconclusive,
@@ -628,6 +647,7 @@ pub fn evaluate_models_koth_sprt(
                     wins: 0,
                     losses: 0,
                     draws: 0,
+                    reasons: HashMap::new(),
                 },
                 None,
                 SprtResult::Inconclusive,
@@ -637,6 +657,8 @@ pub fn evaluate_models_koth_sprt(
     };
 
     let sprt_state = Arc::new(Mutex::new(SprtState::new()));
+    let reason_counts: Arc<Mutex<HashMap<&'static str, u32>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let stop_flag = Arc::new(AtomicBool::new(false));
     let games_completed = Arc::new(Mutex::new(0u32));
     // Record the SPRT decision at the moment it fires, before in-flight games dilute it
@@ -689,6 +711,7 @@ pub fn evaluate_models_koth_sprt(
             GameResult::CurrentWin => state.losses += 1,
             GameResult::Draw => state.draws += 1,
         }
+        *reason_counts.lock().unwrap().entry(game_data.reason).or_insert(0) += 1;
 
         let mut completed = games_completed.lock().unwrap();
         *completed += 1;
@@ -778,6 +801,7 @@ pub fn evaluate_models_koth_sprt(
         wins: final_state.wins,
         losses: final_state.losses,
         draws: final_state.draws,
+        reasons: reason_counts.lock().unwrap().clone(),
     };
 
     // Use the decision captured at the SPRT trigger point, not re-evaluated on
@@ -915,6 +939,9 @@ fn main() {
             .map(|v| format!("{:.2}", v))
             .unwrap_or_else(|| "N/A".to_string());
 
+        // Reason breakdown on stderr
+        eprintln!("Outcomes: {}", results.reason_summary());
+
         // Machine-readable output on stdout (backward-compatible + SPRT fields)
         println!(
             "WINS={} LOSSES={} DRAWS={} WINRATE={:.4} ACCEPTED={} GAMES_PLAYED={} LLR={} SPRT_RESULT={}",
@@ -951,6 +978,8 @@ fn main() {
         let win_rate = results.win_rate();
         let games_played = results.wins + results.losses + results.draws;
         let accepted = results.accepted(threshold);
+
+        eprintln!("Outcomes: {}", results.reason_summary());
 
         println!(
             "WINS={} LOSSES={} DRAWS={} WINRATE={:.4} ACCEPTED={} GAMES_PLAYED={} LLR=N/A SPRT_RESULT=inconclusive",

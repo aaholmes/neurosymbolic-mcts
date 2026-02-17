@@ -621,6 +621,14 @@ class Orchestrator:
         # Accept only if SPRT decided H1
         accepted = sprt_result == "H1"
 
+        # Extract outcome breakdown from stderr
+        outcomes = ""
+        if result.stderr:
+            for line in result.stderr.splitlines():
+                if line.startswith("Outcomes:"):
+                    outcomes = line
+                    break
+
         return accepted, {
             "wins": wins,
             "losses": losses,
@@ -629,6 +637,7 @@ class Orchestrator:
             "games_played": games_played,
             "llr": llr,
             "sprt_result": sprt_result,
+            "outcomes": outcomes,
         }
 
     def _write_overview(self, generation, buffer_size, accepted, eval_results):
@@ -737,6 +746,8 @@ class Orchestrator:
                       f"D:{eval_results['draws']} WR:{eval_results['winrate']:.3f} "
                       f"LLR:{eval_results.get('llr', 'N/A')} -> "
                       f"{'ACCEPTED' if accepted else 'rejected'}")
+                if eval_results.get("outcomes"):
+                    print(f"  {eval_results['outcomes']}")
 
                 if accepted:
                     # Pick the accepted variant with highest winrate
