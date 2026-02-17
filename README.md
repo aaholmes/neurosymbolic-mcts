@@ -47,11 +47,11 @@ The $k$ head uses domain knowledge rather than learned convolutions: 12 scalar f
 
 ## Tournament Results: Caissawary vs Vanilla MCTS
 
-A 10-model adaptive round-robin tournament compared two training runs using 6 blocks, 128 channels (~2M parameters) at 400 MCTS simulations per move:
-- **Caissawary** (4 models): trained with all three tiers (safety gates + quiescence search + neural network)
-- **Vanilla** (6 models): trained with KOTH only (no tier 1, no material — pure AlphaZero-style)
+A 10-model adaptive round-robin tournament compared two training runs — both using 6 blocks, 128 channels (~2M parameters), trained with 200 MCTS simulations per move, SPRT gating (up to 400 eval games), Muon optimizer (lr=0.02), and adaptive epochs with early stopping:
+- **Caissawary** (4 models: gen 0, 1, 4, 17): trained with all three tiers (safety gates + quiescence search + neural network)
+- **Vanilla** (6 models: gen 0, 2, 6, 9, 13, 18): trained with KOTH only (no tier 1, no material — pure AlphaZero-style)
 
-The adaptive tournament uses bootstrap CI to focus games on consecutive-rank pairs with the most uncertain Elo gaps, achieving all 95% CIs below 50 Elo.
+Tournament games used 200 simulations per move with proportional-or-greedy move selection (explore base 0.80). The adaptive tournament uses bootstrap CI to focus games on consecutive-rank pairs with the most uncertain Elo gaps, achieving all 95% CIs below 50 Elo.
 
 ![Elo vs Generation](tournament_results_10model_elo_plot.png)
 
