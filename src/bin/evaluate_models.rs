@@ -184,6 +184,8 @@ pub fn play_evaluation_game(
         false,
         true,
         true,
+        true,
+        true,
         0,
     )
 }
@@ -194,8 +196,10 @@ pub fn play_evaluation_game_koth(
     candidate_is_white: bool,
     simulations: u32,
     enable_koth: bool,
-    enable_tier1: bool,
-    enable_material: bool,
+    candidate_enable_tier1: bool,
+    candidate_enable_material: bool,
+    current_enable_tier1: bool,
+    current_enable_material: bool,
     game_seed: u64,
 ) -> GameResult {
     play_evaluation_game_with_servers(
@@ -204,8 +208,10 @@ pub fn play_evaluation_game_koth(
         candidate_is_white,
         simulations,
         enable_koth,
-        enable_tier1,
-        enable_material,
+        candidate_enable_tier1,
+        candidate_enable_material,
+        current_enable_tier1,
+        current_enable_material,
         game_seed,
         false,
         DEFAULT_EXPLORE_BASE,
@@ -220,8 +226,10 @@ pub fn play_evaluation_game_with_servers(
     candidate_is_white: bool,
     simulations: u32,
     enable_koth: bool,
-    enable_tier1: bool,
-    enable_material: bool,
+    candidate_enable_tier1: bool,
+    candidate_enable_material: bool,
+    current_enable_tier1: bool,
+    current_enable_material: bool,
     game_seed: u64,
     collect_training_data: bool,
     explore_base: f64,
@@ -235,7 +243,7 @@ pub fn play_evaluation_game_with_servers(
     let config_candidate = TacticalMctsConfig {
         max_iterations: simulations,
         time_limit: Duration::from_secs(120),
-        mate_search_depth: if enable_tier1 { 5 } else { 0 },
+        mate_search_depth: if candidate_enable_tier1 { 5 } else { 0 },
         exploration_constant: 1.414,
         use_neural_policy: candidate_has_nn,
         inference_server: candidate_server.clone(),
@@ -243,8 +251,8 @@ pub fn play_evaluation_game_with_servers(
         dirichlet_alpha: 0.0,
         dirichlet_epsilon: 0.0,
         enable_koth,
-        enable_tier1_gate: enable_tier1,
-        enable_material_value: enable_material,
+        enable_tier1_gate: candidate_enable_tier1,
+        enable_material_value: candidate_enable_material,
         enable_tier3_neural: candidate_has_nn,
         randomize_move_order: true,
         ..Default::default()
@@ -253,7 +261,7 @@ pub fn play_evaluation_game_with_servers(
     let config_current = TacticalMctsConfig {
         max_iterations: simulations,
         time_limit: Duration::from_secs(120),
-        mate_search_depth: if enable_tier1 { 5 } else { 0 },
+        mate_search_depth: if current_enable_tier1 { 5 } else { 0 },
         exploration_constant: 1.414,
         use_neural_policy: current_has_nn,
         inference_server: current_server.clone(),
@@ -261,8 +269,8 @@ pub fn play_evaluation_game_with_servers(
         dirichlet_alpha: 0.0,
         dirichlet_epsilon: 0.0,
         enable_koth,
-        enable_tier1_gate: enable_tier1,
-        enable_material_value: enable_material,
+        enable_tier1_gate: current_enable_tier1,
+        enable_material_value: current_enable_material,
         enable_tier3_neural: current_has_nn,
         randomize_move_order: true,
         ..Default::default()
@@ -503,6 +511,8 @@ pub fn evaluate_models(
         false,
         true,
         true,
+        true,
+        true,
         8,
         0,
         DEFAULT_EXPLORE_BASE,
@@ -516,8 +526,10 @@ pub fn evaluate_models_koth(
     num_games: u32,
     simulations: u32,
     enable_koth: bool,
-    enable_tier1: bool,
-    enable_material: bool,
+    candidate_enable_tier1: bool,
+    candidate_enable_material: bool,
+    current_enable_tier1: bool,
+    current_enable_material: bool,
     inference_batch_size: usize,
     seed_offset: u64,
     explore_base: f64,
@@ -567,8 +579,10 @@ pub fn evaluate_models_koth(
             candidate_is_white,
             simulations,
             enable_koth,
-            enable_tier1,
-            enable_material,
+            candidate_enable_tier1,
+            candidate_enable_material,
+            current_enable_tier1,
+            current_enable_material,
             seed_offset + game_idx as u64,
             false,
             explore_base,
@@ -609,8 +623,10 @@ pub fn evaluate_models_koth_sprt(
     max_games: u32,
     simulations: u32,
     enable_koth: bool,
-    enable_tier1: bool,
-    enable_material: bool,
+    candidate_enable_tier1: bool,
+    candidate_enable_material: bool,
+    current_enable_tier1: bool,
+    current_enable_material: bool,
     inference_batch_size: usize,
     sprt_config: &SprtConfig,
     seed_offset: u64,
@@ -682,8 +698,10 @@ pub fn evaluate_models_koth_sprt(
             candidate_is_white,
             simulations,
             enable_koth,
-            enable_tier1,
-            enable_material,
+            candidate_enable_tier1,
+            candidate_enable_material,
+            current_enable_tier1,
+            current_enable_material,
             seed_offset + game_idx as u64,
             collect,
             explore_base,
@@ -847,6 +865,28 @@ fn main() {
     let enable_tier1 = !args.iter().any(|a| a == "--disable-tier1");
     let enable_material = !args.iter().any(|a| a == "--disable-material");
 
+    // Per-side overrides (default to global flags)
+    let candidate_enable_tier1 = if args.iter().any(|a| a == "--candidate-disable-tier1") {
+        false
+    } else {
+        enable_tier1
+    };
+    let candidate_enable_material = if args.iter().any(|a| a == "--candidate-disable-material") {
+        false
+    } else {
+        enable_material
+    };
+    let current_enable_tier1 = if args.iter().any(|a| a == "--current-disable-tier1") {
+        false
+    } else {
+        enable_tier1
+    };
+    let current_enable_material = if args.iter().any(|a| a == "--current-disable-material") {
+        false
+    } else {
+        enable_material
+    };
+
     let explore_base: f64 = parse_arg_f64(&args, "--explore-base", DEFAULT_EXPLORE_BASE);
 
     let inference_batch_size: usize = args
@@ -913,8 +953,8 @@ fn main() {
             sprt_config.elo0, sprt_config.elo1, sprt_config.alpha, sprt_config.beta, lower, upper
         );
         eprintln!(
-            "Max games: {}, Sims: {}, KOTH: {}, Tier1: {}, Material: {}",
-            num_games, simulations, enable_koth, enable_tier1, enable_material
+            "Max games: {}, Sims: {}, KOTH: {}, Candidate Tier1: {}, Candidate Material: {}, Current Tier1: {}, Current Material: {}",
+            num_games, simulations, enable_koth, candidate_enable_tier1, candidate_enable_material, current_enable_tier1, current_enable_material
         );
 
         let (results, llr, decision) = evaluate_models_koth_sprt(
@@ -923,8 +963,10 @@ fn main() {
             num_games,
             simulations,
             enable_koth,
-            enable_tier1,
-            enable_material,
+            candidate_enable_tier1,
+            candidate_enable_material,
+            current_enable_tier1,
+            current_enable_material,
             inference_batch_size,
             &sprt_config,
             seed_offset,
@@ -959,8 +1001,8 @@ fn main() {
     } else {
         // Legacy fixed-threshold mode
         eprintln!(
-            "Games: {}, Sims: {}, Threshold: {}, KOTH: {}, Tier1: {}, Material: {}",
-            num_games, simulations, threshold, enable_koth, enable_tier1, enable_material
+            "Games: {}, Sims: {}, Threshold: {}, KOTH: {}, Candidate Tier1: {}, Candidate Material: {}, Current Tier1: {}, Current Material: {}",
+            num_games, simulations, threshold, enable_koth, candidate_enable_tier1, candidate_enable_material, current_enable_tier1, current_enable_material
         );
 
         let results = evaluate_models_koth(
@@ -969,8 +1011,10 @@ fn main() {
             num_games,
             simulations,
             enable_koth,
-            enable_tier1,
-            enable_material,
+            candidate_enable_tier1,
+            candidate_enable_material,
+            current_enable_tier1,
+            current_enable_material,
             inference_batch_size,
             seed_offset,
             explore_base,
