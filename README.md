@@ -174,7 +174,7 @@ cargo build --release --features neural  # With neural network support
 
 ## Testing
 
-~860 tests (660 Rust + 195 Python). See [TESTING.md](TESTING.md) for details.
+~950 tests (700 Rust + 255 Python). See [TESTING.md](TESTING.md) for details.
 
 ```bash
 cargo test                                        # Fast Rust tests (~50s)
@@ -189,7 +189,7 @@ cd python && python -m pytest test_*.py -v        # Python pipeline tests
 | `caissawary` | Main UCI chess engine |
 | `self_play` | Self-play data generation with SAN game logs |
 | `evaluate_models` | Head-to-head model evaluation with SPRT |
-| `round_robin` | Round-robin tournament with per-player tier configs and Elo estimation |
+| `round_robin` | Round-robin tournament with per-player tier configs, Elo estimation, and adaptive CI-targeted pairing |
 | `mcts_inspector` | MCTS search tree visualization (Graphviz DOT) |
 | `verbose_search` | Real-time search narration |
 | `verbose_game` | Full game between two classical MCTS agents |
