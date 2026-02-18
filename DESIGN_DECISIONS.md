@@ -317,13 +317,17 @@ Ranking confidence depends on *adjacent* comparisons. If #1 vs #2 is settled and
 
 Each bootstrap iteration resamples every pairwise result independently: given (w, l, d) outcomes for a pair, draw `w+l+d` outcomes from a multinomial with probabilities `(w/total, l/total, d/total)`. This preserves the total game count per pair while varying outcomes. MLE Elo is recomputed from scratch for each resample (1000 iterations, fast in pure Python). The consecutive gaps are measured using the *current* ranking order (not the bootstrap ranking), so the CI reflects uncertainty about whether a specific pair's gap might be negative (i.e., whether their ranking should swap).
 
+### Pre-seeding from training eval data
+
+During training, each generation is evaluated against the current best via SPRT (up to 400 games). For consecutive accepted generations, this produces high-quality head-to-head results using the same search config as the tournament. A seed script (`scripts/seed_tournament_from_training.py`) extracts these eval pairs from training logs and writes a pre-populated results JSON. The tournament then resumes from this seeded data, skipping hundreds of games on same-type consecutive pairs and focusing its budget on cross-type matchups (tiered vs vanilla) where no training data exists.
+
 ### Resume support
 
-Results are saved to JSON after every batch. The adaptive phase picks up where it left off — re-run bootstrap on existing results, find the widest CI, continue. No special checkpointing needed.
+Results are saved to JSON after every batch. The adaptive phase picks up where it left off — re-run bootstrap on existing results, find the widest CI, continue. No special checkpointing needed. Pre-seeded results from training eval data are loaded identically to partially completed tournament results.
 
 ### Model-mode pairing
 
-Each model plays with the search configuration it was trained with. Tiered models use all three tiers; vanilla models disable Tier 1 and material evaluation. The tournament script enforces this via per-side flags (`--candidate-disable-tier1`, `--current-disable-tier1`), so mixed matchups are valid comparisons of the full training+search systems.
+Each model plays with the search configuration it was trained with. Tiered models use all three tiers; vanilla models disable Tier 1 and material evaluation. The tournament script takes model directories and generation numbers as CLI arguments (`--tiered-dir`, `--tiered-gens`, `--vanilla-dir`, `--vanilla-gens`) and enforces correct per-side tier flags automatically, so mixed matchups are valid comparisons of the full training+search systems.
 
 ## 9. Applicability Beyond Chess
 
