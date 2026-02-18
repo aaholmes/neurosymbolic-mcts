@@ -5,6 +5,7 @@ import json
 import math
 import sys
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 
 
@@ -199,6 +200,7 @@ def main():
     ax.grid(True, alpha=0.3)
     xlim_right = int(sys.argv[5]) if len(sys.argv) > 5 else max(max(tiered_gens), max(vanilla_gens)) + 2
     ax.set_xlim(-1, xlim_right)
+    ax.set_xticks(range(0, xlim_right + 1, 5))
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
