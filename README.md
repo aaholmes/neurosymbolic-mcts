@@ -47,31 +47,39 @@ The $k$ head uses domain knowledge rather than learned convolutions: 12 scalar f
 
 ## Tournament Results: Caissawary vs Vanilla MCTS
 
-A 10-model adaptive round-robin tournament compared two training runs — both using 6 blocks, 128 channels (~2M parameters), trained with 200 MCTS simulations per move, SPRT gating (up to 800 eval games), Muon optimizer (lr=0.02), and adaptive epochs with early stopping:
-- **Caissawary** (4 models: gen 0, 1, 4, 17): trained with all three tiers (safety gates + quiescence search + neural network)
-- **Vanilla** (6 models: gen 0, 2, 6, 9, 13, 18): trained with KOTH only (no tier 1, no material — pure AlphaZero-style)
+An 18-model adaptive round-robin tournament compared two training runs — both using 6 blocks, 128 channels (~2M parameters), trained with 200 MCTS simulations per move, SPRT gating (up to 800 eval games), Muon optimizer (lr=0.02), and adaptive epochs with early stopping:
+- **Caissawary** (9 models: gen 0, 1, 3, 4, 5, 6, 8, 12, 18): trained with all three tiers (safety gates + quiescence search + neural network) over 20 generations
+- **Vanilla** (9 models: gen 0, 1, 4, 7, 10, 13, 21, 23, 28): trained with KOTH only (no tier 1, no material — pure AlphaZero-style) over 29 generations
 
-Tournament games used 200 simulations per move with proportional-or-greedy move selection (explore base 0.80). The adaptive tournament uses bootstrap CI to focus games on consecutive-rank pairs with the most uncertain Elo gaps, achieving all 95% CIs below 50 Elo.
+Tournament games used 200 simulations per move with proportional-or-greedy move selection (explore base 0.80). Within-type consecutive pairs were pre-seeded from training evaluation data (6,479 games); cross-type ranking was established via bridge matches and adaptive CI-targeted pairing.
 
-![Elo vs Generation](tournament_results_10model_elo_plot.png)
+![Elo vs Generation](tournament_results_800eval_elo_plot.png)
 
 | Rank | Model | Elo | 95% CI | Type |
 |------|-------|-----|--------|------|
-| 1 | tiered_gen17 | 2198 | [2107, 2284] | Caissawary |
-| 2 | tiered_gen4 | 2122 | [2040, 2201] | Caissawary |
-| 3 | tiered_gen1 | 2021 | [1953, 2086] | Caissawary |
-| 4 | tiered_gen0 | 1844 | [1778, 1906] | Caissawary |
-| 5 | vanilla_gen18 | 1726 | [1667, 1786] | Vanilla |
-| 6 | vanilla_gen13 | 1651 | [1600, 1708] | Vanilla |
-| 7 | vanilla_gen9 | 1646 | [1596, 1696] | Vanilla |
-| 8 | vanilla_gen2 | 1618 | [1572, 1664] | Vanilla |
-| 9 | vanilla_gen6 | 1616 | [1569, 1667] | Vanilla |
-| 10 | vanilla_gen0 | 1500 | (anchor) | Vanilla |
+| 1 | tiered_gen18 | 2663 | [2565, 2763] | Caissawary |
+| 2 | tiered_gen12 | 2595 | [2502, 2692] | Caissawary |
+| 3 | tiered_gen8 | 2542 | [2448, 2633] | Caissawary |
+| 4 | tiered_gen6 | 2478 | [2391, 2567] | Caissawary |
+| 5 | tiered_gen5 | 2347 | [2260, 2428] | Caissawary |
+| 6 | tiered_gen4 | 2312 | [2223, 2395] | Caissawary |
+| 7 | tiered_gen3 | 2228 | [2144, 2306] | Caissawary |
+| 8 | tiered_gen1 | 2167 | [2082, 2242] | Caissawary |
+| 9 | tiered_gen0 | 2068 | [1984, 2148] | Caissawary |
+| 10 | vanilla_gen28 | 2038 | [1957, 2111] | Vanilla |
+| 11 | vanilla_gen23 | 1996 | [1920, 2063] | Vanilla |
+| 12 | vanilla_gen21 | 1866 | [1801, 1933] | Vanilla |
+| 13 | vanilla_gen13 | 1833 | [1772, 1902] | Vanilla |
+| 14 | vanilla_gen10 | 1794 | [1734, 1859] | Vanilla |
+| 15 | vanilla_gen7 | 1726 | [1672, 1781] | Vanilla |
+| 16 | vanilla_gen4 | 1639 | [1598, 1684] | Vanilla |
+| 17 | vanilla_gen1 | 1600 | [1566, 1636] | Vanilla |
+| 18 | vanilla_gen0 | 1500 | (anchor) | Vanilla |
 
 **Key findings:**
-- All Caissawary models outrank all vanilla models. Even tiered_gen0 (1844) with a *zero-initialized* NN exceeds vanilla_gen18 (1726), the best vanilla model after 18 accepted generations.
-- Caissawary continues gaining through gen17 (+354 Elo over tiered_gen0), while vanilla plateaus around 1620 from gen2–13 before a late bump to 1726 at gen18.
-- The classical fallback alone ($V_{logit}=0$, $k=0.5$: $V_{final} = \tanh(0.5 \cdot \Delta M)$) provides stronger play than 18 generations of pure NN training.
+- All Caissawary models outrank all vanilla models. Even tiered_gen0 (2068) with a *zero-initialized* NN exceeds vanilla_gen28 (2038), the best vanilla model after 29 generations of training.
+- Caissawary gains +595 Elo over 18 accepted generations (gen0→gen18), while vanilla gains +538 Elo over 28 accepted generations (gen0→gen28) — similar NN learning rates, but tiered starts ~570 Elo higher.
+- The classical fallback alone ($V_{logit}=0$, $k=0.5$: $V_{final} = \tanh(0.5 \cdot \Delta M)$) provides stronger play than 29 generations of pure NN training.
 
 ### Elo Methodology
 
