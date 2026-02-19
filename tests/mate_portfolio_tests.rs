@@ -57,10 +57,9 @@ fn run_mate_test_case(
 ) {
     println!("\n  Running test case: {}", name);
     let board = Board::new_from_fen(fen);
-    let mut stack = BoardStack::with_board(board);
 
     let start = Instant::now();
-    let (score, best_move, _nodes) = mate_search(&mut stack, move_gen, 5, false, 3);
+    let (score, best_move, _nodes) = mate_search(&board, move_gen, 5, false, 3);
     let duration = start.elapsed();
 
     println!(

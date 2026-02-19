@@ -33,21 +33,21 @@
 //!
 //! ```ignore
 //! use kingfisher::search::mate_search;
-//! use kingfisher::boardstack::BoardStack;
+//! use kingfisher::board::Board;
 //! use kingfisher::move_generation::MoveGen;
 //!
-//! let mut board = BoardStack::new();
+//! let board = Board::new();
 //! let move_gen = MoveGen::new();
 //!
 //! // Search for mate up to depth 6 (3 moves each side)
-//! let (score, best_move, nodes) = mate_search(&mut board, &move_gen, 6, false, 3);
+//! let (score, best_move, nodes) = mate_search(&board, &move_gen, 6, false, 3);
 //!
 //! if score >= 1_000_000 {
 //!     println!("Forced mate found! Play: {:?}", best_move);
 //! }
 //! ```
 
-use crate::boardstack::BoardStack;
+use crate::board::Board;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -118,9 +118,11 @@ impl SearchContext {
 /// checks-only search. Default exhaustive_depth=3 makes mate-in-1 and mate-in-2
 /// exhaustive, and mate-in-3 checks-only.
 ///
-/// Single-threaded to avoid rayon/mutex overhead on every MCTS leaf node.
+/// Stateless: operates on immutable `&Board` references (like KOTH search),
+/// avoiding BoardStack overhead. Repetition detection is unnecessary — forced
+/// mates exist regardless of position history.
 pub fn mate_search(
-    board: &mut BoardStack,
+    board: &Board,
     move_gen: &MoveGen,
     max_depth: i32,
     _verbose: bool,
@@ -136,16 +138,10 @@ pub fn mate_search(
 
     if let Some(res) = final_res {
         // Double check legality in the ACTUAL root position
-        let (captures, quiet) = move_gen.gen_pseudo_legal_moves(&board.current_state());
-        let is_pseudo_legal = captures.iter().any(|m| *m == res.best_move)
-            || quiet.iter().any(|m| *m == res.best_move);
-        if is_pseudo_legal {
-            board.make_move(res.best_move);
-            let is_legal = board.current_state().is_legal(move_gen);
-            board.undo_move();
-            if is_legal {
-                return (res.score, res.best_move, nodes_searched as i32);
-            }
+        if board.is_pseudo_legal(res.best_move, move_gen)
+            && board.is_legal_after_move(res.best_move, move_gen)
+        {
+            return (res.score, res.best_move, nodes_searched as i32);
         }
     }
 
@@ -154,7 +150,7 @@ pub fn mate_search(
 
 fn iterative_deepening_wrapper(
     ctx: &SearchContext,
-    board: &mut BoardStack,
+    board: &Board,
     move_gen: &MoveGen,
     max_depth: i32,
     exhaustive_depth: i32,
@@ -180,11 +176,7 @@ fn iterative_deepening_wrapper(
 
         // If we found a forced mate at the root, report it
         if score >= 1_000_000 && best_move != Move::null() {
-            board.make_move(best_move);
-            let is_legal = board.current_state().is_legal(move_gen);
-            board.undo_move();
-
-            if is_legal {
+            if board.is_legal_after_move(best_move, move_gen) {
                 ctx.report_mate(MateResult {
                     score,
                     best_move,
@@ -202,11 +194,11 @@ fn iterative_deepening_wrapper(
 /// attacker's plies. When false, all legal moves are tried (exhaustive).
 /// On the defender's plies, all legal moves are always searched.
 ///
-/// Single-pass design: generates moves once, and does a single make/undo per
-/// candidate (legality check + recursion in the same make/undo cycle).
+/// Stateless design: uses immutable `&Board` and `apply_move_to_board` (like
+/// KOTH search), avoiding BoardStack make/undo overhead and repetition checks.
 fn mate_search_recursive(
     ctx: &SearchContext,
-    board: &mut BoardStack,
+    board: &Board,
     move_gen: &MoveGen,
     depth: i32,
     mut alpha: i32,
@@ -219,30 +211,15 @@ fn mate_search_recursive(
         return (0, Move::null());
     }
 
-    // Draw check before depth check — repetition is always terminal
-    if board.is_draw_by_repetition() {
-        return (0, Move::null());
-    }
-
     // Depth 0: no mate found on this path, but still detect terminal positions.
     // Only checkmate matters here (stalemate = 0, same as default return).
     if depth <= 0 {
-        if board.current_state().is_check(move_gen) {
+        if board.is_check(move_gen) {
             // Might be checkmate — verify no legal escape exists
-            let (captures, moves) = move_gen.gen_pseudo_legal_moves(&board.current_state());
-            let mut has_legal = false;
-            for m in captures.iter().chain(moves.iter()) {
-                if board.current_state().get_piece(m.from).is_none() {
-                    continue;
-                }
-                board.make_move(*m);
-                if board.current_state().is_legal(move_gen) {
-                    board.undo_move();
-                    has_legal = true;
-                    break;
-                }
-                board.undo_move();
-            }
+            let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
+            let has_legal = captures.iter().chain(moves.iter()).any(|m| {
+                board.get_piece(m.from).is_some() && board.is_legal_after_move(*m, move_gen)
+            });
             if !has_legal {
                 return (-1_000_000 - depth, Move::null()); // Checkmate
             }
@@ -250,41 +227,37 @@ fn mate_search_recursive(
         return (0, Move::null());
     }
 
-    // Single-pass: generate moves, make each, check legality,
-    // optionally filter for checks, and recurse — all in one loop.
-    let (captures, moves) = move_gen.gen_pseudo_legal_moves(&board.current_state());
+    let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
     let mut best_move = Move::null();
     let mut best_score = -1_000_001;
     let mut has_legal_move = false;
 
     for m in captures.iter().chain(moves.iter()) {
-        if board.current_state().get_piece(m.from).is_none() {
+        if board.get_piece(m.from).is_none() {
             continue;
         }
 
-        // On attacker turns with checks_only: filter BEFORE make_move
+        // On attacker turns with checks_only: filter BEFORE apply_move_to_board
         // gives_check() uses magic lookups on the pre-move board — much cheaper
-        // than make_move + is_check + undo_move for the ~30 non-checking moves
+        // than apply + is_check for the ~30 non-checking moves
         if is_attackers_turn && checks_only {
-            if !board.current_state().gives_check(*m, move_gen) {
-                continue; // Skip make_move entirely for non-checking moves
+            if !board.gives_check(*m, move_gen) {
+                continue;
             }
         }
 
-        board.make_move(*m);
+        let next_board = board.apply_move_to_board(*m);
 
-        // Check legality (lightweight — just is_square_attacked on king)
-        if !board.current_state().is_legal(move_gen) {
-            board.undo_move();
+        if !next_board.is_legal(move_gen) {
             continue;
         }
 
         has_legal_move = true;
 
-        // Recurse (move is already made, and we know it's checking on attacker turns)
+        // Recurse
         let (mut score, _) = mate_search_recursive(
             ctx,
-            board,
+            &next_board,
             move_gen,
             depth - 1,
             -beta,
@@ -293,8 +266,6 @@ fn mate_search_recursive(
             checks_only,
         );
         score = -score;
-
-        board.undo_move();
 
         if ctx.should_stop() {
             return (0, Move::null());
@@ -320,7 +291,7 @@ fn mate_search_recursive(
             return (0, Move::null());
         }
         // Defender turn or exhaustive: truly no legal moves
-        let in_check = board.current_state().is_check(move_gen);
+        let in_check = board.is_check(move_gen);
         if in_check {
             return (-1_000_000 - depth, Move::null()); // Checkmate
         } else {

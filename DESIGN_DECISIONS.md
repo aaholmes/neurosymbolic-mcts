@@ -48,7 +48,15 @@ The optimization calls `gives_check()` *before* `make_move`. This function works
 
 **Correctness subtlety:** When all moves are filtered out on an attacker ply, `has_legal_move` stays false. But this doesn't mean checkmate/stalemate — it means no *checking* moves exist. The fix: on attacker plies with checks-only, return 0 (no mate found) instead of checking for checkmate/stalemate. Terminal detection only matters on defender plies, where all legal moves are tried.
 
-This reduced mate search cost by 26% (1.08 → 0.89 us/node), narrowing the gap with KOTH-in-3 (0.53 us/node) from 2x to 1.7x.
+This reduced mate search cost by 26% (1.08 → 0.80 us/node).
+
+### Stateless search: &Board instead of BoardStack
+
+Even after the `gives_check()` optimization, mate search cost 1.7x more per node than KOTH (0.80 vs 0.47 us/node). Profiling revealed the remaining gap came from `BoardStack` overhead: `make_move`/`undo_move` performs incremental Zobrist hashing, pushes/pops state history, and `is_draw_by_repetition()` scans the position history — none of which is needed for forced mate detection, since a repeated position on the path to checkmate is irrelevant.
+
+The fix: convert mate search from `&mut BoardStack` (stateful make/undo) to `&Board` (stateless `apply_move_to_board`), matching KOTH's approach. Each recursive call creates a new `Board` on the stack — no history tracking, no Zobrist updates, no repetition checks.
+
+Combined with `gives_check()`, this reduced mate search from 1.08 to 0.63 us/node (42% total improvement), narrowing the gap with KOTH-in-3 (0.52 us/node) from 2x to 1.2x. The remaining ~20% gap is inherent: mate search performs alpha-beta pruning, `gives_check()` filtering, and piece-on-square validation per node, while KOTH uses simple geometric reachability.
 
 ### KOTH geometric pruning
 

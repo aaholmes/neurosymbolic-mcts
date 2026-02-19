@@ -22,14 +22,14 @@
 //!
 //! ```ignore
 //! use kingfisher::search::{mate_search, quiescence_search};
-//! use kingfisher::boardstack::BoardStack;
+//! use kingfisher::board::Board;
 //! use kingfisher::move_generation::MoveGen;
 //!
-//! let mut board = BoardStack::new();
+//! let board = Board::new();
 //! let move_gen = MoveGen::new();
 //!
 //! // Check for forced mate up to depth 4
-//! let (score, best_move, nodes) = mate_search(&mut board, &move_gen, 4, false, 3);
+//! let (score, best_move, nodes) = mate_search(&board, &move_gen, 4, false, 3);
 //! if score >= 1_000_000 {
 //!     println!("Mate found: {:?}", best_move);
 //! }

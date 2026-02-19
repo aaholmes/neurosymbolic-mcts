@@ -1,7 +1,6 @@
 //! Unit tests for mate search algorithm
 
 use kingfisher::board::Board;
-use kingfisher::boardstack::BoardStack;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::search::mate_search;
@@ -21,8 +20,7 @@ fn run_mate_search_with_exhaustive(
 ) -> (i32, Move, i32) {
     let move_gen = MoveGen::new();
     let board = Board::new_from_fen(fen);
-    let mut stack = BoardStack::with_board(board);
-    mate_search(&mut stack, &move_gen, depth, false, exhaustive_depth)
+    mate_search(&board, &move_gen, depth, false, exhaustive_depth)
 }
 
 #[test]
@@ -120,9 +118,8 @@ fn test_mate_search_returns_legal_move() {
 
     for fen in &positions {
         let board = Board::new_from_fen(fen);
-        let mut stack = BoardStack::with_board(board.clone());
 
-        let (_, best_move, _) = mate_search(&mut stack, &move_gen, 3, false, 3);
+        let (_, best_move, _) = mate_search(&board, &move_gen, 3, false, 3);
 
         if best_move != Move::null() {
             // Verify the returned move is legal
@@ -346,41 +343,6 @@ fn test_quiet_rook_lift_mate_in_2() {
     );
     // First move should be a quiet king approach (from f6=45)
     assert_eq!(best_move.from, 45, "Should play from f6");
-}
-
-// === Regression tests for single-pass refactor ===
-
-#[test]
-fn test_draw_by_repetition_returns_zero() {
-    // Set up a position where draw by repetition should be detected
-    let move_gen = MoveGen::new();
-    let board = Board::new_from_fen("8/8/8/8/8/5k2/8/4K2R w - - 0 1");
-    let mut stack = BoardStack::with_board(board);
-
-    // Play moves back and forth to create repetition
-    // Ke1-e2, Kf3-f4, Ke2-e1, Kf4-f3, Ke1-e2, Kf3-f4, Ke2-e1, Kf4-f3
-    let moves = [
-        Move::new(4, 12, None),  // Ke1-e2
-        Move::new(21, 29, None), // Kf3-f4
-        Move::new(12, 4, None),  // Ke2-e1
-        Move::new(29, 21, None), // Kf4-f3
-        Move::new(4, 12, None),  // Ke1-e2
-        Move::new(21, 29, None), // Kf3-f4
-        Move::new(12, 4, None),  // Ke2-e1
-        Move::new(29, 21, None), // Kf4-f3
-    ];
-
-    for m in &moves {
-        stack.make_move(*m);
-    }
-
-    // Now the position has repeated — mate search should return 0
-    let (score, _, _) = mate_search(&mut stack, &move_gen, 3, false, 3);
-    assert!(
-        score.abs() < 1_000_000,
-        "Draw by repetition should not be reported as mate, got {}",
-        score
-    );
 }
 
 #[test]

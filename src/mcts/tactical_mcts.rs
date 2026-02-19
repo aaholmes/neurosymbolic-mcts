@@ -341,9 +341,8 @@ pub fn tactical_mcts_search_with_tt(
             log.log_mate_search_start(config.mate_search_depth);
         }
 
-        let mut mate_search_stack = BoardStack::with_board(board.clone());
         let (mate_score, mate_move, nodes) = mate_search(
-            &mut mate_search_stack,
+            &board,
             move_gen,
             config.mate_search_depth,
             false,
@@ -605,9 +604,8 @@ fn evaluate_leaf_node(
         } else {
             stats.tt_mate_misses += 1;
             let mate_start = Instant::now();
-            let mut board_stack = BoardStack::with_board(board.clone());
             let mate_result = mate_search(
-                &mut board_stack,
+                board,
                 move_gen,
                 config.mate_search_depth,
                 false,

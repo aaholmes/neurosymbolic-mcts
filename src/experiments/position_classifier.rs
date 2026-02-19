@@ -64,11 +64,9 @@ impl<'a> PositionClassifier<'a> {
 
     /// Estimate if position has a forced mate (shallow check)
     pub fn has_likely_forced_mate(&self, board: &Board, depth: i32) -> bool {
-        use crate::boardstack::BoardStack;
         use crate::search::mate_search;
 
-        let mut stack = BoardStack::with_board(board.clone());
-        let (score, _, _) = mate_search(&mut stack, self.move_gen, depth, false, 3);
+        let (score, _, _) = mate_search(board, self.move_gen, depth, false, 3);
 
         score.abs() >= 1_000_000
     }

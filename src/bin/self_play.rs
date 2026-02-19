@@ -241,8 +241,7 @@ fn play_game(
 
             // Check mate gate
             {
-                let mut temp_stack = BoardStack::with_board(board.clone());
-                let (score, _, _) = mate_search(&mut temp_stack, &move_gen, 5, false, 3);
+                let (score, _, _) = mate_search(&board, &move_gen, 5, false, 3);
                 if score >= 1_000_000 {
                     let mate_plies = score - 1_000_000;
                     let score_white = if board.w_to_move { 1.0 } else { -1.0 };
@@ -417,7 +416,7 @@ fn play_game(
                             break;
                         }
 
-                        let (score, mv, _) = mate_search(&mut temp_stack, &move_gen, 5, false, 3);
+                        let (score, mv, _) = mate_search(temp_stack.current_state(), &move_gen, 5, false, 3);
                         if score >= 1_000_000 {
                             game_moves.push(mv.to_san(temp_stack.current_state(), &move_gen));
                             temp_stack.make_move(mv);

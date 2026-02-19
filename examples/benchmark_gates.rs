@@ -37,10 +37,9 @@ fn main() {
 
     for (fen, name) in mate_puzzles {
         let board = Board::new_from_fen(fen);
-        let mut stack = BoardStack::with_board(board);
 
         let start = Instant::now();
-        let (score, mv, nodes) = mate_search(&mut stack, &move_gen, 3, false, 3);
+        let (score, mv, nodes) = mate_search(&board, &move_gen, 3, false, 3);
         let duration = start.elapsed();
 
         println!(
