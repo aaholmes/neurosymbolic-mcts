@@ -40,6 +40,16 @@ Full-width mate search at all depths is too expensive to run at every MCTS expan
 
 The exhaustive mate-in-2 adds ~43K nodes to the search budget (total ~76K, within the 100K node limit). This closes the gap between the KOTH-in-3 gate (which is already exhaustive, considering all opponent defenses) and the mate search (which previously missed quiet-first forced mates). The cost is modest because mate-in-2 has limited branching: the attacker's ~30 legal moves each lead to positions where the defender must have *all* replies lead to mate-in-1 — a condition that prunes aggressively.
 
+### Fast check detection with gives\_check() pre-filter
+
+On attacker plies with checks-only search, the naive approach generates all ~35 pseudo-legal moves, then for each: `make_move` → `is_legal` → `is_check` → `undo_move`. Since only ~1-5 moves give check, ~30 moves pay the full `make_move`/`undo_move` cost (Zobrist update, history push/pop) just to discover they don't give check.
+
+The optimization calls `gives_check()` *before* `make_move`. This function works on the pre-move board using modified occupancy: direct checks require one magic/table lookup (does the piece on `to` attack the king?), discovered checks require up to two slider lookups (does vacating `from` reveal an attack?). Special moves (promotions, castling, en passant) fall back to `apply_move_to_board` + `is_check`. Non-checking moves skip `make_move` entirely — eliminating both the expensive board mutation and the subsequent `is_check` call.
+
+**Correctness subtlety:** When all moves are filtered out on an attacker ply, `has_legal_move` stays false. But this doesn't mean checkmate/stalemate — it means no *checking* moves exist. The fix: on attacker plies with checks-only, return 0 (no mate found) instead of checking for checkmate/stalemate. Terminal detection only matters on defender plies, where all legal moves are tried.
+
+This reduced mate search cost by 26% (1.08 → 0.89 us/node), narrowing the gap with KOTH-in-3 (0.53 us/node) from 2x to 1.7x.
+
 ### KOTH geometric pruning
 
 In King of the Hill, a king that can reach {d4, e4, d5, e5} wins. The gate computes: can the side-to-move's king reach any center square in at most 3 moves, considering blocking pieces and opponent interception? This is pure geometry — no search needed.

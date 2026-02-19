@@ -83,23 +83,28 @@ pub fn material_qsearch(
     beta: i32,
     max_depth: u8,
 ) -> (i32, bool) {
-    let (score, completed, _nodes) =
+    let (score, completed, _nodes, _depth) =
         material_qsearch_counted(board, move_gen, alpha, beta, max_depth);
     (score, completed)
 }
 
-/// Material-only quiescence search that also returns the number of nodes visited.
+/// Material-only quiescence search that also returns the number of nodes visited
+/// and the maximum depth actually used.
+///
+/// Returns `(score, completed, nodes, depth_used)` where `depth_used` is the
+/// maximum depth reached relative to the initial call (0 = stand-pat, 1 = one
+/// capture deep, etc.).
 pub fn material_qsearch_counted(
     board: &mut BoardStack,
     move_gen: &MoveGen,
     mut alpha: i32,
     beta: i32,
     max_depth: u8,
-) -> (i32, bool, u32) {
+) -> (i32, bool, u32, u8) {
     let mut nodes: u32 = 1;
     let stand_pat = board.current_state().material_imbalance();
     if stand_pat >= beta {
-        return (beta, true, nodes);
+        return (beta, true, nodes, 0);
     }
     alpha = alpha.max(stand_pat);
 
@@ -112,32 +117,34 @@ pub fn material_qsearch_counted(
             board.undo_move();
             legal
         });
-        return (alpha, !has_legal_capture, nodes);
+        return (alpha, !has_legal_capture, nodes, 0);
     }
 
     let mut all_completed = true;
+    let mut max_child_depth: u8 = 0;
     for capture in captures {
         board.make_move(capture);
         if !board.current_state().is_legal(move_gen) {
             board.undo_move();
             continue;
         }
-        let (score, child_completed, child_nodes) =
+        let (score, child_completed, child_nodes, child_depth) =
             material_qsearch_counted(board, move_gen, -beta, -alpha, max_depth - 1);
         nodes += child_nodes;
+        max_child_depth = max_child_depth.max(child_depth + 1);
         let score = -score;
         if !child_completed {
             all_completed = false;
         }
         board.undo_move();
         if score >= beta {
-            return (beta, all_completed, nodes);
+            return (beta, all_completed, nodes, max_child_depth);
         }
         if score > alpha {
             alpha = score;
         }
     }
-    (alpha, all_completed, nodes)
+    (alpha, all_completed, nodes, max_child_depth)
 }
 
 /// Convenience wrapper: returns `(material_balance, completed)` where material_balance
@@ -147,11 +154,14 @@ pub fn forced_material_balance(board: &mut BoardStack, move_gen: &MoveGen) -> (i
     material_qsearch(board, move_gen, -1000, 1000, 8)
 }
 
-/// Like `forced_material_balance` but also returns the number of nodes visited.
+/// Like `forced_material_balance` but also returns the number of nodes visited
+/// and the maximum depth actually used.
+///
+/// Returns `(score, completed, nodes, depth_used)`.
 pub fn forced_material_balance_counted(
     board: &mut BoardStack,
     move_gen: &MoveGen,
-) -> (i32, bool, u32) {
+) -> (i32, bool, u32, u8) {
     material_qsearch_counted(board, move_gen, -1000, 1000, 8)
 }
 

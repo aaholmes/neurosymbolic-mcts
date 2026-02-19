@@ -262,6 +262,15 @@ fn mate_search_recursive(
             continue;
         }
 
+        // On attacker turns with checks_only: filter BEFORE make_move
+        // gives_check() uses magic lookups on the pre-move board — much cheaper
+        // than make_move + is_check + undo_move for the ~30 non-checking moves
+        if is_attackers_turn && checks_only {
+            if !board.current_state().gives_check(*m, move_gen) {
+                continue; // Skip make_move entirely for non-checking moves
+            }
+        }
+
         board.make_move(*m);
 
         // Check legality (lightweight — just is_square_attacked on king)
@@ -272,13 +281,7 @@ fn mate_search_recursive(
 
         has_legal_move = true;
 
-        // On attacker's turn in checks-only mode, skip non-checking moves
-        if is_attackers_turn && checks_only && !board.current_state().is_check(move_gen) {
-            board.undo_move();
-            continue;
-        }
-
-        // Recurse (move is already made)
+        // Recurse (move is already made, and we know it's checking on attacker turns)
         let (mut score, _) = mate_search_recursive(
             ctx,
             board,
@@ -309,8 +312,14 @@ fn mate_search_recursive(
         }
     }
 
-    // No legal moves at all = checkmate or stalemate
+    // No legal moves found in this loop
     if !has_legal_move {
+        if is_attackers_turn && checks_only {
+            // No checking moves available — not necessarily terminal.
+            // Non-checking legal moves may exist but were skipped by the filter.
+            return (0, Move::null());
+        }
+        // Defender turn or exhaustive: truly no legal moves
         let in_check = board.current_state().is_check(move_gen);
         if in_check {
             return (-1_000_000 - depth, Move::null()); // Checkmate
@@ -319,7 +328,7 @@ fn mate_search_recursive(
         }
     }
 
-    // Legal moves exist but none passed checks-only filter (or no improvement found)
+    // Legal moves exist but none improved alpha (or no improvement found)
     if best_score == -1_000_001 {
         return (0, Move::null());
     }

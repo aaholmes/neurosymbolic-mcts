@@ -6,6 +6,8 @@ use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::search::mate_search;
 
+use crate::common::positions;
+
 /// Helper to run mate search with default exhaustive_depth=3
 fn run_mate_search(fen: &str, depth: i32) -> (i32, Move, i32) {
     run_mate_search_with_exhaustive(fen, depth, 3)
@@ -403,4 +405,97 @@ fn test_mate_in_3_checks_only() {
     // Verify it still works at depth 3
     let (score, _, _) = run_mate_search(fen, 3);
     assert!(score >= 1_000_000, "Should find mate at depth 3");
+}
+
+// === gives_check equivalence tests ===
+
+/// Validates that gives_check() before make_move agrees with is_check() after make_move
+/// for all pseudo-legal moves across multiple positions. This ensures the pre-move filter
+/// in mate_search is equivalent to the post-move check.
+#[test]
+fn test_gives_check_agrees_with_is_check() {
+    let move_gen = MoveGen::new();
+
+    let test_positions = [
+        positions::STARTING,
+        positions::MATE_IN_1_WHITE,
+        positions::MATE_IN_1_BLACK,
+        positions::EN_PASSANT,
+        positions::CASTLING_BOTH,
+        positions::PROMOTION,
+        positions::FORK_AVAILABLE,
+        // Middlegame with lots of pieces
+        "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+        // Position with discovered check potential
+        "4k3/8/8/8/8/8/4R3/4K2B w - - 0 1",
+        // Position with queen giving many checks
+        "4k3/8/8/3Q4/8/8/8/4K3 w - - 0 1",
+    ];
+
+    for fen in &test_positions {
+        let board = Board::new_from_fen(fen);
+        let (captures, moves) = move_gen.gen_pseudo_legal_moves(&board);
+
+        for m in captures.iter().chain(moves.iter()) {
+            if board.get_piece(m.from).is_none() {
+                continue;
+            }
+
+            let gives_check_result = board.gives_check(*m, &move_gen);
+
+            // Now do make_move + is_check to get ground truth
+            let new_board = board.apply_move_to_board(*m);
+            if !new_board.is_legal(&move_gen) {
+                continue; // Skip illegal moves
+            }
+            let is_check_result = new_board.is_check(&move_gen);
+
+            assert_eq!(
+                gives_check_result, is_check_result,
+                "gives_check disagrees with is_check for move {} in FEN: {} \
+                 (gives_check={}, is_check={})",
+                m.to_uci(),
+                fen,
+                gives_check_result,
+                is_check_result
+            );
+        }
+    }
+}
+
+/// Validates that mate_search with gives_check filter produces same results as
+/// the pre-optimization behavior across multiple positions.
+#[test]
+fn test_mate_search_gives_check_filter_correctness() {
+    // Positions where checks-only search should find mates
+    let mate_positions = [
+        ("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 2, true),  // Re8# (checking)
+        ("4r1k1/8/8/8/8/8/5PPP/6K1 b - - 0 1", 2, true),  // Re1# (checking)
+        ("r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4", 3, true), // Qxf7#
+    ];
+
+    // Positions where no mate should be found
+    let no_mate_positions = [
+        ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 3),
+        ("k7/1R6/K7/8/8/8/8/8 b - - 0 1", 2), // Stalemate
+    ];
+
+    for (fen, depth, _) in &mate_positions {
+        let (score, best_move, _) = run_mate_search(fen, *depth);
+        assert!(
+            score >= 1_000_000,
+            "Should find mate in FEN: {}, got score {}",
+            fen, score
+        );
+        assert_ne!(best_move, Move::null(), "Should have a best move for {}", fen);
+    }
+
+    for (fen, depth) in &no_mate_positions {
+        let (score, _, _) = run_mate_search(fen, *depth);
+        assert!(
+            score.abs() < 1_000_000,
+            "Should NOT find mate in FEN: {}, got score {}",
+            fen, score
+        );
+    }
 }

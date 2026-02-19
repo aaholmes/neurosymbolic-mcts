@@ -93,6 +93,9 @@ fn main() {
     let mut koth_nodes_acc = StatsAccumulator::default();
     let mut mate_nodes_acc = StatsAccumulator::default();
     let mut qsearch_nodes_acc = StatsAccumulator::default();
+    let mut qsearch_depth_acc = StatsAccumulator::default();
+    let mut qsearch_completed: u64 = 0;
+    let mut qsearch_hit_limit: u64 = 0;
     let mut total_moves: u64 = 0;
     let mut total_iterations: u64 = 0;
 
@@ -150,6 +153,9 @@ fn main() {
             koth_nodes_acc.merge(&result.stats.koth_nodes);
             mate_nodes_acc.merge(&result.stats.mate_search_nodes);
             qsearch_nodes_acc.merge(&result.stats.qsearch_nodes);
+            qsearch_depth_acc.merge(&result.stats.qsearch_depth);
+            qsearch_completed += result.stats.qsearch_completed_count;
+            qsearch_hit_limit += result.stats.qsearch_hit_limit_count;
             total_iterations += result.stats.iterations as u64;
 
             // Proportional-or-greedy move selection (same as self_play)
@@ -234,6 +240,29 @@ fn main() {
     print_stats_row("KOTH-in-3", &koth_nodes_acc);
     print_stats_row("Mate search", &mate_nodes_acc);
     print_stats_row("Q-search", &qsearch_nodes_acc);
+
+    println!();
+    println!("=== Q-search depth stats ===");
+    let qsearch_total = qsearch_completed + qsearch_hit_limit;
+    if qsearch_total > 0 {
+        println!(
+            "Completed naturally: {:>10} ({:.1}%)",
+            qsearch_completed,
+            100.0 * qsearch_completed as f64 / qsearch_total as f64
+        );
+        println!(
+            "Hit depth limit:    {:>10} ({:.1}%)",
+            qsearch_hit_limit,
+            100.0 * qsearch_hit_limit as f64 / qsearch_total as f64
+        );
+        println!(
+            "Depth used: mean={:.1}, std={:.1}",
+            qsearch_depth_acc.mean_val(),
+            qsearch_depth_acc.std_val()
+        );
+    } else {
+        println!("No Q-search calls recorded.");
+    }
 }
 
 fn print_stats_row(name: &str, acc: &StatsAccumulator) {

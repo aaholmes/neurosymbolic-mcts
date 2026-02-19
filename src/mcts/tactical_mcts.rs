@@ -206,6 +206,11 @@ pub struct TacticalMctsStats {
     pub mate_search_nodes: StatsAccumulator,
     pub qsearch_nodes: StatsAccumulator,
     pub koth_nodes: StatsAccumulator,
+
+    // Q-search depth distribution
+    pub qsearch_depth: StatsAccumulator,
+    pub qsearch_completed_count: u64,
+    pub qsearch_hit_limit_count: u64,
 }
 
 impl TacticalMctsStats {
@@ -639,10 +644,16 @@ fn evaluate_leaf_node(
         let (delta_m, qsearch_completed) = if config.enable_material_value {
             let qsearch_start = Instant::now();
             let mut board_stack = BoardStack::with_board(node_ref.state.clone());
-            let (score, completed, nodes) =
+            let (score, completed, nodes, depth_used) =
                 forced_material_balance_counted(&mut board_stack, move_gen);
             stats.qsearch_timing.record(qsearch_start.elapsed());
             stats.qsearch_nodes.record(nodes as f64);
+            stats.qsearch_depth.record(depth_used as f64);
+            if completed {
+                stats.qsearch_completed_count += 1;
+            } else {
+                stats.qsearch_hit_limit_count += 1;
+            }
             (score, completed)
         } else {
             (0, true)
