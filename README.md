@@ -51,12 +51,12 @@ Profiled over 10 self-play games (400 simulations/move, KOTH enabled, gen_18 2M-
 
 | Operation | Device | Calls | Mean | Std | Mean nodes | us/node | % of wall time |
 |-----------|--------|------:|-----:|----:|-----------:|--------:|---------------:|
-| NN inference | GPU | 194,419 | 1,776 us | 805 us | — | — | 62% |
-| Mate search | CPU | 184,173 | 570 us | 1,750 us | 898 | 0.63 | 19% |
-| KOTH-in-3 | CPU | 228,767 | 442 us | 1,259 us | 845 | 0.52 | 18% |
-| Q-search | CPU | 194,419 | 6 us | 10 us | 12 | 0.52 | <1% |
+| NN inference | GPU | 192,293 | 1,783 us | 787 us | — | — | 65% |
+| Mate search | CPU | 185,094 | 605 us | 1,766 us | 954 | 0.63 | 21% |
+| KOTH-in-3 | CPU | 226,429 | 318 us | 880 us | 954 | 0.33 | 14% |
+| Q-search | CPU | 192,293 | 7 us | 14 us | 14 | 0.51 | <1% |
 
-NN inference breaks down into three phases: CPU-to-GPU tensor transfer (51 us), GPU forward pass (1,131 us), and GPU-to-CPU result transfer (41 us). The GPU forward pass dominates at 92% of NN time — transfer overhead is negligible. KOTH and mate search have similar branching factors (~850 nodes) and near-parity per-node costs (0.63 vs 0.52 us/node, 1.2x gap). Two optimizations brought mate search from 1.08 us/node to 0.63 us/node (42% reduction): (1) a `gives_check()` pre-filter that skips `make_move` entirely for non-checking moves on attacker plies, and (2) converting from stateful `BoardStack` (make/undo with Zobrist updates and repetition tracking) to stateless `&Board` with `apply_move_to_board` — repetition detection is unnecessary when searching for forced checkmate. Q-search is effectively free relative to the other operations, running 300x faster than a single NN call while providing the material delta that grounds every leaf evaluation. Q-search completes naturally 96% of the time with a mean depth of 3.1 (max 8), confirming the depth-8 limit is sufficient.
+NN inference breaks down into three phases: CPU-to-GPU tensor transfer (52 us), GPU forward pass (1,135 us), and GPU-to-CPU result transfer (42 us). The GPU forward pass dominates at 92% of NN time — transfer overhead is negligible. Mate search and KOTH-in-3 have similar branching factors (~950 nodes) but different per-node costs. Mate search at 0.63 us/node performs alpha-beta pruning, `gives_check()` filtering, and piece-on-square validation — two optimizations brought it from 1.08 us/node: (1) a `gives_check()` pre-filter that skips `make_move` entirely for non-checking moves on attacker plies, and (2) converting from stateful `BoardStack` to stateless `&Board` with `apply_move_to_board`. KOTH-in-3 at 0.33 us/node benefits from a move pre-filter that skips non-king moves before `apply_move_to_board` when the king must advance toward center — two cheap bitwise comparisons that eliminate ~25-30 of ~35 pseudo-legal moves on root-side turns. Q-search is effectively free relative to the other operations, running 250x faster than a single NN call while providing the material delta that grounds every leaf evaluation. Q-search completes naturally 100% of the time with a mean depth of 3.3 (max 20), confirming the depth limit is sufficient.
 
 The `profile_engine` binary reproduces these measurements: `./target/release/profile_engine --model <path> --games 10 --simulations 400 --koth`.
 
