@@ -65,10 +65,34 @@ pub fn koth_best_move(board: &Board, move_gen: &MoveGen) -> Option<Move> {
     }
 
     // Try n=1, 2, 3 — return the first winning move at minimum n
+    let side_to_move = if board.w_to_move { WHITE } else { BLACK };
+    let king_bit = board.get_piece_bitboard(side_to_move, KING);
+    let king_sq = king_bit.trailing_zeros() as usize;
+
     for n in 1..=3u8 {
         let max_ply = (n as i32) * 2 - 1;
+
+        // Pre-filter: target ring for root move (ply 0) matches solve_koth's ply-0 mask
+        let target_mask = match n {
+            1 => KOTH_CENTER,
+            2 => KOTH_CENTER | RING_1,
+            3 => KOTH_CENTER | RING_1 | RING_2,
+            _ => unreachable!(),
+        };
+        let king_must_advance = (king_bit & target_mask) == 0;
+
         let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
         for m in captures.iter().chain(moves.iter()) {
+            // Pre-filter: skip non-king and wrong-direction king moves
+            if king_must_advance {
+                if m.from != king_sq {
+                    continue;
+                }
+                if (1u64 << m.to) & target_mask == 0 {
+                    continue;
+                }
+            }
+
             let next_board = board.apply_move_to_board(*m);
             if !next_board.is_legal(move_gen) {
                 continue;
@@ -148,10 +172,38 @@ fn solve_koth_counted(board: &Board, move_gen: &MoveGen, ply: i32, max_ply: i32)
     }
 
     let is_root_turn = ply % 2 == 0;
+
+    // Pre-filter: on root-side turns, if king isn't already in the target ring,
+    // only try king moves whose destination is in the ring.
+    let (king_must_advance, king_sq, target_mask) = if is_root_turn {
+        let root_side = if root_side_is_white { WHITE } else { BLACK };
+        let king_bit = board.get_piece_bitboard(root_side, KING);
+        let mask = match ply {
+            0 => KOTH_CENTER | RING_1 | RING_2,
+            2 => KOTH_CENTER | RING_1,
+            4 => KOTH_CENTER,
+            _ => unreachable!(),
+        };
+        let must_advance = (king_bit & mask) == 0;
+        (must_advance, king_bit.trailing_zeros() as usize, mask)
+    } else {
+        (false, 0, 0)
+    };
+
     let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
     let mut legal_move_found = false;
 
     for m in captures.iter().chain(moves.iter()) {
+        // Pre-filter: skip non-king and wrong-direction king moves
+        if king_must_advance {
+            if m.from != king_sq {
+                continue;
+            }
+            if (1u64 << m.to) & target_mask == 0 {
+                continue;
+            }
+        }
+
         let next_board = board.apply_move_to_board(*m);
         if !next_board.is_legal(move_gen) {
             continue;
@@ -229,10 +281,39 @@ fn solve_koth(board: &Board, move_gen: &MoveGen, ply: i32, max_ply: i32) -> bool
     }
 
     let is_root_turn = ply % 2 == 0;
+
+    // Pre-filter: on root-side turns, if king isn't already in the target ring,
+    // only try king moves whose destination is in the ring (skip all non-king moves
+    // and wrong-direction king moves BEFORE the expensive apply_move_to_board).
+    let (king_must_advance, king_sq, target_mask) = if is_root_turn {
+        let root_side = if root_side_is_white { WHITE } else { BLACK };
+        let king_bit = board.get_piece_bitboard(root_side, KING);
+        let mask = match ply {
+            0 => KOTH_CENTER | RING_1 | RING_2,
+            2 => KOTH_CENTER | RING_1,
+            4 => KOTH_CENTER,
+            _ => unreachable!(),
+        };
+        let must_advance = (king_bit & mask) == 0;
+        (must_advance, king_bit.trailing_zeros() as usize, mask)
+    } else {
+        (false, 0, 0)
+    };
+
     let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
     let mut legal_move_found = false;
 
     for m in captures.iter().chain(moves.iter()) {
+        // Pre-filter: skip non-king and wrong-direction king moves
+        if king_must_advance {
+            if m.from != king_sq {
+                continue;
+            }
+            if (1u64 << m.to) & target_mask == 0 {
+                continue;
+            }
+        }
+
         let next_board = board.apply_move_to_board(*m);
         if !next_board.is_legal(move_gen) {
             continue;

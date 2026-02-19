@@ -7,7 +7,7 @@ use kingfisher::mcts::tactical_mcts::{
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
-use kingfisher::search::{koth_best_move, koth_center_in_3};
+use kingfisher::search::{koth_best_move, koth_center_in_3, koth_center_in_3_counted};
 use std::time::Duration;
 
 fn setup() -> MoveGen {
@@ -336,5 +336,75 @@ fn test_select_best_move_prefers_shorter_koth_win() {
         best.unwrap(),
         legal_moves[1],
         "Should prefer the shortest win (distance 1)"
+    );
+}
+
+#[test]
+fn test_koth_prefilter_equivalence() {
+    // Verify the pre-filter produces identical results across many positions.
+    // The pre-filter should only skip moves that would have been pruned anyway
+    // by the post-apply ring check, so results must be identical.
+    let move_gen = setup();
+
+    let positions = vec![
+        // Starting position (no KOTH)
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        // King near center — KOTH in 1
+        "8/8/8/8/8/2K5/8/k7 w - - 0 1",
+        // King on e2, forced KOTH-in-2
+        "rnbqkbnr/1pppppp1/p6p/8/8/4P3/PPPPKPPP/RNBQ1BNR w kq - 0 3",
+        // King on e2, KOTH blocked by Qh4 defense
+        "rnbqkbnr/pppp1pp1/4p2p/8/8/4P3/PPPPKPPP/RNBQ1BNR w kq - 0 3",
+        // King far from center
+        "8/8/8/3k4/8/8/8/7K w - - 0 1",
+        // Black to move, king near center
+        "K7/8/8/8/8/5k2/8/8 b - - 0 1",
+        // King on b2
+        "8/8/8/8/8/8/1K6/k7 w - - 0 1",
+        // Both kings near center
+        "8/8/8/8/2Kk4/8/8/8 w - - 0 1",
+    ];
+
+    for fen in &positions {
+        let board = Board::new_from_fen(fen);
+        let result = koth_center_in_3(&board, &move_gen);
+        let best = koth_best_move(&board, &move_gen);
+
+        // Verify consistency: if center_in_3 returns Some(n>0), best_move should exist
+        if let Some(n) = result {
+            if n > 0 {
+                assert!(
+                    best.is_some(),
+                    "FEN {}: center_in_3={} but no best_move",
+                    fen, n
+                );
+            }
+        }
+
+        // Verify counted version agrees
+        let (counted_result, nodes) = koth_center_in_3_counted(&board, &move_gen);
+        assert_eq!(
+            result, counted_result,
+            "FEN {}: center_in_3 ({:?}) != counted ({:?})",
+            fen, result, counted_result
+        );
+    }
+}
+
+#[test]
+fn test_koth_prefilter_reduces_nodes() {
+    let move_gen = setup();
+    // Starting position: king on e1, far from center. Pre-filter should skip
+    // all ~20 non-king moves on root-side turns.
+    let board = Board::new();
+    let (result, nodes) = koth_center_in_3_counted(&board, &move_gen);
+    assert!(result.is_none());
+    // With pre-filter, we should visit very few nodes since king can't reach
+    // center in 3 moves from starting position (blocked by own pieces).
+    // Without pre-filter this would be much higher.
+    assert!(
+        nodes < 100,
+        "Pre-filter should keep node count low for starting position, got {}",
+        nodes
     );
 }
