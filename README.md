@@ -17,9 +17,9 @@ The name is a hybrid, like the engine: **Caissa** (the mythical goddess of chess
 
 | Tier | Mechanism | Property | Mean cost |
 |------|-----------|----------|-----------|
-| **Tier 1** | Safety Gates (checks-only mate search, KOTH geometry) | Provably correct, exact values | 213 us (KOTH) / 868 us (mate search) |
-| **Tier 2** | Quiescence search + MVV-LVA ordering | Classical tree search computes material after forced exchanges | 7 us |
-| **Tier 3** | Neural network (OracleNet) | Learned positional evaluation for uncertain positions | 1,795 us |
+| **Tier 1** | Safety Gates (checks-only mate search, KOTH geometry) | Provably correct, exact values | 437 us (KOTH) / 970 us (mate search) |
+| **Tier 2** | Quiescence search + MVV-LVA ordering | Classical tree search computes material after forced exchanges | 6 us |
+| **Tier 3** | Neural network (OracleNet) | Learned positional evaluation for uncertain positions | 1,803 us |
 
 Gate-resolved nodes are **terminal** — identical to checkmate or stalemate — so proven values propagate through the tree without dilution.
 
@@ -47,16 +47,16 @@ The $k$ head uses domain knowledge rather than learned convolutions: 12 scalar f
 
 ### Search Time Budget
 
-Profiled over 10 self-play games (400 simulations/move, KOTH enabled, gen_18 2M-parameter model on RTX 5060 Ti):
+Profiled over 10 self-play games (400 simulations/move, KOTH enabled, gen_18 2M-parameter model on RTX 5060 Ti, proportional move sampling with explore base 0.80):
 
-| Operation | Device | Calls | Mean | Std | % of wall time |
-|-----------|--------|------:|-----:|----:|---------------:|
-| NN inference | GPU | 277,410 | 1,795 us | 660 us | 63% |
-| Mate search | CPU | 262,400 | 868 us | 1,828 us | 28% |
-| KOTH-in-3 | CPU | 308,720 | 213 us | 432 us | 8% |
-| Q-search | CPU | 277,410 | 7 us | 12 us | <1% |
+| Operation | Device | Calls | Mean | Std | Mean nodes | us/node | % of wall time |
+|-----------|--------|------:|-----:|----:|-----------:|--------:|---------------:|
+| NN inference | GPU | 194,419 | 1,803 us | 789 us | — | — | 55% |
+| Mate search | CPU | 184,173 | 970 us | 3,214 us | 898 | 1.08 | 28% |
+| KOTH-in-3 | CPU | 228,767 | 437 us | 1,246 us | 845 | 0.52 | 16% |
+| Q-search | CPU | 194,419 | 6 us | 10 us | 12 | 0.49 | <1% |
 
-NN inference breaks down into three phases: CPU-to-GPU tensor transfer (53 us), GPU forward pass (1,143 us), and GPU-to-CPU result transfer (46 us). The GPU forward pass dominates at 92% of NN time — transfer overhead is negligible. Q-search is effectively free relative to the other operations, running 250x faster than a single NN call while providing the material delta that grounds every leaf evaluation.
+NN inference breaks down into three phases: CPU-to-GPU tensor transfer (53 us), GPU forward pass (1,153 us), and GPU-to-CPU result transfer (43 us). The GPU forward pass dominates at 92% of NN time — transfer overhead is negligible. KOTH and mate search have similar branching factors (~850 nodes) but mate search costs 2x more per node (1.08 vs 0.52 us/node) due to the additional `is_check()` test required for checks-only filtering. Q-search is effectively free relative to the other operations, running 300x faster than a single NN call while providing the material delta that grounds every leaf evaluation.
 
 The `profile_engine` binary reproduces these measurements: `./target/release/profile_engine --model <path> --games 10 --simulations 400 --koth`.
 
