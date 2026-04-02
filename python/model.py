@@ -79,30 +79,15 @@ class OracleNet(nn.Module):
         self.v_conv = nn.Conv2d(hidden_dim, 1, kernel_size=1) 
         self.v_bn = nn.BatchNorm2d(1)
         # 2. Flatten + Linear
-        self.v_fc = nn.Linear(64, 256) # 8x8 image * 1 channel = 64 inputs
+        self.v_fc = nn.Linear(65, 256) # 8x8 image * 1 channel = 64 + 1 q_result input
         self.v_out = nn.Linear(256, 1) # V_net (Residual)
         
-        # --- DYNAMIC K HEAD (Confidence) ---
-        # Handcrafted scalar features (12 values) + 5x5 king patches.
-        # k is a position-type property: open vs closed, king safety, endgame.
-        # Handcrafted features give k direct access to exactly the features
-        # that determine material convertibility, without needing to rediscover
-        # them from raw convolutions.
-        self.k_stm_patch_fc = nn.Linear(12 * 25, 32)   # STM king 5x5 neighborhood
-        self.k_opp_patch_fc = nn.Linear(12 * 25, 32)   # Opponent king 5x5 neighborhood
-        self.k_combine = nn.Linear(13 + 32 + 32, 32)   # scalars(12) + qsearch_flag(1) + both king patches
-        self.k_out = nn.Linear(32, 1)                   # k_logit -> K_net (Confidence)
-
-        # Light/dark square mask for bishop color detection
-        # Checkerboard: (row + col) % 2 == 0 is one color, == 1 is the other
-        mask = torch.zeros(8, 8)
-        for r in range(8):
-            for c in range(8):
-                if (r + c) % 2 == 0:
-                    mask[r, c] = 1.0
-        self.register_buffer('light_sq_mask', mask)  # [8, 8]
-        
-        # Denominator Constant: 2 * ln(2)
+        # --- DYNAMIC K (Confidence Scalar) ---
+        # Single learned scalar: k = softplus(k_logit) / (2*ln2).
+        # At init k_logit=0 → k=0.5 (half-trust quiescence).
+        # Position-dependent modulation is absorbed by the value head FC
+        # which receives q_result as a direct input.
+        self.k_logit = nn.Parameter(torch.tensor(0.0))
         self.k_scale = 2 * math.log(2)
 
         # Apply Initialization
@@ -111,115 +96,20 @@ class OracleNet(nn.Module):
         # --- ZERO INITIALIZATION (Crucial) ---
         self._zero_init_heads()
 
-    def _extract_k_scalars(self, x):
-        """Extract 12 handcrafted scalar features from the raw input tensor.
-
-        Args:
-            x: [B, 17, 8, 8] input tensor (STM perspective)
-        Returns:
-            [B, 12] tensor of scalar features
-        """
-        B = x.size(0)
-
-        # 1. Total pawns (STM + opponent)
-        total_pawns = x[:, 0].sum(dim=(1, 2)) + x[:, 6].sum(dim=(1, 2))  # [B]
-
-        # 2. STM non-pawn pieces (N, B, R, Q = planes 1-4)
-        stm_pieces = x[:, 1:5].sum(dim=(1, 2, 3))  # [B]
-
-        # 3. Opponent non-pawn pieces (N, B, R, Q = planes 7-10)
-        opp_pieces = x[:, 7:11].sum(dim=(1, 2, 3))  # [B]
-
-        # 4. STM queen present (plane 4)
-        stm_queen = x[:, 4].sum(dim=(1, 2))  # [B] (0 or 1)
-
-        # 5. Opponent queen present (plane 10)
-        opp_queen = x[:, 10].sum(dim=(1, 2))  # [B] (0 or 1)
-
-        # 6. Pawn contacts: STM pawn at row r, opponent pawn at row r-1
-        # In STM perspective, STM pawns advance toward row 0
-        stm_pawns = x[:, 0]   # [B, 8, 8]
-        opp_pawns = x[:, 6]   # [B, 8, 8]
-        contacts = (stm_pawns[:, 1:, :] * opp_pawns[:, :-1, :]).sum(dim=(1, 2))  # [B]
-
-        # 7. Castling rights (planes 13-16, each is full-board 0 or 1)
-        castling = x[:, 13:17, 0, 0].sum(dim=1)  # [B] (0-4)
-
-        # 8. STM king rank (from plane 5)
-        king_pos = x[:, 5].view(B, 64).argmax(dim=1)  # [B]
-        stm_king_rank = (king_pos // 8).float()  # [B] (0-7)
-
-        # 9-12. Bishop square colors (for opposite-colored bishops, bishop pair)
-        # Plane 2 = STM bishops, Plane 8 = opp bishops
-        # light_sq_mask has 1s on (r+c)%2==0 squares; the label swaps on board
-        # flip but relative same/opposite relationship is preserved.
-        stm_bishops = x[:, 2]   # [B, 8, 8]
-        opp_bishops = x[:, 8]   # [B, 8, 8]
-        stm_light_bishop = (stm_bishops * self.light_sq_mask).sum(dim=(1, 2))  # [B]
-        stm_dark_bishop = (stm_bishops * (1 - self.light_sq_mask)).sum(dim=(1, 2))  # [B]
-        opp_light_bishop = (opp_bishops * self.light_sq_mask).sum(dim=(1, 2))  # [B]
-        opp_dark_bishop = (opp_bishops * (1 - self.light_sq_mask)).sum(dim=(1, 2))  # [B]
-
-        return torch.stack([
-            total_pawns, stm_pieces, opp_pieces, stm_queen, opp_queen,
-            contacts, castling, stm_king_rank,
-            stm_light_bishop, stm_dark_bishop, opp_light_bishop, opp_dark_bishop,
-        ], dim=1)  # [B, 12]
-
-    def _extract_king_patch(self, x, king_plane):
-        """Extract 5x5 patch of piece planes centered on a king.
-
-        Args:
-            x: [B, 17, 8, 8] input tensor
-            king_plane: plane index for the king (5=STM, 11=opponent)
-        Returns:
-            [B, 300] flattened patch (12 channels x 5 x 5)
-        """
-        B = x.size(0)
-        piece_planes = x[:, :12]  # [B, 12, 8, 8]
-        padded = F.pad(piece_planes, (2, 2, 2, 2), value=0)  # [B, 12, 12, 12]
-
-        # Find king position from the specified plane
-        king_pos = x[:, king_plane].view(B, 64).argmax(dim=1)  # [B]
-        king_row = king_pos // 8  # [B]
-        king_col = king_pos % 8   # [B]
-
-        # Vectorized extraction using advanced indexing
-        row_off = torch.arange(5, device=x.device)
-        col_off = torch.arange(5, device=x.device)
-
-        # Build index tensors [B, 12, 5, 5]
-        batch_idx = torch.arange(B, device=x.device).view(B, 1, 1, 1).expand(B, 12, 5, 5)
-        ch_idx = torch.arange(12, device=x.device).view(1, 12, 1, 1).expand(B, 12, 5, 5)
-        row_idx = (king_row.view(B, 1, 1, 1) + row_off.view(1, 1, 5, 1)).expand(B, 12, 5, 5)
-        col_idx = (king_col.view(B, 1, 1, 1) + col_off.view(1, 1, 1, 5)).expand(B, 12, 5, 5)
-
-        patches = padded[batch_idx, ch_idx, row_idx, col_idx]  # [B, 12, 5, 5]
-        return patches.view(B, -1)  # [B, 300]
-
     def forward(self, x, scalars_input):
-        # scalars_input: [B, 2] — column 0 = material_scalar, column 1 = qsearch_completed flag
+        # scalars_input: [B, 2] — column 0 = q_result (material delta), column 1 = qsearch_completed flag
         # Ensure shape [B, 2]
         if scalars_input.dim() == 1:
             scalars_input = scalars_input.unsqueeze(1)
         if scalars_input.size(1) == 1:
-            # Backward compat: pad with 1.0 (assume completed) if only material provided
+            # Backward compat: pad with 1.0 (assume completed) if only q_result provided
             scalars_input = torch.cat([scalars_input, torch.ones_like(scalars_input)], dim=1)
 
-        material_scalar = scalars_input[:, 0:1]   # [B, 1]
-        qsearch_flag = scalars_input[:, 1:2]      # [B, 1]
+        q_result = scalars_input[:, 0:1]   # [B, 1]
 
-        # K path: handcrafted scalars + qsearch flag + king patches (independent of backbone)
-        board_scalars = self._extract_k_scalars(x)                   # [B, 12]
-        stm_patch = self._extract_king_patch(x, king_plane=5)       # [B, 300]
-        opp_patch = self._extract_king_patch(x, king_plane=11)      # [B, 300]
-
-        stm_feat = F.relu(self.k_stm_patch_fc(stm_patch))           # [B, 32]
-        opp_feat = F.relu(self.k_opp_patch_fc(opp_patch))           # [B, 32]
-
-        k_feat = torch.cat([board_scalars, qsearch_flag, stm_feat, opp_feat], dim=1)  # [B, 77]
-        k_feat = F.relu(self.k_combine(k_feat))                     # [B, 32]
-        k_logit = self.k_out(k_feat)                                # [B, 1]
+        # K: global scalar confidence (position-independent)
+        k = F.softplus(self.k_logit) / self.k_scale  # scalar
+        k_batch = k.unsqueeze(0).expand(x.size(0), 1)  # [B, 1]
 
         # Backbone
         x = F.relu(self.start_bn(self.start_conv(x)))
@@ -236,28 +126,25 @@ class OracleNet(nn.Module):
         p = p.contiguous().view(p.size(0), -1) # Flatten to [B, 4672]
         policy = F.log_softmax(p, dim=1)
 
-        # Value Path (backbone-dependent)
+        # Value Path (backbone-dependent + q_result input)
         v_feat = F.relu(self.v_bn(self.v_conv(x)))
-        v_feat = v_feat.view(v_feat.size(0), -1)
+        v_feat = v_feat.view(v_feat.size(0), -1)          # [B, 64]
+        v_feat = torch.cat([v_feat, q_result], dim=1)      # [B, 65]
         v = F.relu(self.v_fc(v_feat))
         v_logit = self.v_out(v) # Logits
-        
-        # Calculate k (Confidence Scalar)
-        # k = Softplus(k_logit) / (2 * ln2)
-        k = F.softplus(k_logit) / self.k_scale
-        
+
         # Residual Recombination
-        # V_final = Tanh( V_net + k * DeltaM )
-        total_logit = v_logit + (k * material_scalar)
+        # V_final = Tanh( V_net + k * q_result )
+        total_logit = v_logit + (k_batch * q_result)
         value = torch.tanh(total_logit)
 
         if self.training:
-            # Training: return tanh(v_logit + k * material) for loss computation
-            return policy, value, k
+            # Training: return tanh(v_logit + k * q_result) for loss computation
+            return policy, value, k_batch
         else:
             # Inference: return raw v_logit so Rust can compute
             # tanh(v_logit + k * delta_M) with enhanced material Q-search
-            return policy, v_logit, k
+            return policy, v_logit, k_batch
 
     # Standard He Initialization for the body
     def _init_weights(self, m):
@@ -283,7 +170,5 @@ class OracleNet(nn.Module):
         nn.init.constant_(self.v_out.weight, 0.0)
         nn.init.constant_(self.v_out.bias, 0.0)
         
-        # 3. K Head: Initialize to match k=0.5
+        # 3. K scalar: k_logit is initialized to 0.0 in __init__
         # Softplus(0) = ln(2). k = ln(2) / (2*ln(2)) = 0.5.
-        nn.init.constant_(self.k_out.weight, 0.0)
-        nn.init.constant_(self.k_out.bias, 0.0)

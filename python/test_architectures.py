@@ -1,4 +1,6 @@
+import math
 import torch
+import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from model import OracleNet
@@ -196,85 +198,74 @@ def print_tensor_as_board(tensor):
     print("  +-----------------+")
     print("    a b c d e f g h")
 
-def test_k_feature_extraction():
-    """Verify k head feature extraction on known starting position."""
-    print(f"\nTesting k Feature Extraction...")
+def test_no_k_head_layers():
+    """K-head layers removed, scalar k_logit added."""
+    model = OracleNet()
+    # Old layers must be gone
+    assert not hasattr(model, 'k_stm_patch_fc')
+    assert not hasattr(model, 'k_opp_patch_fc')
+    assert not hasattr(model, 'k_combine')
+    assert not hasattr(model, 'k_out')
+    # New scalar param must exist
+    assert hasattr(model, 'k_logit')
+    assert isinstance(model.k_logit, nn.Parameter)
+    assert model.k_logit.shape == ()  # scalar
+
+def test_scalar_k_is_position_independent():
+    """k must be identical for all inputs (global scalar)."""
     model = OracleNet()
     model.eval()
-
-    board = get_starting_position_tensor()  # [1, 17, 8, 8]
-    errors = []
-
-    # --- Test scalar features ---
-    scalars = model._extract_k_scalars(board)  # [1, 12]
-    assert scalars.shape == (1, 12), f"Scalars shape {scalars.shape} != (1, 12)"
-
-    total_pawns = scalars[0, 0].item()
-    stm_pieces = scalars[0, 1].item()
-    opp_pieces = scalars[0, 2].item()
-    stm_queen = scalars[0, 3].item()
-    opp_queen = scalars[0, 4].item()
-    contacts = scalars[0, 5].item()
-    castling = scalars[0, 6].item()
-    stm_king_rank = scalars[0, 7].item()
-
-    if abs(total_pawns - 16.0) > 0.01:
-        errors.append(f"total_pawns={total_pawns}, expected 16")
-    if abs(stm_pieces - 7.0) > 0.01:
-        errors.append(f"stm_pieces={stm_pieces}, expected 7 (2N+2B+2R+1Q)")
-    if abs(opp_pieces - 7.0) > 0.01:
-        errors.append(f"opp_pieces={opp_pieces}, expected 7")
-    if abs(stm_queen - 1.0) > 0.01:
-        errors.append(f"stm_queen={stm_queen}, expected 1")
-    if abs(opp_queen - 1.0) > 0.01:
-        errors.append(f"opp_queen={opp_queen}, expected 1")
-    if abs(contacts - 0.0) > 0.01:
-        errors.append(f"contacts={contacts}, expected 0 (pawns not adjacent)")
-    if abs(castling - 4.0) > 0.01:
-        errors.append(f"castling={castling}, expected 4")
-    # STM king is at tensor row 7, col 4 -> flat pos = 7*8+4 = 60, rank = 60//8 = 7
-    if abs(stm_king_rank - 7.0) > 0.01:
-        errors.append(f"stm_king_rank={stm_king_rank}, expected 7")
-
-    # --- Test king patch extraction ---
-    stm_patch = model._extract_king_patch(board, king_plane=5)  # [1, 300]
-    opp_patch = model._extract_king_patch(board, king_plane=11)  # [1, 300]
-
-    assert stm_patch.shape == (1, 300), f"STM patch shape {stm_patch.shape} != (1, 300)"
-    assert opp_patch.shape == (1, 300), f"Opp patch shape {opp_patch.shape} != (1, 300)"
-
-    # STM king at row 7, col 4 (e1 in tensor coords)
-    # 5x5 patch centered there: rows 5-9, cols 2-6 (padded board rows 7-11, cols 4-8)
-    # Rows 7 (rank 1) has pieces, row 6 (rank 2) has pawns, rows 5,8,9 are empty/padding
-    # Patch should contain non-zero values (pieces around king)
-    stm_nonzero = (stm_patch.abs() > 0.01).sum().item()
-    if stm_nonzero == 0:
-        errors.append("STM king patch is all zeros — expected pieces around king")
-
-    # Opponent king at row 0, col 4 (e8 in tensor coords)
-    opp_nonzero = (opp_patch.abs() > 0.01).sum().item()
-    if opp_nonzero == 0:
-        errors.append("Opp king patch is all zeros — expected pieces around king")
-
-    # --- Test k output on starting position ---
     with torch.no_grad():
-        scalars_input = torch.zeros(1, 2)  # [material=0, qsearch_flag=0]
-        _, _, k = model(board, scalars_input)
+        s = torch.zeros(1, 2)
+        _, _, k1 = model(torch.randn(1, 17, 8, 8), s)
+        _, _, k2 = model(torch.randn(1, 17, 8, 8), s)
+    assert k1.item() == k2.item()
 
-    if abs(k.item() - 0.5) > 0.05:
-        errors.append(f"k={k.item():.4f}, expected ~0.5 with zero init")
+def test_v_fc_accepts_65_inputs():
+    """Value head FC widened to 65 (64 conv + 1 q_result)."""
+    model = OracleNet()
+    assert model.v_fc.in_features == 65
 
-    if errors:
-        for e in errors:
-            print(f"  ❌ {e}")
-        print(f"❌ k Feature Extraction FAILED ({len(errors)} errors)")
-    else:
-        print(f"  Scalars: pawns={total_pawns:.0f}, stm_pcs={stm_pieces:.0f}, opp_pcs={opp_pieces:.0f}, "
-              f"stm_Q={stm_queen:.0f}, opp_Q={opp_queen:.0f}, contacts={contacts:.0f}, "
-              f"castling={castling:.0f}, king_rank={stm_king_rank:.0f}")
-        print(f"  STM patch nonzero: {stm_nonzero}/300, Opp patch nonzero: {opp_nonzero}/300")
-        print(f"  k = {k.item():.4f} (expected ~0.5)")
-        print(f"✅ k Feature Extraction Correct")
+def test_k_logit_zero_init_gives_half():
+    """softplus(0) / (2*ln2) = 0.5."""
+    model = OracleNet()
+    k = F.softplus(model.k_logit) / (2 * math.log(2))
+    assert abs(k.item() - 0.5) < 0.01
+
+def test_q_result_influences_v_logit():
+    """After minimal training, changing scalars[0] (q_result) must change v_logit.
+
+    At zero-init v_out is all zeros so v_logit=0 regardless of input.
+    A single training step breaks the symmetry and lets q_result flow through.
+    """
+    model = OracleNet()
+    # One training step to break zero-init symmetry
+    model.train()
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    dummy_board = torch.randn(1, 17, 8, 8)
+    dummy_scalars = torch.tensor([[1.0, 1.0]])
+    dummy_policy = torch.randn(1, 4672).softmax(dim=1)
+    dummy_value = torch.tensor([[0.5]])
+    pred_policy, pred_value, _ = model(dummy_board, dummy_scalars)
+    loss = F.mse_loss(pred_value, dummy_value)
+    loss.backward()
+    optimizer.step()
+
+    # Now test in eval mode
+    model.eval()
+    board = torch.randn(1, 17, 8, 8)
+    with torch.no_grad():
+        _, vlogit_a, _ = model(board, torch.tensor([[0.0, 1.0]]))
+        _, vlogit_b, _ = model(board, torch.tensor([[5.0, 1.0]]))
+    assert vlogit_a.item() != vlogit_b.item(), "q_result should influence v_logit after training"
+
+def test_param_count_reduced():
+    """~21,536 fewer params than old model."""
+    model = OracleNet()
+    count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # Old: ~2,000,622. New: ~1,979,086. Allow margin.
+    assert count < 1_985_000, f"Too many params: {count}"
+    assert count > 1_970_000, f"Too few params: {count}"
 
 
 def sample_output_demo():
@@ -313,12 +304,17 @@ def sample_output_demo():
 
 if __name__ == "__main__":
     print("=== Verifying OracleNet Architecture ===")
-    
+
     # 1. Test Shapes & Sizes
     test_model_shapes()
-    
-    # 2. Test k Feature Extraction
-    test_k_feature_extraction()
+
+    # 2. K-head simplification tests
+    test_no_k_head_layers()
+    test_scalar_k_is_position_independent()
+    test_v_fc_accepts_65_inputs()
+    test_k_logit_zero_init_gives_half()
+    test_q_result_influences_v_logit()
+    test_param_count_reduced()
 
     # 3. Test Gradient Flow (Overfitting)
     test_overfitting()

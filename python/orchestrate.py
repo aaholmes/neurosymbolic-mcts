@@ -201,14 +201,12 @@ class OrchestratorState:
 def export_model_for_rust(model, output_path):
     """Export PyTorch model to TorchScript for Rust integration.
 
-    Traces on CUDA if available so that device-dependent ops (like
-    torch.arange(..., device=x.device) in the k-head) are correctly
-    baked in for GPU inference in Rust.
+    Traces on CUDA if available for GPU inference in Rust.
     """
     device = next(model.parameters()).device
     model.eval()
     example_board = torch.randn(1, 17, 8, 8, device=device)
-    example_scalars = torch.randn(1, 2, device=device)  # [material, qsearch_flag]
+    example_scalars = torch.randn(1, 2, device=device)  # [q_result, qsearch_flag]
     traced = torch.jit.trace(model, (example_board, example_scalars))
     traced.save(output_path)
     print(f"Exported TorchScript model to {output_path} (traced on {device})")

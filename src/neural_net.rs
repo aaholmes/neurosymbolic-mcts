@@ -145,14 +145,15 @@ mod real {
             &mut self,
             board: &Board,
             qsearch_completed: bool,
+            q_result: f32,
         ) -> Option<(Vec<f32>, f32, f32)> {
             let model = self.model.as_ref()?;
             let input = self.board_to_tensor(board).unsqueeze(0);
 
-            // Build [1, 2] scalars tensor: [material=0.0, qsearch_flag]
-            // Material scalar is unused by the traced eval-mode model (it returns
-            // raw v_logit; Rust combines with k * delta_M separately). Pass zero.
-            let scalars_data = [0.0f32, if qsearch_completed { 1.0 } else { 0.0 }];
+            // Build [1, 2] scalars tensor: [q_result, qsearch_flag]
+            // q_result is the material delta from quiescence search, fed as input
+            // to the value head FC and used in the additive k * q_result path.
+            let scalars_data = [q_result, if qsearch_completed { 1.0 } else { 0.0 }];
             let scalars_tensor = Tensor::from_slice(&scalars_data)
                 .view([1, 2])
                 .to_device(self.device)
@@ -208,6 +209,7 @@ mod real {
             &mut self,
             boards: &[Board],
             qsearch_flags: &[bool],
+            q_results: &[f32],
         ) -> Vec<Option<(Vec<f32>, f32, f32)>> {
             let model = match self.model.as_ref() {
                 Some(m) => m,
@@ -224,13 +226,12 @@ mod real {
 
             // Stack inputs into [B, 17, 8, 8]
             let input_batch = Tensor::stack(&input_tensors, 0);
-            // Build [B, 2] scalars tensor: [material=0.0, qsearch_flag]
-            // Material scalar is unused by the traced eval-mode model (it returns
-            // raw v_logit; Rust combines with k * delta_M separately). Pass zeros.
+            // Build [B, 2] scalars tensor: [q_result, qsearch_flag]
+            // q_result is the material delta from quiescence search.
             let b = boards.len();
             let mut scalars_data = vec![0.0f32; b * 2];
             for i in 0..b {
-                // scalars_data[i*2 + 0] = 0.0 (material, already zero)
+                scalars_data[i * 2] = q_results[i];
                 scalars_data[i * 2 + 1] = if qsearch_flags[i] { 1.0 } else { 0.0 };
             }
             let scalars_batch = Tensor::from_slice(&scalars_data)
@@ -323,7 +324,7 @@ mod real {
         }
 
         pub fn get_position_value(&mut self, board: &Board) -> Option<i32> {
-            let (_, value, _) = self.predict(board, true)?;
+            let (_, value, _) = self.predict(board, true, 0.0)?;
             Some((value * 1000.0) as i32)
         }
 
@@ -407,6 +408,7 @@ mod stub {
             &mut self,
             _board: &Board,
             _qsearch_completed: bool,
+            _q_result: f32,
         ) -> Option<(Vec<f32>, f32, f32)> {
             None
         }
@@ -414,6 +416,7 @@ mod stub {
             &mut self,
             boards: &[Board],
             _qsearch_flags: &[bool],
+            _q_results: &[f32],
         ) -> Vec<Option<(Vec<f32>, f32, f32)>> {
             vec![None; boards.len()]
         }

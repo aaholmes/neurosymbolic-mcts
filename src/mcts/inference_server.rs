@@ -14,6 +14,7 @@ use std::time::Duration;
 pub struct PredictRequest {
     pub board: Board,
     pub qsearch_completed: bool,
+    pub q_result: f32,
     pub response_sender: Sender<Option<(Vec<f32>, f32, f32)>>,
 }
 
@@ -56,7 +57,8 @@ impl InferenceServer {
                 let boards: Vec<Board> = requests.iter().map(|r| r.board.clone()).collect();
                 let qsearch_flags: Vec<bool> =
                     requests.iter().map(|r| r.qsearch_completed).collect();
-                let results = nn.predict_batch(&boards, &qsearch_flags);
+                let q_results: Vec<f32> = requests.iter().map(|r| r.q_result).collect();
+                let results = nn.predict_batch(&boards, &qsearch_flags, &q_results);
 
                 // 4. Dispatch Results
                 for (req, res) in requests.drain(..).zip(results) {
@@ -125,11 +127,13 @@ impl InferenceServer {
         &self,
         board: Board,
         qsearch_completed: bool,
+        q_result: f32,
     ) -> Receiver<Option<(Vec<f32>, f32, f32)>> {
         let (response_sender, response_receiver) = crossbeam_channel::bounded(1);
         let _ = self.request_sender.send(PredictRequest {
             board,
             qsearch_completed,
+            q_result,
             response_sender,
         });
         response_receiver

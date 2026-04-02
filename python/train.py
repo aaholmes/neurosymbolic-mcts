@@ -241,7 +241,7 @@ def freeze_heads(model, train_heads):
     # Parameter name prefixes for each head
     policy_prefixes = ("p_conv", "p_bn", "p_head")
     value_prefixes = ("v_conv", "v_bn", "v_fc", "v_out")
-    k_prefixes = ("k_stm_patch_fc", "k_opp_patch_fc", "k_combine", "k_out")
+    k_prefixes = ("k_logit",)
 
     if train_heads == "policy":
         frozen = value_prefixes + k_prefixes

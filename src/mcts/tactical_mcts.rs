@@ -666,7 +666,7 @@ fn evaluate_leaf_node(
             if let Some(server) = &config.inference_server {
                 if config.use_neural_policy {
                     let nn_start = Instant::now();
-                    let receiver = server.predict_async(node_ref.state.clone(), qsearch_completed);
+                    let receiver = server.predict_async(node_ref.state.clone(), qsearch_completed, delta_m as f32);
                     if let Ok(Some((policy, nn_v_logit, k))) = receiver.recv() {
                         v_logit = nn_v_logit as f64;
                         k_val = k;
