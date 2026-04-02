@@ -1,11 +1,6 @@
 name: Run Experiments
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'scripts/**'
   workflow_dispatch:
 
 jobs:
