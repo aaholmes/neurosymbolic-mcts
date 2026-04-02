@@ -79,7 +79,7 @@ use std::time::{Duration, Instant};
 pub fn material_qsearch(
     board: &mut BoardStack,
     move_gen: &MoveGen,
-    mut alpha: i32,
+    alpha: i32,
     beta: i32,
     max_depth: u8,
 ) -> (i32, bool) {
