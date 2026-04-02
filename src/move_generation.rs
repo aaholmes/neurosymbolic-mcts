@@ -276,6 +276,17 @@ impl MoveGen {
         move_gen
     }
 
+    /// Access the rook attack bitboard table (for GPU table export).
+    /// Returns a reference to the jagged array: [square][magic_key] -> attack bitboard.
+    pub fn rook_attack_table(&self) -> &Vec<Vec<u64>> {
+        &self.r_move_bitboard
+    }
+
+    /// Access the bishop attack bitboard table (for GPU table export).
+    pub fn bishop_attack_table(&self) -> &Vec<Vec<u64>> {
+        &self.b_move_bitboard
+    }
+
     /// Internal helper to generate all pseudo-legal moves, separated.
     fn _generate_all_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>, Vec<Move>) {
         // Returns (captures, promotions, quiet_moves)
