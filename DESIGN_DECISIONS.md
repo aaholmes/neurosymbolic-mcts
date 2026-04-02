@@ -12,7 +12,7 @@ Standard chess is a surprisingly poor testbed for Tier 1 safety gates. Forced ch
 
 **The hypothesis.** Decompose positions into three tiers: (1) tractable subgames with exact solutions, (2) positions with useful heuristic structure, and (3) genuinely uncertain positions requiring learned evaluation. Only Tier 3 needs the neural network.
 
-**Domain-general framing.** This decomposition applies wherever MCTS encounters tractable subproblems. The most natural next domain is mathematical reasoning: automated theorem provers (Lean's `decide`, `omega`, `norm_num`) can resolve certain subgoals exactly, while a neural policy guides the high-level proof search through uncertain creative steps. The confidence scalar $k$ maps directly: high when the subgoal is prover-friendly, low when it requires creative insight.
+**Domain-general framing.** This decomposition applies wherever MCTS encounters tractable subproblems. The most natural next domain is mathematical reasoning: automated theorem provers (Lean's `decide`, `omega`, `norm_num`) can resolve certain subgoals exactly, while a neural policy guides the high-level proof search through uncertain creative steps. The confidence scalar $k$ maps directly: a global trust level in the computable component, modulated per-position by the value head.
 
 The pattern is always the same: compute what you can exactly, heuristically order what you understand, learn what remains.
 
@@ -128,7 +128,7 @@ Nodes jump 3.7x (from ~3-5 checks to ~35 legal moves at shallow plies), but time
 
 ## 3. Tier 2: Quiescence Search and Tactical Ordering
 
-Tier 2's core contribution is `forced_material_balance()` — a material-only quiescence search (depth 20) that runs at every MCTS leaf evaluation to compute $\Delta M$, the material balance after all forced captures and promotions resolve. This is a classical alpha-beta tree search whose results no neural network can easily replicate: it explores variable-depth exchange sequences to detect hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds directly into the value function (see Section 4), providing the foundation that the NN builds on top of.
+Tier 2's core contribution is `forced_material_balance()` — a material-only quiescence search (depth 20) that runs at every MCTS leaf evaluation to compute $\Delta M$, the material balance after all forced captures and promotions resolve. This is a classical alpha-beta tree search whose results no neural network can easily replicate: it explores variable-depth exchange sequences to detect hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds into the value function through two paths: as a direct input feature to the value head's FC layer (position-dependent learned modulation) and via the additive $k \cdot \Delta M$ term (global baseline trust), providing the foundation that the NN builds on top of.
 
 The visit-ordering component (MVV-LVA) is a minor addition: captures are visited in Most-Valuable-Victim / Least-Valuable-Attacker order on their first visit. After the first visit, normal UCB selection takes over.
 
@@ -164,25 +164,27 @@ If the NN returned a bounded value in [-1, 1], adding $k \cdot \Delta M$ would s
 
 ### Dynamic k: learned confidence in material
 
-Not all positions are equally material-sensitive. In a closed Sicilian with locked pawns, material imbalances matter less than in an open position. The network learns $k$ per position: high $k$ in open, tactical positions; low $k$ in closed, strategic ones.
+Not all positions are equally material-sensitive. In a closed Sicilian with locked pawns, material imbalances matter less than in an open position.
 
-$k$ is computed as $\text{Softplus}(K_{net}) / (2\ln 2)$ where $K_{net}$ is a raw network output. At initialization ($K_{net} = 0$): $k = \ln(2) / (2\ln 2) = 0.5$, giving a reasonable material weight from the start.
+$k$ is computed as $\text{Softplus}(k_{logit}) / (2\ln 2)$ where $k_{logit}$ is a single learned scalar (`nn.Parameter`). At initialization ($k_{logit} = 0$): $k = \ln(2) / (2\ln 2) = 0.5$, giving a reasonable material weight from the start.
 
-### k architecture: handcrafted features, not learned convolutions
+### k architecture evolution: from per-position networks to a global scalar
 
 The first implementation computed $k$ from the backbone's penultimate features (shared with the value head). This caused $k$ to overfit to specific positions — the deep features encoded too much position-specific detail.
 
 The second design used a **separate shallow input network** for $k$: a single 3x3 conv → BN → global average pool → two linear layers. This was too shallow — one 3x3 conv + global average pool is a "bag of local patterns" that knows what local patterns exist but not where they are. It cannot reliably detect king safety (diluted to 1/64 of signal), pawn structure (multi-hop), or open files (long-range).
 
-The current design uses **handcrafted scalar features + king patches**, consistent with the project philosophy of "compute what you can, learn what you must":
+The third design used **handcrafted scalar features + king patches**: 12 scalar features (pawn counts, piece counts, queen presence, pawn contacts, castling rights, king rank, bishop square-color presence) + Q-search completion flag + two 5×5 king-centered patches compressed via FC(300→32), combined via FC(77→32→1). Total: ~22k parameters. This worked well but had two drawbacks: (1) the dynamic king-patch extraction (per-sample argmax + 5×5 gather) was hostile to CUDA reimplementation for a future GPU-resident MCTS kernel, and (2) the position-dependent modulation it provided could be absorbed by the value head itself.
 
-**Scalar features (12 values):** total pawns (open vs closed), STM/opponent non-pawn piece counts (endgame detection), STM/opponent queen presence (tactical complexity), pawn contacts (direct closedness measure), castling rights count (game phase), STM king rank (exposed vs castled), plus 4 bishop square-color features (light-squared and dark-squared bishop presence for each side). The bishop features enable $k$ to detect opposite-colored bishop endgames (lower $k$ — material harder to convert) and bishop pair advantage (higher $k$). These are extracted directly from the input tensor with simple sums and a precomputed checkerboard mask — no learned parameters.
+**Current design: global scalar k + q_result as value head input.** The K-head was removed entirely (−21,536 parameters) and replaced with:
+1. A single `nn.Parameter` scalar $k_{logit}$, initialized to 0 → $k = 0.5$
+2. The Q-search result ($\Delta M$) concatenated as a 65th input to the value head's first FC layer (widened from FC(64→256) to FC(65→256))
 
-**King patches (2 × 32 features):** 5×5 windows of all 12 piece planes centered on each king, padded for edge kings. Each 300-dim patch is compressed by a separate FC(300→32) + ReLU — separate weights for STM and opponent kings since they have different semantics (king safety vs. attack potential). This captures local piece configurations around each king without global average pooling's dilution.
+This preserves both paths for material information to influence the value:
+- **Additive path** ($k \cdot \Delta M$): a global, position-independent baseline trust level
+- **Learned path** ($\Delta M$ as input to FC): the value head learns position-dependent adjustments through its existing weights — in quiet endgames it can learn that $\Delta M$ is uninformative, in sharp middlegames it can learn to rely on it heavily
 
-**Q-search completion flag (1 value):** A binary flag indicating whether the depth-20 quiescence search resolved naturally (ran out of captures or hit a stand-pat cutoff) or hit the depth limit with captures remaining. When incomplete, deltaM may be unreliable — this flag lets k learn to discount material in deeply tactical positions where the Q-search couldn't fully resolve.
-
-**Combination:** `[12 scalars | 1 qsearch flag | 32 STM patch features | 32 opp patch features]` → FC(77→32) → ReLU → FC(32→1) → k_logit. Only the final FC(32→1) is zero-initialized; patch FCs and combine layer use standard He init. Total: ~22k parameters (tiny vs ~2M model total).
+The key insight: making $k$ position-independent is acceptable because the position-dependent part of "how much to trust material" is learned implicitly through the value head FC layers. The scalar $k$ sets the global operating point; the network adjusts around it.
 
 ### Classical fallback: V\_logit=0, k=0.5
 
@@ -210,18 +212,18 @@ When Black is to move, ranks are flipped so STM pieces always appear at the "bot
 
 ### Value head: symbolic residual design
 
-1x1 conv → BN → flatten (64 features) → FC(64→256) → FC(256→1). The output is $V_{logit}$ (unbounded). This feeds into the symbolic residual formula with the independently-computed $k$ and $\Delta M$.
+1x1 conv → BN → flatten (64 features) → concat(q_result) → FC(65→256) → FC(256→1). The Q-search result ($\Delta M$) is fed as a direct 65th input feature, giving the value head position-dependent control over material trust. The output is $V_{logit}$ (unbounded). This feeds into the symbolic residual formula with the independently-computed $k$ and $\Delta M$.
 
-### k head: handcrafted features + king patches
+### k: global scalar
 
-12 scalar features (pawn count, piece counts, queen presence, pawn contacts, castling rights, king rank, bishop square-color presence) + 1 Q-search completion flag + two 5×5 king-centered patches compressed via FC(300→32). Scalars + flag + compressed patches → FC(77→32) → FC(32→1). Operates on raw input, independent of the backbone. See Section 4 for the rationale.
+Single `nn.Parameter` scalar $k_{logit}$, output via $\text{softplus}(k_{logit}) / (2\ln 2)$. Sets a global baseline trust level in material. Position-dependent modulation is absorbed by the value head FC which receives $\Delta M$ as a direct input. See Section 4 for the architectural evolution.
 
 ### Zero initialization
 
-All three output layers ($V_{out}$, $K_{out}$, policy head) are initialized to zero:
+All output layers ($V_{out}$, policy head) are initialized to zero. $k_{logit}$ is initialized to 0 (giving $k = 0.5$):
 - **Policy:** $\text{softmax}(0, 0, ...) = $ uniform distribution (explore everything equally)
 - **Value:** $V_{logit} = 0$, so $V_{final} = \tanh(k \cdot \Delta M)$ (pure material evaluation)
-- **k:** $K_{net} = 0 \Rightarrow k = 0.5$ (moderate material weight)
+- **k:** $k_{logit} = 0 \Rightarrow k = 0.5$ (moderate material weight)
 
 This means a freshly initialized network immediately produces meaningful behavior: uniform exploration with material-aware evaluation.
 
@@ -424,7 +426,7 @@ The three-tier decomposition is not chess-specific. The pattern — injecting ex
 
 The key requirement: exactly resolved nodes must be **terminal** in the MCTS tree. If a proven node can be expanded and diluted by approximate child evaluations, the proof is wasted. This terminal semantics insight is the most transferable contribution.
 
-The value function factorization ($V = \tanh(V_{learned} + k \cdot V_{computed})$) also transfers: any domain where part of the evaluation can be computed exactly benefits from separating the learnable residual from the computable component. The learned confidence scalar $k$ modulates trust in the exact component based on context — in chess, $k$ adapts to how convertible a material advantage is; in mathematical reasoning, an analogous scalar could modulate trust in a theorem prover's assessment based on how prover-friendly the current subgoal is.
+The value function factorization ($V = \tanh(V_{learned} + k \cdot V_{computed})$) also transfers: any domain where part of the evaluation can be computed exactly benefits from separating the learnable residual from the computable component. The learned confidence scalar $k$ provides a global trust level in the exact component, while feeding the computed result as a direct input to the value head enables per-position modulation — in chess, the value head learns to rely more on $\Delta M$ in open tactical positions and less in closed strategic ones; in mathematical reasoning, an analogous architecture could modulate trust in a theorem prover's assessment based on how prover-friendly the current subgoal is.
 
 ## 10. Related Work
 
@@ -434,7 +436,7 @@ Caissawary draws on and extends several lines of prior work:
 
 - **MCTS-Solver** (Winands et al., 2008) propagates proven game-theoretic values (wins/losses) through MCTS trees, avoiding the dilution of exact values by approximate backups. Caissawary extends this idea by treating *any* provably resolved node as terminal — not just endgame wins/losses, but also short forced mates and KOTH geometric wins detected mid-search.
 
-- **KataGo** (Wu, 2019) incorporates handcrafted features alongside neural evaluation, including ownership predictions and score estimation. Caissawary's $k$-head similarly uses handcrafted features (pawn structure, piece counts, king patches) but in a different role: as a learned confidence scalar that modulates the influence of a separately computed material balance, rather than as auxiliary prediction targets.
+- **KataGo** (Wu, 2019) incorporates handcrafted features alongside neural evaluation, including ownership predictions and score estimation. Caissawary's $k$ scalar similarly modulates the influence of a separately computed material balance, but as a global learned parameter rather than a per-position prediction — position-dependent modulation is absorbed by the value head which receives the Q-search result as a direct input feature.
 
 - **MT-MCTS** (Mannen & Wiering, 2012) decomposes games into subgames solved by specialized agents. Caissawary's three-tier structure is a specific instance of this: Tier 1 handles tractable subgames exactly, Tier 2 applies domain heuristics, and Tier 3 handles the uncertain residual with learned evaluation.
 

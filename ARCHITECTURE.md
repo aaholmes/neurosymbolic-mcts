@@ -10,7 +10,7 @@ Decompose MCTS evaluation into three tiers: **compute what you can exactly, orde
 
 **Tier 1 — Safety Gates (exact).** Mate search (checks-only for mate-in-1/2/3) and KOTH geometric pruning (can king reach center in 3?). Resolved nodes become **terminal** — never expanded, value is exact. Terminal semantics prevent proven values from being diluted by approximate child evaluations. An `exhaustive_mate_depth` parameter (default 0) can enable exhaustive search at shallower depths to catch quiet-first forced mates, but checks-only is sufficient in practice.
 
-**Tier 2 — Quiescence Search (classical tree search).** Every MCTS leaf evaluation runs `forced_material_balance()`: a material-only alpha-beta Q-search (depth 20) that resolves all forced captures and promotions. This produces deltaM — the true material balance after tactical dust settles — and a completion flag indicating whether the search resolved naturally or hit the depth limit with captures remaining. A position may look equal (P=P) but after forced exchanges be +3. No neural network can easily replicate this because it requires a classical tree search over variable-depth exchange sequences. deltaM feeds directly into the value function (see below), and the completion flag feeds into the k head so the NN can discount unreliable material when the Q-search couldn't fully resolve. Q-search runs before NN inference so the completion flag is available for the inference request. Additionally, captures are visited in MVV-LVA order on their first visit (PxQ before QxP), though this is a minor optimization.
+**Tier 2 — Quiescence Search (classical tree search).** Every MCTS leaf evaluation runs `forced_material_balance()`: a material-only alpha-beta Q-search (depth 20) that resolves all forced captures and promotions. This produces deltaM — the true material balance after tactical dust settles. A position may look equal (P=P) but after forced exchanges be +3. No neural network can easily replicate this because it requires a classical tree search over variable-depth exchange sequences. deltaM feeds directly into both the value function additive path (`k * deltaM`) and as an input feature to the value head's FC layer, giving the NN position-dependent control over material trust. Q-search runs before NN inference so the result is available as a model input. Additionally, captures are visited in MVV-LVA order on their first visit (PxQ before QxP), though this is a minor optimization.
 
 **Tier 3 — Neural Network (learned).** OracleNet provides policy (move probabilities) and V_logit (positional assessment). The NN only needs to learn what the Q-search can't compute: piece activity, king safety, pawn structure, and how much to trust material (k).
 
@@ -24,18 +24,18 @@ V_final = tanh(V_logit + k * deltaM)
 
 - **deltaM** (Tier 2, computed): material balance after forced exchanges — the output of the Q-search tree search, run at every leaf
 - **V_logit** (Tier 3, NN, unbounded): positional assessment — everything the Q-search doesn't capture
-- **k** (Tier 3, NN, positive): learned confidence in material — high in open/tactical positions, low in closed/strategic ones
+- **k** (Tier 3, NN, positive): learned scalar that sets a global baseline trust level in material
 
-The Q-search result is the foundation: it provides information that requires a classical tree search to compute (hanging pieces, exchange sequences, forced promotions). The NN then adds a positional residual and modulates how much the material term matters. This factorization avoids the NN having to rediscover piece values and tactical exchange outcomes from scratch. The classical fallback (no NN) uses V_logit=0, k=0.5: pure material evaluation from the Q-search.
+The Q-search result is the foundation: it provides information that requires a classical tree search to compute (hanging pieces, exchange sequences, forced promotions). The NN adds a positional residual through V_logit; position-dependent modulation of material trust is learned through the value head FC, which receives deltaM as a direct input feature. The scalar k provides a global operating point for material trust. This factorization avoids the NN having to rediscover piece values and tactical exchange outcomes from scratch. The classical fallback (no NN) uses V_logit=0, k=0.5: pure material evaluation from the Q-search.
 
 ## OracleNet
 
 SE-ResNet backbone (default: 6 blocks, 128 channels, ~2M params). 17x8x8 input in side-to-move perspective.
 
-Three output heads:
+Three outputs:
 - **Policy**: 73-plane AlphaZero encoding (4672 logits). Zero-initialized → uniform prior at init.
-- **Value**: 1x1 conv → FC(64→256→1) producing unbounded V_logit. Zero-initialized → V_logit=0 at init.
-- **K head**: Operates on raw input (independent of backbone). 12 handcrafted scalar features (pawn count, piece counts, queen presence, castling rights, king rank, bishop colors) + 1 Q-search completion flag (binary: did the depth-8 Q-search resolve naturally or hit the depth limit?) + two 5x5 king-centered patches compressed via FC(300→32). Combined → FC(77→32→1). Output: softplus(x)/(2 ln 2), so k=0.5 at init. The Q-search flag lets k learn to discount unreliable material signals when the Q-search couldn't fully resolve tactical complications.
+- **Value**: 1x1 conv → flatten(64) → concat(q_result) → FC(65→256→1) producing unbounded V_logit. The Q-search result (deltaM) is fed as a direct input feature, giving the value head position-dependent control over material trust. Zero-initialized → V_logit=0 at init.
+- **k**: Single learned scalar (`nn.Parameter`). Output: softplus(k_logit)/(2 ln 2), so k=0.5 at init. Sets a global baseline trust level in material; position-dependent modulation is absorbed by the value head FC.
 
 A freshly initialized network produces meaningful behavior: uniform exploration with material-aware evaluation.
 
