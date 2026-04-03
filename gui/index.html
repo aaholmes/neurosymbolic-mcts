@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Q-Search Tree Visualizer</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --panel: #16213e;
+    --accent: #0f3460;
+    --text: #e0e0e0;
+    --text-dim: #8888aa;
+    --green: #4ecca3;
+    --red: #e74c3c;
+    --yellow: #f1c40f;
+    --blue: #3498db;
+    --light-sq: #f0d9b5;
+    --dark-sq: #b58863;
+    --light-sq-hl: #f7ec5d;
+    --dark-sq-hl: #dac34a;
+    --light-sq-last: #cdd26a;
+    --dark-sq-last: #aaa23a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+  /* ── Left panel: board ── */
+  .board-panel {
+    width: 500px;
+    min-width: 500px;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    gap: 12px;
+  }
+  h1 { font-size: 18px; color: var(--green); }
+  .controls {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+  .controls input[type="text"] {
+    flex: 1; min-width: 200px;
+    background: var(--accent); border: 1px solid #334; color: var(--text);
+    padding: 6px 10px; border-radius: 4px; font-size: 13px; font-family: monospace;
+  }
+  .controls button, .nav-btn {
+    background: var(--accent); color: var(--text); border: 1px solid #445;
+    padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px;
+  }
+  .controls button:hover, .nav-btn:hover { background: #1a4a7a; }
+  .eval-bar-container {
+    width: 100%; height: 22px; background: #333; border-radius: 4px; overflow: hidden;
+    position: relative;
+  }
+  .eval-bar {
+    height: 100%; background: var(--text); transition: width 0.3s;
+  }
+  .eval-label {
+    position: absolute; top: 2px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; font-weight: bold; color: #000; text-shadow: 0 0 3px rgba(255,255,255,0.5);
+  }
+  .board-wrapper {
+    position: relative;
+    width: 456px; height: 456px;
+  }
+  .board {
+    display: grid;
+    grid-template-columns: repeat(8, 57px);
+    grid-template-rows: repeat(8, 57px);
+    border: 2px solid #445;
+    user-select: none;
+  }
+  .square {
+    width: 57px; height: 57px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 42px; cursor: pointer; position: relative;
+  }
+  .square.light { background: var(--light-sq); }
+  .square.dark { background: var(--dark-sq); }
+  .square.highlight.light { background: var(--light-sq-hl); }
+  .square.highlight.dark { background: var(--dark-sq-hl); }
+  .square.last-move.light { background: var(--light-sq-last); }
+  .square.last-move.dark { background: var(--dark-sq-last); }
+  .square.selected { box-shadow: inset 0 0 0 3px var(--green); }
+  .move-dot {
+    position: absolute; width: 16px; height: 16px;
+    background: rgba(0,0,0,0.25); border-radius: 50%;
+  }
+  .move-dot.capture {
+    width: 54px; height: 54px; background: none;
+    border: 5px solid rgba(0,0,0,0.25); border-radius: 50%;
+  }
+  .coords {
+    position: absolute; font-size: 11px; font-weight: bold; pointer-events: none;
+  }
+  .file-coord { bottom: 1px; right: 3px; }
+  .rank-coord { top: 1px; left: 3px; }
+  .square.light .coords { color: var(--dark-sq); }
+  .square.dark .coords { color: var(--light-sq); }
+  .info-row {
+    display: flex; justify-content: space-between; font-size: 13px; color: var(--text-dim);
+  }
+  .move-nav {
+    display: flex; gap: 4px; align-items: center;
+    font-size: 13px; flex-wrap: wrap;
+  }
+  .move-history {
+    max-height: 60px; overflow-y: auto; font-family: monospace;
+    font-size: 12px; color: var(--text-dim); line-height: 1.6;
+  }
+  .move-history span { cursor: pointer; padding: 1px 3px; border-radius: 2px; }
+  .move-history span:hover { background: var(--accent); }
+  .move-history span.current { color: var(--green); font-weight: bold; }
+
+  /* ── Right panel: tree ── */
+  .tree-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    overflow: hidden;
+  }
+  .tree-header {
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
+  }
+  .tree-header h2 { font-size: 16px; color: var(--blue); }
+  .tree-stats { font-size: 12px; color: var(--text-dim); }
+  .tree-container {
+    flex: 1; overflow: auto; background: var(--panel); border-radius: 8px;
+    padding: 16px; border: 1px solid #334;
+  }
+  .tree-node {
+    margin-left: 20px; position: relative;
+  }
+  .tree-node::before {
+    content: ''; position: absolute; left: -14px; top: 0; bottom: 0;
+    width: 1px; background: #334;
+  }
+  .tree-node:last-child::before { bottom: 50%; }
+  .tree-root { margin-left: 0; }
+  .tree-root::before { display: none; }
+  .node-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; border-radius: 4px; cursor: pointer;
+    margin: 2px 0; position: relative;
+    transition: background 0.15s;
+  }
+  .node-header:hover { background: rgba(255,255,255,0.05); }
+  .node-header::before {
+    content: ''; position: absolute; left: -14px; top: 50%;
+    width: 14px; height: 1px; background: #334;
+  }
+  .tree-root > .node-header::before { display: none; }
+  .toggle-btn {
+    width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: var(--text-dim); cursor: pointer; flex-shrink: 0;
+  }
+  .move-label {
+    font-family: monospace; font-weight: bold; font-size: 14px; min-width: 70px;
+  }
+  .eval-badge {
+    font-family: monospace; font-size: 12px; padding: 2px 6px;
+    border-radius: 3px; min-width: 55px; text-align: center;
+  }
+  .eval-badge.positive { background: rgba(78,204,163,0.2); color: var(--green); }
+  .eval-badge.negative { background: rgba(231,76,60,0.2); color: var(--red); }
+  .eval-badge.neutral { background: rgba(255,255,255,0.08); color: var(--text-dim); }
+  .eval-badge.static-eval {
+    border: 1px dashed #555; background: none;
+  }
+  .eval-label-tag {
+    font-size: 10px; color: var(--text-dim); text-transform: uppercase;
+  }
+  .node-children { display: block; }
+  .node-children.collapsed { display: none; }
+  .best-move .move-label { color: var(--green); }
+  .loading {
+    color: var(--text-dim); font-style: italic; padding: 20px;
+  }
+  /* Promotion dialog */
+  .promo-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.6); z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .promo-overlay.active { display: flex; }
+  .promo-dialog {
+    background: var(--panel); border: 2px solid var(--green); border-radius: 8px;
+    padding: 16px; display: flex; gap: 8px;
+  }
+  .promo-piece {
+    font-size: 48px; cursor: pointer; padding: 8px; border-radius: 4px;
+  }
+  .promo-piece:hover { background: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="board-panel">
+  <h1>Caissawary Q-Search Visualizer</h1>
+
+  <div class="controls">
+    <input type="text" id="fen-input" value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1">
+    <button onclick="loadFen()">Load FEN</button>
+    <button onclick="resetBoard()">Reset</button>
+    <button onclick="flipBoard()">Flip</button>
+  </div>
+
+  <div class="eval-bar-container">
+    <div class="eval-bar" id="eval-bar"></div>
+    <div class="eval-label" id="eval-label">0.00</div>
+  </div>
+
+  <div class="board-wrapper">
+    <div class="board" id="board"></div>
+  </div>
+
+  <div class="info-row">
+    <span id="turn-label">White to move</span>
+    <span id="position-eval"></span>
+  </div>
+
+  <div class="move-nav">
+    <button class="nav-btn" onclick="goToStart()">&laquo;</button>
+    <button class="nav-btn" onclick="goBack()">&lsaquo;</button>
+    <button class="nav-btn" onclick="goForward()">&rsaquo;</button>
+    <button class="nav-btn" onclick="goToEnd()">&raquo;</button>
+  </div>
+  <div class="move-history" id="move-history"></div>
+</div>
+
+<div class="tree-panel">
+  <div class="tree-header">
+    <h2>Quiescence Search Tree</h2>
+    <span class="tree-stats" id="tree-stats"></span>
+  </div>
+  <div class="tree-container" id="tree-container">
+    <div class="loading">Make a move or load a position to see the Q-search tree</div>
+  </div>
+</div>
+
+<div class="promo-overlay" id="promo-overlay">
+  <div class="promo-dialog" id="promo-dialog"></div>
+</div>
+
+<script>
+// ── Piece unicode ──
+const PIECE_UNICODE = {
+  'P': '\u2659', 'N': '\u2658', 'B': '\u2657', 'R': '\u2656', 'Q': '\u2655', 'K': '\u2654',
+  'p': '\u265F', 'n': '\u265E', 'b': '\u265D', 'r': '\u265C', 'q': '\u265B', 'k': '\u265A',
+};
+const PROMO_PIECES_W = ['Q','R','B','N'];
+const PROMO_PIECES_B = ['q','r','b','n'];
+
+// ── State ──
+let boardState = {};      // current board from API
+let legalMoves = [];
+let selectedSq = null;
+let flipped = false;
+let moveHistory = [];     // [{fen, san, uci, lastFrom, lastTo}]
+let historyIndex = -1;    // -1 = starting position
+let startFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+let lastMoveFrom = -1, lastMoveTo = -1;
+
+// ── Init ──
+async function init() {
+  await loadPosition(startFen);
+}
+
+async function loadPosition(fen) {
+  const resp = await fetch('/api/state?fen=' + encodeURIComponent(fen));
+  boardState = await resp.json();
+  legalMoves = boardState.legal_moves;
+  selectedSq = null;
+  renderBoard();
+  updateEval(boardState.eval_cp, boardState.white_to_move);
+  document.getElementById('turn-label').textContent =
+    boardState.white_to_move ? 'White to move' : 'Black to move';
+  fetchQSearchTree(fen);
+}
+
+async function fetchQSearchTree(fen) {
+  const container = document.getElementById('tree-container');
+  container.innerHTML = '<div class="loading">Computing Q-search tree...</div>';
+  try {
+    const resp = await fetch('/api/qsearch?fen=' + encodeURIComponent(fen));
+    const data = await resp.json();
+    document.getElementById('tree-stats').textContent =
+      `${data.nodes_searched} nodes searched`;
+    container.innerHTML = '';
+    container.appendChild(renderTreeNode(data.tree, true, true));
+  } catch(e) {
+    container.innerHTML = '<div class="loading">Error: ' + e.message + '</div>';
+  }
+}
+
+// ── Board rendering ──
+function fenToBoard(fen) {
+  const pieces = new Array(64).fill(null);
+  const ranks = fen.split(' ')[0].split('/');
+  for (let r = 0; r < 8; r++) {
+    let file = 0;
+    for (const ch of ranks[r]) {
+      if (ch >= '1' && ch <= '8') { file += parseInt(ch); }
+      else { pieces[(7 - r) * 8 + file] = ch; file++; }
+    }
+  }
+  return pieces;
+}
+
+function renderBoard() {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  const pieces = fenToBoard(boardState.fen);
+  const highlightSqs = new Set();
+
+  if (selectedSq !== null) {
+    for (const m of legalMoves) {
+      if (m.from === selectedSq) highlightSqs.add(m.to);
+    }
+  }
+
+  for (let visRow = 0; visRow < 8; visRow++) {
+    for (let visCol = 0; visCol < 8; visCol++) {
+      const row = flipped ? visRow : 7 - visRow;
+      const col = flipped ? 7 - visCol : visCol;
+      const sq = row * 8 + col;
+      const isLight = (row + col) % 2 === 1;
+
+      const div = document.createElement('div');
+      div.className = 'square ' + (isLight ? 'light' : 'dark');
+      div.dataset.sq = sq;
+
+      if (sq === selectedSq) div.classList.add('selected');
+      if (sq === lastMoveFrom || sq === lastMoveTo) div.classList.add('last-move');
+      if (highlightSqs.has(sq)) {
+        div.classList.add('highlight');
+      }
+
+      // Piece
+      if (pieces[sq]) {
+        div.textContent = PIECE_UNICODE[pieces[sq]];
+      }
+
+      // Move dot
+      if (highlightSqs.has(sq)) {
+        const dot = document.createElement('div');
+        dot.className = 'move-dot' + (pieces[sq] ? ' capture' : '');
+        div.appendChild(dot);
+      }
+
+      // Coordinates
+      if (visCol === 0) {
+        const c = document.createElement('span');
+        c.className = 'coords rank-coord';
+        c.textContent = row + 1;
+        div.appendChild(c);
+      }
+      if (visRow === 7) {
+        const c = document.createElement('span');
+        c.className = 'coords file-coord';
+        c.textContent = 'abcdefgh'[col];
+        div.appendChild(c);
+      }
+
+      div.addEventListener('click', () => onSquareClick(sq));
+      board.appendChild(div);
+    }
+  }
+}
+
+function onSquareClick(sq) {
+  if (selectedSq === null) {
+    // Select piece if it has legal moves from this square
+    if (legalMoves.some(m => m.from === sq)) {
+      selectedSq = sq;
+      renderBoard();
+    }
+  } else if (selectedSq === sq) {
+    selectedSq = null;
+    renderBoard();
+  } else {
+    // Try to make a move
+    const matching = legalMoves.filter(m => m.from === selectedSq && m.to === sq);
+    if (matching.length === 0) {
+      // Click on another own piece?
+      if (legalMoves.some(m => m.from === sq)) {
+        selectedSq = sq;
+      } else {
+        selectedSq = null;
+      }
+      renderBoard();
+    } else if (matching.length === 1) {
+      makeMove(matching[0]);
+    } else {
+      // Promotion - show dialog
+      showPromoDialog(matching);
+    }
+  }
+}
+
+function showPromoDialog(moves) {
+  const overlay = document.getElementById('promo-overlay');
+  const dialog = document.getElementById('promo-dialog');
+  const isWhite = boardState.white_to_move;
+  dialog.innerHTML = '';
+
+  for (const m of moves) {
+    const promoMap = { 'q': isWhite?'Q':'q', 'r': isWhite?'R':'r', 'b': isWhite?'B':'b', 'n': isWhite?'N':'n' };
+    const piece = promoMap[m.promotion] || (isWhite?'Q':'q');
+    const btn = document.createElement('div');
+    btn.className = 'promo-piece';
+    btn.textContent = PIECE_UNICODE[piece];
+    btn.addEventListener('click', () => {
+      overlay.classList.remove('active');
+      makeMove(m);
+    });
+    dialog.appendChild(btn);
+  }
+  overlay.classList.add('active');
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.classList.remove('active');
+  }, { once: true });
+}
+
+async function makeMove(move) {
+  // Build SAN-ish label from UCI
+  const san = move.uci; // We'll get proper SAN from history later
+  const fen = boardState.fen;
+
+  // Make the move: load new state by applying the UCI move
+  // We need the resulting FEN - fetch state after move
+  const newFenResp = await fetch('/api/state?fen=' + encodeURIComponent(fen));
+  const stateNow = await newFenResp.json();
+
+  // Apply move: construct new FEN by asking the server
+  // We'll encode the move in the FEN request - but our API doesn't support that.
+  // Instead, we make the move client-side via a simple approach:
+  // Submit a "make move" by fetching the state with the move applied.
+  // We need a move endpoint... Let's use a workaround: pass fen + move
+  const resp = await fetch('/api/state?fen=' + encodeURIComponent(fen) + '&move=' + move.uci);
+  const newState = await resp.json();
+
+  // Trim any future moves if we went back in history
+  if (historyIndex < moveHistory.length - 1) {
+    moveHistory = moveHistory.slice(0, historyIndex + 1);
+  }
+
+  moveHistory.push({
+    fen: newState.fen,
+    uci: move.uci,
+    lastFrom: move.from,
+    lastTo: move.to,
+  });
+  historyIndex = moveHistory.length - 1;
+
+  lastMoveFrom = move.from;
+  lastMoveTo = move.to;
+  boardState = newState;
+  legalMoves = newState.legal_moves;
+  selectedSq = null;
+  renderBoard();
+  updateEval(newState.eval_cp, newState.white_to_move);
+  document.getElementById('turn-label').textContent =
+    newState.white_to_move ? 'White to move' : 'Black to move';
+  renderMoveHistory();
+  fetchQSearchTree(newState.fen);
+}
+
+function updateEval(cp, whiteToMove) {
+  // Show eval from white's perspective
+  const whiteCp = whiteToMove ? cp : -cp;
+  const pawns = (whiteCp / 100).toFixed(2);
+  const pct = Math.min(95, Math.max(5, 50 + whiteCp / 20));
+
+  const bar = document.getElementById('eval-bar');
+  bar.style.width = pct + '%';
+  bar.style.background = '#eee';
+
+  const label = document.getElementById('eval-label');
+  label.textContent = (whiteCp >= 0 ? '+' : '') + pawns;
+
+  document.getElementById('position-eval').textContent =
+    `Static eval: ${(whiteCp >= 0 ? '+' : '')}${pawns} (White POV)`;
+}
+
+// ── Move history ──
+function renderMoveHistory() {
+  const div = document.getElementById('move-history');
+  let html = '';
+  for (let i = 0; i < moveHistory.length; i++) {
+    const m = moveHistory[i];
+    const moveNum = Math.floor(i / 2) + 1;
+    if (i % 2 === 0) html += moveNum + '. ';
+    const cls = i === historyIndex ? 'current' : '';
+    html += `<span class="${cls}" onclick="goToMove(${i})">${m.uci}</span> `;
+  }
+  div.innerHTML = html;
+  div.scrollTop = div.scrollHeight;
+}
+
+async function goToMove(idx) {
+  historyIndex = idx;
+  const entry = moveHistory[idx];
+  lastMoveFrom = entry.lastFrom;
+  lastMoveTo = entry.lastTo;
+  await loadPosition(entry.fen);
+  renderMoveHistory();
+}
+async function goToStart() {
+  historyIndex = -1;
+  lastMoveFrom = -1; lastMoveTo = -1;
+  await loadPosition(startFen);
+  renderMoveHistory();
+}
+async function goBack() {
+  if (historyIndex < 0) return;
+  if (historyIndex === 0) { goToStart(); return; }
+  await goToMove(historyIndex - 1);
+}
+async function goForward() {
+  if (historyIndex >= moveHistory.length - 1) return;
+  await goToMove(historyIndex + 1);
+}
+async function goToEnd() {
+  if (moveHistory.length === 0) return;
+  await goToMove(moveHistory.length - 1);
+}
+
+// ── Controls ──
+function loadFen() {
+  const fen = document.getElementById('fen-input').value.trim();
+  if (!fen) return;
+  startFen = fen;
+  moveHistory = [];
+  historyIndex = -1;
+  lastMoveFrom = -1; lastMoveTo = -1;
+  loadPosition(fen);
+}
+function resetBoard() {
+  startFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  document.getElementById('fen-input').value = startFen;
+  moveHistory = [];
+  historyIndex = -1;
+  lastMoveFrom = -1; lastMoveTo = -1;
+  loadPosition(startFen);
+}
+function flipBoard() {
+  flipped = !flipped;
+  renderBoard();
+}
+
+// ── Tree rendering ──
+function formatEval(cp) {
+  const pawns = (cp / 100).toFixed(2);
+  return (cp >= 0 ? '+' : '') + pawns;
+}
+
+function evalClass(cp) {
+  if (cp > 20) return 'positive';
+  if (cp < -20) return 'negative';
+  return 'neutral';
+}
+
+function renderTreeNode(node, isRoot, isBest) {
+  const div = document.createElement('div');
+  div.className = 'tree-node' + (isRoot ? ' tree-root' : '');
+  if (isBest && !isRoot) div.classList.add('best-move');
+
+  const header = document.createElement('div');
+  header.className = 'node-header';
+
+  const hasChildren = node.children && node.children.length > 0;
+
+  // Toggle
+  const toggle = document.createElement('span');
+  toggle.className = 'toggle-btn';
+  toggle.textContent = hasChildren ? (isRoot ? '\u25BC' : '\u25B6') : '\u00B7';
+  header.appendChild(toggle);
+
+  // Move label
+  const moveLabel = document.createElement('span');
+  moveLabel.className = 'move-label';
+  if (isRoot) {
+    moveLabel.textContent = 'Root';
+    moveLabel.style.color = 'var(--blue)';
+  } else {
+    moveLabel.textContent = node.move_san || node.move_uci || '?';
+  }
+  header.appendChild(moveLabel);
+
+  // Q-search score badge
+  const scoreBadge = document.createElement('span');
+  scoreBadge.className = 'eval-badge ' + evalClass(node.score_cp);
+  scoreBadge.textContent = formatEval(node.score_cp);
+  scoreBadge.title = 'Q-search backed-up score (STM perspective)';
+  header.appendChild(scoreBadge);
+
+  // Static eval badge
+  const staticBadge = document.createElement('span');
+  staticBadge.className = 'eval-badge static-eval ' + evalClass(node.eval_cp);
+  staticBadge.textContent = formatEval(node.eval_cp);
+  staticBadge.title = 'Static PeSTO eval (STM perspective)';
+  header.appendChild(staticBadge);
+
+  // Labels
+  const scoreTag = document.createElement('span');
+  scoreTag.className = 'eval-label-tag';
+  scoreTag.textContent = 'qsearch';
+  // insert before scoreBadge? Actually let's put labels after badges
+  const staticTag = document.createElement('span');
+  staticTag.className = 'eval-label-tag';
+  staticTag.textContent = 'static';
+
+  // Reorganize: move, qsearch-score, "qsearch", static-score, "static"
+  header.innerHTML = '';
+  header.appendChild(toggle);
+  header.appendChild(moveLabel);
+  header.appendChild(scoreBadge);
+  header.appendChild(scoreTag);
+  header.appendChild(staticBadge);
+  header.appendChild(staticTag);
+
+  div.appendChild(header);
+
+  // Children
+  if (hasChildren) {
+    const childDiv = document.createElement('div');
+    childDiv.className = 'node-children' + (isRoot ? '' : ' collapsed');
+
+    // Determine best child (highest score from parent's POV = most negative child score_cp)
+    // Actually: children scores are in STM perspective at the child.
+    // From parent's POV, best child = lowest child.score_cp (most negative for child = best for parent)
+    let bestIdx = 0;
+    let bestParentScore = -Infinity;
+    node.children.forEach((c, i) => {
+      const parentScore = -c.score_cp;
+      if (parentScore > bestParentScore) {
+        bestParentScore = parentScore;
+        bestIdx = i;
+      }
+    });
+
+    node.children.forEach((child, i) => {
+      childDiv.appendChild(renderTreeNode(child, false, i === bestIdx));
+    });
+    div.appendChild(childDiv);
+
+    header.addEventListener('click', () => {
+      const isCollapsed = childDiv.classList.contains('collapsed');
+      childDiv.classList.toggle('collapsed');
+      toggle.textContent = isCollapsed ? '\u25BC' : '\u25B6';
+    });
+  }
+
+  return div;
+}
+
+// ── Start ──
+init();
+</script>
+</body>
+</html>
