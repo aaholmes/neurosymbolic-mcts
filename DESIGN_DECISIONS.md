@@ -128,7 +128,21 @@ Nodes jump 3.7x (from ~3-5 checks to ~35 legal moves at shallow plies), but time
 
 ## 3. Tier 2: Quiescence Search and Tactical Ordering
 
-Tier 2's core contribution is `forced_pesto_balance()` — a PeSTO piece-square-table quiescence search (depth 20) that runs at every MCTS leaf evaluation to compute $\Delta M$, the tapered positional+material evaluation after all forced captures and promotions resolve. Unlike simple piece counting (`[1,3,3,5,9,0]`), PeSTO uses Texel-tuned piece-square tables (standard RofChade values) that account for piece placement — a knight on e4 is worth more than a knight on a1. This is a classical alpha-beta tree search whose results no neural network can easily replicate: it explores variable-depth exchange sequences to detect hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds into the value function through two paths: as a direct input feature to the value head's FC layer (position-dependent learned modulation) and via the additive $k \cdot \Delta M$ term (global baseline trust), providing the foundation that the NN builds on top of.
+Tier 2's core contribution is `forced_ext_pesto_balance()` — an extended PeSTO piece-square-table quiescence search (depth 20) that runs at every MCTS leaf evaluation to compute $\Delta M$, the tapered positional+material evaluation after all forced tactical sequences resolve. Unlike simple piece counting (`[1,3,3,5,9,0]`), PeSTO uses Texel-tuned piece-square tables (standard RofChade values) that account for piece placement — a knight on e4 is worth more than a knight on a1. This is a classical alpha-beta tree search whose results no neural network can easily replicate: it explores variable-depth exchange sequences to detect hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds into the value function through two paths: as a direct input feature to the value head's FC layer (position-dependent learned modulation) and via the additive $k \cdot \Delta M$ term (global baseline trust), providing the foundation that the NN builds on top of.
+
+### Extended quiescence: beyond pure captures
+
+The original Q-search (`pesto_qsearch`) only considered captures and promotions. The extended version (`ext_pesto_qsearch_counted`) adds three types of non-capture tactical moves, each side getting one per search:
+
+- **Non-capture checks**: any quiet move that gives check, detected via `gives_check()` before move application
+- **Pawn forks**: a pawn advance where the pawn's capture bitboard at the destination attacks 2+ enemy pieces in {N, B, R, Q, K}
+- **Knight forks**: a knight move where the knight's attack bitboard at the destination attacks 2+ enemy pieces in {R, Q, K}
+
+Budget rules keep the search bounded: each side's single tactical move is tracked via `white_tactic_used`/`black_tactic_used` flags threaded through recursion. Two categories of moves are free (don't consume budget): **check evasions** (when in check, all legal moves are generated — no stand-pat) and **forked piece retreats** (moves of pieces on the `forked_pieces` bitboard, set when the opponent plays a fork).
+
+**Why one tactic per side.** Allowing unlimited tactical moves would explode the search tree — every quiet check or fork spawns a subtree. One per side is sufficient to detect the most common tactical patterns (Nc7+ forking K+R, d5 forking two minor pieces) while keeping node counts manageable. The budget ensures the extended Q-search remains effectively free relative to NN inference (<1% of wall time).
+
+**Why these three move types.** Non-capture checks are the highest-value tactical moves: they force the opponent to deal with check (often losing material). Pawn and knight forks are the next most common tactical patterns that pure capture search misses — a knight fork winning an exchange is invisible to capture-only Q-search because the fork move itself is quiet. Bishop and rook forks are rarer and harder to detect without full sliding-piece attack generation, so they're excluded from the budget-limited search.
 
 The visit-ordering component (MVV-LVA) is a minor addition: captures are visited in Most-Valuable-Victim / Least-Valuable-Attacker order on their first visit. After the first visit, normal UCB selection takes over.
 
@@ -138,7 +152,7 @@ The first approach was more ambitious: at every MCTS expansion, run a Q-search r
 
 **What went wrong.** Q-search at every expansion was expensive (~10x slower expansions), and the grafted values were noisy — Q-search with alpha-beta in a random MCTS leaf often had poor alpha/beta bounds. The complexity was high (converting Q-search nodes to MCTS nodes, handling transpositions between the two trees) and the benefit was marginal.
 
-**The lesson:** The Q-search doesn't need to run at expansion time or graft into the tree structure. Running it once at leaf evaluation time — as `forced_pesto_balance()` — is simpler, cheaper, and gives the value function a clean positional+material signal. MVV-LVA visit ordering handles the remaining tactical concern (which captures to try first).
+**The lesson:** The Q-search doesn't need to run at expansion time or graft into the tree structure. Running it once at leaf evaluation time — as `forced_ext_pesto_balance()` — is simpler, cheaper, and gives the value function a clean positional+material signal. MVV-LVA visit ordering handles the remaining tactical concern (which captures to try first).
 
 ## 4. The Value Function: V = tanh(V\_logit + k * DeltaM)
 
@@ -151,12 +165,12 @@ Standard AlphaZero learns everything end-to-end: the NN must discover that mater
 $$V_{final} = \tanh(V_{logit} + k \cdot \Delta M)$$
 
 - $V_{logit}$ (NN output, unbounded): positional assessment only — piece activity, king safety, pawn structure
-- $\Delta M$ (computed exactly): PeSTO evaluation after forced captures/promotions via `forced_pesto_balance()`
+- $\Delta M$ (computed exactly): PeSTO evaluation after forced tactical sequences via `forced_ext_pesto_balance()`
 - $k$ (NN output, positive): how much material should matter in this position
 
 ### Why forced\_pesto\_balance(), not simple piece counting
 
-A position might have equal material (P=P) but after forced exchanges end up +3 (winning a piece). Simple piece counting misses hanging pieces, discovered attacks, and forced exchange sequences. `forced_pesto_balance()` runs a PeSTO piece-square-table quiescence search — tapered positional+material evaluation using standard RofChade PST values, no additional bonuses (bishop pair, king safety, mobility) — to resolve all forced captures. This gives $\Delta M$ a richer evaluation than raw piece counts: a centralized knight is worth more than a cornered one, and a passed pawn on the 7th rank scores higher than one on the 3rd.
+A position might have equal material (P=P) but after forced exchanges end up +3 (winning a piece). Simple piece counting misses hanging pieces, discovered attacks, and forced exchange sequences. `forced_ext_pesto_balance()` runs an extended PeSTO piece-square-table quiescence search — tapered positional+material evaluation using standard RofChade PST values, no additional bonuses (bishop pair, king safety, mobility) — to resolve forced captures, non-capture checks, and forks. This gives $\Delta M$ a richer evaluation than raw piece counts: a centralized knight is worth more than a cornered one, a passed pawn on the 7th rank scores higher than one on the 3rd, and a knight fork winning an exchange is detected even though the fork move itself is quiet.
 
 ### Why the NN returns V\_logit (unbounded), not tanh(V\_logit)
 
@@ -339,7 +353,7 @@ Each variant was evaluated independently via SPRT. The best passing variant was 
 
 **The problem.** Each generation runs 50-800 MCTS evaluation games (candidate vs current model) purely for gating. These games run full MCTS searches with policy outputs at every move, but all position data is discarded — only W/L/D is kept. This is wasted training data. Worse, eval games actually produce *higher quality* samples than self-play: each move starts a fresh MCTS search (no subtree reuse between moves), making samples more independent.
 
-**The solution.** Evaluation games now collect training samples by default. At each move, the MCTS root's visit-count distribution becomes the policy target and `forced_pesto_balance()` provides the material scalar — the same extraction used by self-play. Samples are partitioned by which model was side-to-move: candidate's moves go to one vector, current model's moves to another.
+**The solution.** Evaluation games now collect training samples by default. At each move, the MCTS root's visit-count distribution becomes the policy target and `forced_ext_pesto_balance()` provides the material scalar — the same extraction used by self-play. Samples are partitioned by which model was side-to-move: candidate's moves go to one vector, current model's moves to another.
 
 **Selective ingestion based on gating outcome.** If the candidate wins SPRT: both sides' data is added to the replay buffer (the candidate is stronger, and the current model's data is still valid). If the candidate loses: only the current model's data is kept — the rejected candidate may be overfit or degenerate, so its policy targets could be harmful. The current model's data is always useful regardless of outcome, since by definition it represents the best known model.
 
@@ -419,7 +433,7 @@ The three-tier decomposition is not chess-specific. The pattern — injecting ex
 
 | Domain | Tier 1 (Exact) | Tier 2 (Heuristic) | Tier 3 (Learned) |
 |--------|---------------|-------------------|-----------------|
-| **Chess** | Mate search, KOTH geometry | Quiescence search (PeSTO forced balance) + MVV-LVA ordering | Neural positional evaluation |
+| **Chess** | Mate search, KOTH geometry | Extended quiescence (captures, checks, forks) + MVV-LVA ordering | Neural positional evaluation |
 | **Mathematical reasoning** | Automated theorem provers (e.g., Lean's `decide`, `omega`) resolving subgoals | Lemma relevance ranking, proof-term similarity | Neural proof step prediction |
 | **Program synthesis** | Type checking, partial evaluation, SMT solvers | API frequency heuristics | Code generation model |
 | **Game playing** | Endgame tablebases, solved subgames | Domain heuristics | Value/policy networks |
