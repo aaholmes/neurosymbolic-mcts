@@ -18,9 +18,15 @@ enum ExpandState : uint32_t {
 
 #ifdef __CUDACC__
 
-// Node pool and allocator counter (defined in tree_store.cu)
+// Node pool and allocator counter.
+// Defined via TREE_STORE_DEFINE_GLOBALS in tree_store.cu; declared extern elsewhere.
+#ifdef TREE_STORE_IMPL
+__device__ MCTSNode g_node_pool[MAX_NODES];
+__device__ int32_t  g_next_node_idx = 1;  // 0 is reserved for root
+#else
 extern __device__ MCTSNode g_node_pool[MAX_NODES];
 extern __device__ int32_t  g_next_node_idx;
+#endif
 
 // Allocate n contiguous node slots. Returns base index, or -1 if pool exhausted.
 __device__ int32_t alloc_children(int n);

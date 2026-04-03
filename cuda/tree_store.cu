@@ -1,13 +1,7 @@
+#define TREE_STORE_IMPL
 #include "tree_store.cuh"
 #include <cstdio>
 #include <cstring>
-
-// ============================================================
-// Device-side globals
-// ============================================================
-
-__device__ MCTSNode g_node_pool[MAX_NODES];
-__device__ int32_t  g_next_node_idx = 1;  // 0 is reserved for root
 
 // ============================================================
 // Device-side implementations

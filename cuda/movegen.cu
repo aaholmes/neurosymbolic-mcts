@@ -1,14 +1,8 @@
+#define MOVEGEN_IMPL
 #include "movegen.cuh"
 #include "movegen_tables.cuh"
 #include <cstdio>
 #include <cstring>
-
-// ============================================================
-// Device-side globals for computed attack tables
-// ============================================================
-
-__device__ uint64_t g_rook_attacks[64 * 4096];
-__device__ uint64_t g_bishop_attacks[64 * 4096];
 
 // ============================================================
 // Sliding piece attacks via magic bitboards

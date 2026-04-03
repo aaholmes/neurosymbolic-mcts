@@ -9,6 +9,9 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES native)
 endif()
 
+# Enable relocatable device code for cross-TU __device__ calls and extern __device__ variables
+set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+
 # Main static library
 add_library(caissawary_cuda STATIC
     tree_store.cu
@@ -16,11 +19,14 @@ add_library(caissawary_cuda STATIC
     apply_move.cu
 )
 target_include_directories(caissawary_cuda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+set_target_properties(caissawary_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # Phase 1 tests
 add_executable(test_tree_store test/test_tree_store.cu)
 target_link_libraries(test_tree_store caissawary_cuda)
+set_target_properties(test_tree_store PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # Phase 2 tests
 add_executable(test_movegen test/test_movegen.cu)
 target_link_libraries(test_movegen caissawary_cuda)
+set_target_properties(test_movegen PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

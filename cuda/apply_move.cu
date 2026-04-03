@@ -95,9 +95,6 @@ __device__ void apply_move(BoardState* bs, GPUMove move) {
         bs->pieces[stm * 6 + promo] ^= to_bit;        // add promoted piece
     }
 
-    // Save old castling for rights revocation
-    uint8_t old_castling = bs->castling;
-
     // Handle castling: move rook too
     if (move_piece == KING) {
         if (stm == WHITE) {

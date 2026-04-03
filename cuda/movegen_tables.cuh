@@ -110,8 +110,14 @@ __constant__ uint64_t c_B_MAGICS[64] = {
 // ============================================================
 
 // Padded to 4096 entries per square for simple indexing: table[sq * 4096 + key]
+// Defined via MOVEGEN_IMPL in movegen.cu; declared extern elsewhere.
+#ifdef MOVEGEN_IMPL
+__device__ uint64_t g_rook_attacks[64 * 4096];    // 2 MB
+__device__ uint64_t g_bishop_attacks[64 * 4096];  // 2 MB
+#else
 extern __device__ uint64_t g_rook_attacks[64 * 4096];    // 2 MB
 extern __device__ uint64_t g_bishop_attacks[64 * 4096];  // 2 MB
+#endif
 
 // Jump piece and pawn tables (populated at runtime)
 __constant__ uint64_t c_n_move_bb[64];    // knight attacks
