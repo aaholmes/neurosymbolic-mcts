@@ -105,8 +105,6 @@ fn build_qsearch_tree(
     board: &mut BoardStack,
     move_gen: &MoveGen,
     pesto: &PestoEval,
-    alpha_in: i32,
-    beta_in: i32,
     depth: u8,
     nodes: &mut u32,
 ) -> QSearchTreeNode {
@@ -125,16 +123,6 @@ fn build_qsearch_tree(
         return leaf(stand_pat, stand_pat);
     }
 
-    let mut alpha = alpha_in;
-    let beta = beta_in;
-
-    if stand_pat >= beta {
-        return leaf(stand_pat, beta);
-    }
-    if stand_pat > alpha {
-        alpha = stand_pat;
-    }
-
     let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
     let mut scored_children: Vec<(Move, i32, QSearchTreeNode)> = Vec::new();
 
@@ -144,7 +132,7 @@ fn build_qsearch_tree(
             board.undo_move();
             continue;
         }
-        let child_tree = build_qsearch_tree(board, move_gen, pesto, -beta, -alpha, depth - 1, nodes);
+        let child_tree = build_qsearch_tree(board, move_gen, pesto, depth - 1, nodes);
         let score = -child_tree.score_cp;
         board.undo_move();
         scored_children.push((*capture, score, child_tree));
@@ -165,7 +153,7 @@ fn build_qsearch_tree(
     }
 
     QSearchTreeNode {
-        fen, eval_cp: stand_pat, score_cp: best_score.min(beta),
+        fen, eval_cp: stand_pat, score_cp: best_score,
         move_uci: None, move_san: None,
         is_capture: false, is_check: false, is_evasion: false, is_fork: false,
         children,
@@ -178,8 +166,6 @@ fn build_ext_qsearch_tree(
     board: &mut BoardStack,
     move_gen: &MoveGen,
     pesto: &PestoEval,
-    alpha_in: i32,
-    beta_in: i32,
     depth: u8,
     white_tactic_used: bool,
     black_tactic_used: bool,
@@ -199,21 +185,8 @@ fn build_ext_qsearch_tree(
 
     let stand_pat = pesto.pst_eval_cp(board.current_state());
 
-    if !in_check {
-        if depth == 0 {
-            return leaf(stand_pat, stand_pat);
-        }
-        if stand_pat >= beta_in {
-            return leaf(stand_pat, beta_in);
-        }
-    } else if depth == 0 {
-        return leaf(stand_pat, alpha_in); // can't resolve check at depth 0
-    }
-
-    let mut alpha = alpha_in;
-    let beta = beta_in;
-    if !in_check && stand_pat > alpha {
-        alpha = stand_pat;
+    if depth == 0 {
+        return leaf(stand_pat, stand_pat);
     }
 
     let stm_is_white = board.current_state().w_to_move;
@@ -237,7 +210,7 @@ fn build_ext_qsearch_tree(
             }
             any_legal = true;
             let child_tree = build_ext_qsearch_tree(
-                board, move_gen, pesto, -beta, -alpha, depth - 1,
+                board, move_gen, pesto, depth - 1,
                 white_tactic_used, black_tactic_used, 0, nodes,
             );
             let score = -child_tree.score_cp;
@@ -258,7 +231,7 @@ fn build_ext_qsearch_tree(
                 continue;
             }
             let child_tree = build_ext_qsearch_tree(
-                board, move_gen, pesto, -beta, -alpha, depth - 1,
+                board, move_gen, pesto, depth - 1,
                 white_tactic_used, black_tactic_used, 0, nodes,
             );
             let score = -child_tree.score_cp;
@@ -298,7 +271,7 @@ fn build_ext_qsearch_tree(
                 let is_fork_move = new_forked != 0;
 
                 let child_tree = build_ext_qsearch_tree(
-                    board, move_gen, pesto, -beta, -alpha, depth - 1,
+                    board, move_gen, pesto, depth - 1,
                     new_w_used, new_b_used, new_forked, nodes,
                 );
                 let score = -child_tree.score_cp;
@@ -326,7 +299,7 @@ fn build_ext_qsearch_tree(
     }
 
     QSearchTreeNode {
-        fen, eval_cp: stand_pat, score_cp: best_score.min(beta),
+        fen, eval_cp: stand_pat, score_cp: best_score,
         move_uci: None, move_san: None,
         is_capture: false, is_check: false, is_evasion: false, is_fork: false,
         children,
@@ -485,13 +458,12 @@ fn handle_qsearch(fen: &str, extended: bool, move_gen: &MoveGen, pesto: &PestoEv
     let tree = if extended {
         build_ext_qsearch_tree(
             &mut board, move_gen, pesto,
-            -100_000, 100_000, MAX_DEPTH,
-            false, false, 0, &mut nodes,
+            MAX_DEPTH, false, false, 0, &mut nodes,
         )
     } else {
         build_qsearch_tree(
             &mut board, move_gen, pesto,
-            -100_000, 100_000, MAX_DEPTH, &mut nodes,
+            MAX_DEPTH, &mut nodes,
         )
     };
     let resp = QSearchResponse { tree, nodes_searched: nodes, extended };
