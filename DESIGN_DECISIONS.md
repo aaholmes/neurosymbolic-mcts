@@ -128,7 +128,7 @@ Nodes jump 3.7x (from ~3-5 checks to ~35 legal moves at shallow plies), but time
 
 ## 3. Tier 2: Quiescence Search and Tactical Ordering
 
-Tier 2's core contribution is `forced_material_balance()` — a material-only quiescence search (depth 20) that runs at every MCTS leaf evaluation to compute $\Delta M$, the material balance after all forced captures and promotions resolve. This is a classical alpha-beta tree search whose results no neural network can easily replicate: it explores variable-depth exchange sequences to detect hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds into the value function through two paths: as a direct input feature to the value head's FC layer (position-dependent learned modulation) and via the additive $k \cdot \Delta M$ term (global baseline trust), providing the foundation that the NN builds on top of.
+Tier 2's core contribution is `forced_pesto_balance()` — a PeSTO piece-square-table quiescence search (depth 20) that runs at every MCTS leaf evaluation to compute $\Delta M$, the tapered positional+material evaluation after all forced captures and promotions resolve. Unlike simple piece counting (`[1,3,3,5,9,0]`), PeSTO uses Texel-tuned piece-square tables (standard RofChade values) that account for piece placement — a knight on e4 is worth more than a knight on a1. This is a classical alpha-beta tree search whose results no neural network can easily replicate: it explores variable-depth exchange sequences to detect hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds into the value function through two paths: as a direct input feature to the value head's FC layer (position-dependent learned modulation) and via the additive $k \cdot \Delta M$ term (global baseline trust), providing the foundation that the NN builds on top of.
 
 The visit-ordering component (MVV-LVA) is a minor addition: captures are visited in Most-Valuable-Victim / Least-Valuable-Attacker order on their first visit. After the first visit, normal UCB selection takes over.
 
@@ -138,7 +138,7 @@ The first approach was more ambitious: at every MCTS expansion, run a Q-search r
 
 **What went wrong.** Q-search at every expansion was expensive (~10x slower expansions), and the grafted values were noisy — Q-search with alpha-beta in a random MCTS leaf often had poor alpha/beta bounds. The complexity was high (converting Q-search nodes to MCTS nodes, handling transpositions between the two trees) and the benefit was marginal.
 
-**The lesson:** The Q-search doesn't need to run at expansion time or graft into the tree structure. Running it once at leaf evaluation time — as `forced_material_balance()` — is simpler, cheaper, and gives the value function a clean material signal. MVV-LVA visit ordering handles the remaining tactical concern (which captures to try first).
+**The lesson:** The Q-search doesn't need to run at expansion time or graft into the tree structure. Running it once at leaf evaluation time — as `forced_pesto_balance()` — is simpler, cheaper, and gives the value function a clean positional+material signal. MVV-LVA visit ordering handles the remaining tactical concern (which captures to try first).
 
 ## 4. The Value Function: V = tanh(V\_logit + k * DeltaM)
 
@@ -151,12 +151,12 @@ Standard AlphaZero learns everything end-to-end: the NN must discover that mater
 $$V_{final} = \tanh(V_{logit} + k \cdot \Delta M)$$
 
 - $V_{logit}$ (NN output, unbounded): positional assessment only — piece activity, king safety, pawn structure
-- $\Delta M$ (computed exactly): material balance after forced captures/promotions via `forced_material_balance()`
+- $\Delta M$ (computed exactly): PeSTO evaluation after forced captures/promotions via `forced_pesto_balance()`
 - $k$ (NN output, positive): how much material should matter in this position
 
-### Why forced\_material\_balance(), not simple piece counting
+### Why forced\_pesto\_balance(), not simple piece counting
 
-A position might have equal material (P=P) but after forced exchanges end up +3 (winning a piece). Simple piece counting misses hanging pieces, discovered attacks, and forced exchange sequences. `forced_material_balance()` runs a material-only quiescence search — no positional terms, just piece values — to resolve all forced captures. This gives $\Delta M$ the "true" material balance.
+A position might have equal material (P=P) but after forced exchanges end up +3 (winning a piece). Simple piece counting misses hanging pieces, discovered attacks, and forced exchange sequences. `forced_pesto_balance()` runs a PeSTO piece-square-table quiescence search — tapered positional+material evaluation using standard RofChade PST values, no additional bonuses (bishop pair, king safety, mobility) — to resolve all forced captures. This gives $\Delta M$ a richer evaluation than raw piece counts: a centralized knight is worth more than a cornered one, and a passed pawn on the 7th rank scores higher than one on the 3rd.
 
 ### Why the NN returns V\_logit (unbounded), not tanh(V\_logit)
 
@@ -166,7 +166,7 @@ If the NN returned a bounded value in [-1, 1], adding $k \cdot \Delta M$ would s
 
 Not all positions are equally material-sensitive. In a closed Sicilian with locked pawns, material imbalances matter less than in an open position.
 
-$k$ is computed as $\text{Softplus}(k_{logit}) / (2\ln 2)$ where $k_{logit}$ is a single learned scalar (`nn.Parameter`). At initialization ($k_{logit} = 0$): $k = \ln(2) / (2\ln 2) = 0.5$, giving a reasonable material weight from the start.
+$k$ is computed as $0.47 \cdot \text{Softplus}(k_{logit})$ where $k_{logit}$ is a single learned scalar (`nn.Parameter`). The 0.47 coefficient is Texel-calibrated so that PeSTO centipawn evaluations map through $\tanh$ to calibrated win probabilities. At initialization ($k_{logit} = 0$): $k = 0.47 \cdot \ln 2 \approx 0.326$.
 
 ### k architecture evolution: from per-position networks to a global scalar
 
@@ -177,7 +177,7 @@ The second design used a **separate shallow input network** for $k$: a single 3x
 The third design used **handcrafted scalar features + king patches**: 12 scalar features (pawn counts, piece counts, queen presence, pawn contacts, castling rights, king rank, bishop square-color presence) + Q-search completion flag + two 5×5 king-centered patches compressed via FC(300→32), combined via FC(77→32→1). Total: ~22k parameters. This worked well but had two drawbacks: (1) the dynamic king-patch extraction (per-sample argmax + 5×5 gather) was hostile to CUDA reimplementation for a future GPU-resident MCTS kernel, and (2) the position-dependent modulation it provided could be absorbed by the value head itself.
 
 **Current design: global scalar k + q_result as value head input.** The K-head was removed entirely (−21,536 parameters) and replaced with:
-1. A single `nn.Parameter` scalar $k_{logit}$, initialized to 0 → $k = 0.5$
+1. A single `nn.Parameter` scalar $k_{logit}$, initialized to 0 → $k = 0.326$ (Texel-calibrated)
 2. The Q-search result ($\Delta M$) concatenated as a 65th input to the value head's first FC layer (widened from FC(64→256) to FC(65→256))
 
 This preserves both paths for material information to influence the value:
@@ -186,9 +186,9 @@ This preserves both paths for material information to influence the value:
 
 The key insight: making $k$ position-independent is acceptable because the position-dependent part of "how much to trust material" is learned implicitly through the value head FC layers. The scalar $k$ sets the global operating point; the network adjusts around it.
 
-### Classical fallback: V\_logit=0, k=0.5
+### Classical fallback: V\_logit=0, k=0.326
 
-With no neural network, the engine uses $V_{logit} = 0$ (no positional knowledge) and $k = 0.5$ (moderate material weight), giving $V_{final} = \tanh(0.5 \cdot \Delta M)$. This matches the NN's initialization — a freshly initialized network produces identical values to the classical fallback, ensuring smooth bootstrapping.
+With no neural network, the engine uses $V_{logit} = 0$ (no positional knowledge) and $k = 0.326$ (Texel-calibrated material weight), giving $V_{final} = \tanh(0.326 \cdot \Delta M)$. This matches the NN's initialization — a freshly initialized network produces identical values to the classical fallback, ensuring smooth bootstrapping.
 
 ## 5. OracleNet Architecture
 
@@ -216,14 +216,14 @@ When Black is to move, ranks are flipped so STM pieces always appear at the "bot
 
 ### k: global scalar
 
-Single `nn.Parameter` scalar $k_{logit}$, output via $\text{softplus}(k_{logit}) / (2\ln 2)$. Sets a global baseline trust level in material. Position-dependent modulation is absorbed by the value head FC which receives $\Delta M$ as a direct input. See Section 4 for the architectural evolution.
+Single `nn.Parameter` scalar $k_{logit}$, output via $0.47 \cdot \text{softplus}(k_{logit})$ (Texel-calibrated). Sets a global baseline trust level in material. Position-dependent modulation is absorbed by the value head FC which receives $\Delta M$ as a direct input. See Section 4 for the architectural evolution.
 
 ### Zero initialization
 
-All output layers ($V_{out}$, policy head) are initialized to zero. $k_{logit}$ is initialized to 0 (giving $k = 0.5$):
+All output layers ($V_{out}$, policy head) are initialized to zero. $k_{logit}$ is initialized to 0 (giving $k = 0.326$):
 - **Policy:** $\text{softmax}(0, 0, ...) = $ uniform distribution (explore everything equally)
-- **Value:** $V_{logit} = 0$, so $V_{final} = \tanh(k \cdot \Delta M)$ (pure material evaluation)
-- **k:** $k_{logit} = 0 \Rightarrow k = 0.5$ (moderate material weight)
+- **Value:** $V_{logit} = 0$, so $V_{final} = \tanh(k \cdot \Delta M)$ (pure PeSTO evaluation)
+- **k:** $k_{logit} = 0 \Rightarrow k = 0.326$ (Texel-calibrated material weight)
 
 This means a freshly initialized network immediately produces meaningful behavior: uniform exploration with material-aware evaluation.
 
@@ -339,7 +339,7 @@ Each variant was evaluated independently via SPRT. The best passing variant was 
 
 **The problem.** Each generation runs 50-800 MCTS evaluation games (candidate vs current model) purely for gating. These games run full MCTS searches with policy outputs at every move, but all position data is discarded — only W/L/D is kept. This is wasted training data. Worse, eval games actually produce *higher quality* samples than self-play: each move starts a fresh MCTS search (no subtree reuse between moves), making samples more independent.
 
-**The solution.** Evaluation games now collect training samples by default. At each move, the MCTS root's visit-count distribution becomes the policy target and `forced_material_balance()` provides the material scalar — the same extraction used by self-play. Samples are partitioned by which model was side-to-move: candidate's moves go to one vector, current model's moves to another.
+**The solution.** Evaluation games now collect training samples by default. At each move, the MCTS root's visit-count distribution becomes the policy target and `forced_pesto_balance()` provides the material scalar — the same extraction used by self-play. Samples are partitioned by which model was side-to-move: candidate's moves go to one vector, current model's moves to another.
 
 **Selective ingestion based on gating outcome.** If the candidate wins SPRT: both sides' data is added to the replay buffer (the candidate is stronger, and the current model's data is still valid). If the candidate loses: only the current model's data is kept — the rejected candidate may be overfit or degenerate, so its policy targets could be harmful. The current model's data is always useful regardless of outcome, since by definition it represents the best known model.
 
@@ -419,7 +419,7 @@ The three-tier decomposition is not chess-specific. The pattern — injecting ex
 
 | Domain | Tier 1 (Exact) | Tier 2 (Heuristic) | Tier 3 (Learned) |
 |--------|---------------|-------------------|-----------------|
-| **Chess** | Mate search, KOTH geometry | Quiescence search (forced material balance) + MVV-LVA ordering | Neural positional evaluation |
+| **Chess** | Mate search, KOTH geometry | Quiescence search (PeSTO forced balance) + MVV-LVA ordering | Neural positional evaluation |
 | **Mathematical reasoning** | Automated theorem provers (e.g., Lean's `decide`, `omega`) resolving subgoals | Lemma relevance ranking, proof-term similarity | Neural proof step prediction |
 | **Program synthesis** | Type checking, partial evaluation, SMT solvers | API frequency heuristics | Code generation model |
 | **Game playing** | Endgame tablebases, solved subgames | Domain heuristics | Value/policy networks |
