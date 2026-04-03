@@ -15,6 +15,8 @@
     --red: #e74c3c;
     --yellow: #f1c40f;
     --blue: #3498db;
+    --orange: #e67e22;
+    --purple: #9b59b6;
     --light-sq: #f0d9b5;
     --dark-sq: #b58863;
     --light-sq-hl: #f7ec5d;
@@ -31,6 +33,7 @@
     height: 100vh;
     overflow: hidden;
   }
+
   /* ── Left panel: board ── */
   .board-panel {
     width: 500px;
@@ -79,7 +82,8 @@
   .square {
     width: 57px; height: 57px;
     display: flex; align-items: center; justify-content: center;
-    font-size: 42px; cursor: pointer; position: relative;
+    font-size: 44px; cursor: pointer; position: relative;
+    line-height: 1;
   }
   .square.light { background: var(--light-sq); }
   .square.dark { background: var(--dark-sq); }
@@ -88,16 +92,51 @@
   .square.last-move.light { background: var(--light-sq-last); }
   .square.last-move.dark { background: var(--dark-sq-last); }
   .square.selected { box-shadow: inset 0 0 0 3px var(--green); }
+
+  /* Neo-style pieces: use filled glyphs for both colors, differentiate with color + shadow */
+  .piece {
+    font-size: 44px;
+    line-height: 1;
+    pointer-events: none;
+    position: relative;
+    z-index: 1;
+  }
+  .piece.white-piece {
+    color: #fff;
+    text-shadow:
+      -1px -1px 0 #222,
+       1px -1px 0 #222,
+      -1px  1px 0 #222,
+       1px  1px 0 #222,
+       0   -1px 0 #222,
+       0    1px 0 #222,
+      -1px  0   0 #222,
+       1px  0   0 #222;
+  }
+  .piece.black-piece {
+    color: #1a1a1a;
+    text-shadow:
+      -1px -1px 0 #666,
+       1px -1px 0 #666,
+      -1px  1px 0 #666,
+       1px  1px 0 #666,
+       0   -1px 0 #666,
+       0    1px 0 #666,
+      -1px  0   0 #666,
+       1px  0   0 #666;
+  }
+
   .move-dot {
     position: absolute; width: 16px; height: 16px;
     background: rgba(0,0,0,0.25); border-radius: 50%;
+    z-index: 2;
   }
   .move-dot.capture {
     width: 54px; height: 54px; background: none;
     border: 5px solid rgba(0,0,0,0.25); border-radius: 50%;
   }
   .coords {
-    position: absolute; font-size: 11px; font-weight: bold; pointer-events: none;
+    position: absolute; font-size: 11px; font-weight: bold; pointer-events: none; z-index: 3;
   }
   .file-coord { bottom: 1px; right: 3px; }
   .rank-coord { top: 1px; left: 3px; }
@@ -127,10 +166,35 @@
     overflow: hidden;
   }
   .tree-header {
-    display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
   }
   .tree-header h2 { font-size: 16px; color: var(--blue); }
   .tree-stats { font-size: 12px; color: var(--text-dim); }
+
+  /* Toggle switch */
+  .toggle-row {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+  }
+  .toggle-label { font-size: 13px; color: var(--text-dim); }
+  .toggle-label.active { color: var(--text); font-weight: bold; }
+  .switch {
+    position: relative; width: 44px; height: 24px; cursor: pointer;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--accent); border-radius: 12px; transition: 0.3s;
+    border: 1px solid #445;
+  }
+  .slider::before {
+    content: ''; position: absolute; width: 18px; height: 18px;
+    left: 2px; bottom: 2px; background: var(--text-dim);
+    border-radius: 50%; transition: 0.3s;
+  }
+  .switch input:checked + .slider { background: var(--blue); border-color: var(--blue); }
+  .switch input:checked + .slider::before { transform: translateX(20px); background: #fff; }
+
   .tree-container {
     flex: 1; overflow: auto; background: var(--panel); border-radius: 8px;
     padding: 16px; border: 1px solid #334;
@@ -171,18 +235,24 @@
   .eval-badge.positive { background: rgba(78,204,163,0.2); color: var(--green); }
   .eval-badge.negative { background: rgba(231,76,60,0.2); color: var(--red); }
   .eval-badge.neutral { background: rgba(255,255,255,0.08); color: var(--text-dim); }
-  .eval-badge.static-eval {
-    border: 1px dashed #555; background: none;
-  }
+  .eval-badge.static-eval { border: 1px dashed #555; background: none; }
   .eval-label-tag {
     font-size: 10px; color: var(--text-dim); text-transform: uppercase;
   }
+  .move-type-tag {
+    font-size: 9px; padding: 1px 5px; border-radius: 3px;
+    text-transform: uppercase; font-weight: bold; letter-spacing: 0.5px;
+  }
+  .move-type-tag.capture { background: rgba(231,76,60,0.25); color: var(--red); }
+  .move-type-tag.check { background: rgba(230,126,34,0.25); color: var(--orange); }
+  .move-type-tag.evasion { background: rgba(155,89,182,0.25); color: var(--purple); }
+  .move-type-tag.fork { background: rgba(241,196,15,0.25); color: var(--yellow); }
+
   .node-children { display: block; }
   .node-children.collapsed { display: none; }
   .best-move .move-label { color: var(--green); }
-  .loading {
-    color: var(--text-dim); font-style: italic; padding: 20px;
-  }
+  .loading { color: var(--text-dim); font-style: italic; padding: 20px; }
+
   /* Promotion dialog */
   .promo-overlay {
     display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -240,6 +310,14 @@
     <h2>Quiescence Search Tree</h2>
     <span class="tree-stats" id="tree-stats"></span>
   </div>
+  <div class="toggle-row">
+    <span class="toggle-label active" id="lbl-basic">Basic</span>
+    <label class="switch">
+      <input type="checkbox" id="ext-toggle" onchange="onToggleMode()">
+      <span class="slider"></span>
+    </label>
+    <span class="toggle-label" id="lbl-ext">Extended (checks + forks + evasions)</span>
+  </div>
   <div class="tree-container" id="tree-container">
     <div class="loading">Make a move or load a position to see the Q-search tree</div>
   </div>
@@ -250,23 +328,26 @@
 </div>
 
 <script>
-// ── Piece unicode ──
-const PIECE_UNICODE = {
-  'P': '\u2659', 'N': '\u2658', 'B': '\u2657', 'R': '\u2656', 'Q': '\u2655', 'K': '\u2654',
-  'p': '\u265F', 'n': '\u265E', 'b': '\u265D', 'r': '\u265C', 'q': '\u265B', 'k': '\u265A',
+// ── Piece glyphs — use filled set (U+265x) for both colors ──
+// Neo-style: same glyph shape, differentiated by CSS color + outline
+const PIECE_GLYPH = {
+  'K': '\u265A', 'Q': '\u265B', 'R': '\u265C', 'B': '\u265D', 'N': '\u265E', 'P': '\u265F',
+  'k': '\u265A', 'q': '\u265B', 'r': '\u265C', 'b': '\u265D', 'n': '\u265E', 'p': '\u265F',
 };
-const PROMO_PIECES_W = ['Q','R','B','N'];
-const PROMO_PIECES_B = ['q','r','b','n'];
+
+function isWhitePiece(ch) { return ch >= 'A' && ch <= 'Z'; }
 
 // ── State ──
-let boardState = {};      // current board from API
+let boardState = {};
 let legalMoves = [];
 let selectedSq = null;
 let flipped = false;
-let moveHistory = [];     // [{fen, san, uci, lastFrom, lastTo}]
-let historyIndex = -1;    // -1 = starting position
+let moveHistory = [];
+let historyIndex = -1;
 let startFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 let lastMoveFrom = -1, lastMoveTo = -1;
+let extendedMode = false;
+let currentFen = startFen;
 
 // ── Init ──
 async function init() {
@@ -278,26 +359,36 @@ async function loadPosition(fen) {
   boardState = await resp.json();
   legalMoves = boardState.legal_moves;
   selectedSq = null;
+  currentFen = boardState.fen;
   renderBoard();
   updateEval(boardState.eval_cp, boardState.white_to_move);
   document.getElementById('turn-label').textContent =
     boardState.white_to_move ? 'White to move' : 'Black to move';
-  fetchQSearchTree(fen);
+  fetchQSearchTree(boardState.fen);
 }
 
 async function fetchQSearchTree(fen) {
   const container = document.getElementById('tree-container');
   container.innerHTML = '<div class="loading">Computing Q-search tree...</div>';
   try {
-    const resp = await fetch('/api/qsearch?fen=' + encodeURIComponent(fen));
+    const ext = extendedMode ? '&extended=1' : '';
+    const resp = await fetch('/api/qsearch?fen=' + encodeURIComponent(fen) + ext);
     const data = await resp.json();
+    const modeLabel = data.extended ? 'extended' : 'basic';
     document.getElementById('tree-stats').textContent =
-      `${data.nodes_searched} nodes searched`;
+      `${data.nodes_searched} nodes (${modeLabel})`;
     container.innerHTML = '';
     container.appendChild(renderTreeNode(data.tree, true, true));
   } catch(e) {
     container.innerHTML = '<div class="loading">Error: ' + e.message + '</div>';
   }
+}
+
+function onToggleMode() {
+  extendedMode = document.getElementById('ext-toggle').checked;
+  document.getElementById('lbl-basic').classList.toggle('active', !extendedMode);
+  document.getElementById('lbl-ext').classList.toggle('active', extendedMode);
+  fetchQSearchTree(currentFen);
 }
 
 // ── Board rendering ──
@@ -339,13 +430,14 @@ function renderBoard() {
 
       if (sq === selectedSq) div.classList.add('selected');
       if (sq === lastMoveFrom || sq === lastMoveTo) div.classList.add('last-move');
-      if (highlightSqs.has(sq)) {
-        div.classList.add('highlight');
-      }
+      if (highlightSqs.has(sq)) div.classList.add('highlight');
 
-      // Piece
+      // Piece with Neo styling
       if (pieces[sq]) {
-        div.textContent = PIECE_UNICODE[pieces[sq]];
+        const span = document.createElement('span');
+        span.className = 'piece ' + (isWhitePiece(pieces[sq]) ? 'white-piece' : 'black-piece');
+        span.textContent = PIECE_GLYPH[pieces[sq]];
+        div.appendChild(span);
       }
 
       // Move dot
@@ -377,7 +469,6 @@ function renderBoard() {
 
 function onSquareClick(sq) {
   if (selectedSq === null) {
-    // Select piece if it has legal moves from this square
     if (legalMoves.some(m => m.from === sq)) {
       selectedSq = sq;
       renderBoard();
@@ -386,20 +477,14 @@ function onSquareClick(sq) {
     selectedSq = null;
     renderBoard();
   } else {
-    // Try to make a move
     const matching = legalMoves.filter(m => m.from === selectedSq && m.to === sq);
     if (matching.length === 0) {
-      // Click on another own piece?
-      if (legalMoves.some(m => m.from === sq)) {
-        selectedSq = sq;
-      } else {
-        selectedSq = null;
-      }
+      if (legalMoves.some(m => m.from === sq)) { selectedSq = sq; }
+      else { selectedSq = null; }
       renderBoard();
     } else if (matching.length === 1) {
       makeMove(matching[0]);
     } else {
-      // Promotion - show dialog
       showPromoDialog(matching);
     }
   }
@@ -411,12 +496,18 @@ function showPromoDialog(moves) {
   const isWhite = boardState.white_to_move;
   dialog.innerHTML = '';
 
-  for (const m of moves) {
-    const promoMap = { 'q': isWhite?'Q':'q', 'r': isWhite?'R':'r', 'b': isWhite?'B':'b', 'n': isWhite?'N':'n' };
-    const piece = promoMap[m.promotion] || (isWhite?'Q':'q');
+  const promoChars = isWhite ? ['Q','R','B','N'] : ['q','r','b','n'];
+  const promoKeys = ['q','r','b','n'];
+
+  for (let i = 0; i < promoKeys.length; i++) {
+    const m = moves.find(mv => mv.promotion === promoKeys[i]);
+    if (!m) continue;
     const btn = document.createElement('div');
     btn.className = 'promo-piece';
-    btn.textContent = PIECE_UNICODE[piece];
+    const span = document.createElement('span');
+    span.className = 'piece ' + (isWhite ? 'white-piece' : 'black-piece');
+    span.textContent = PIECE_GLYPH[promoChars[i]];
+    btn.appendChild(span);
     btn.addEventListener('click', () => {
       overlay.classList.remove('active');
       makeMove(m);
@@ -430,24 +521,10 @@ function showPromoDialog(moves) {
 }
 
 async function makeMove(move) {
-  // Build SAN-ish label from UCI
-  const san = move.uci; // We'll get proper SAN from history later
   const fen = boardState.fen;
-
-  // Make the move: load new state by applying the UCI move
-  // We need the resulting FEN - fetch state after move
-  const newFenResp = await fetch('/api/state?fen=' + encodeURIComponent(fen));
-  const stateNow = await newFenResp.json();
-
-  // Apply move: construct new FEN by asking the server
-  // We'll encode the move in the FEN request - but our API doesn't support that.
-  // Instead, we make the move client-side via a simple approach:
-  // Submit a "make move" by fetching the state with the move applied.
-  // We need a move endpoint... Let's use a workaround: pass fen + move
   const resp = await fetch('/api/state?fen=' + encodeURIComponent(fen) + '&move=' + move.uci);
   const newState = await resp.json();
 
-  // Trim any future moves if we went back in history
   if (historyIndex < moveHistory.length - 1) {
     moveHistory = moveHistory.slice(0, historyIndex + 1);
   }
@@ -465,6 +542,7 @@ async function makeMove(move) {
   boardState = newState;
   legalMoves = newState.legal_moves;
   selectedSq = null;
+  currentFen = newState.fen;
   renderBoard();
   updateEval(newState.eval_cp, newState.white_to_move);
   document.getElementById('turn-label').textContent =
@@ -474,7 +552,6 @@ async function makeMove(move) {
 }
 
 function updateEval(cp, whiteToMove) {
-  // Show eval from white's perspective
   const whiteCp = whiteToMove ? cp : -cp;
   const pawns = (whiteCp / 100).toFixed(2);
   const pct = Math.min(95, Math.max(5, 50 + whiteCp / 20));
@@ -558,6 +635,8 @@ function flipBoard() {
 
 // ── Tree rendering ──
 function formatEval(cp) {
+  if (cp <= -999900) return '#';  // checkmate
+  if (cp >= 999900) return '#';
   const pawns = (cp / 100).toFixed(2);
   return (cp >= 0 ? '+' : '') + pawns;
 }
@@ -595,12 +674,45 @@ function renderTreeNode(node, isRoot, isBest) {
   }
   header.appendChild(moveLabel);
 
+  // Move type tags (for extended mode)
+  if (!isRoot) {
+    if (node.is_capture) {
+      const tag = document.createElement('span');
+      tag.className = 'move-type-tag capture';
+      tag.textContent = 'capture';
+      header.appendChild(tag);
+    }
+    if (node.is_check) {
+      const tag = document.createElement('span');
+      tag.className = 'move-type-tag check';
+      tag.textContent = 'check';
+      header.appendChild(tag);
+    }
+    if (node.is_evasion) {
+      const tag = document.createElement('span');
+      tag.className = 'move-type-tag evasion';
+      tag.textContent = 'evasion';
+      header.appendChild(tag);
+    }
+    if (node.is_fork) {
+      const tag = document.createElement('span');
+      tag.className = 'move-type-tag fork';
+      tag.textContent = 'fork';
+      header.appendChild(tag);
+    }
+  }
+
   // Q-search score badge
   const scoreBadge = document.createElement('span');
   scoreBadge.className = 'eval-badge ' + evalClass(node.score_cp);
   scoreBadge.textContent = formatEval(node.score_cp);
   scoreBadge.title = 'Q-search backed-up score (STM perspective)';
   header.appendChild(scoreBadge);
+
+  const scoreTag = document.createElement('span');
+  scoreTag.className = 'eval-label-tag';
+  scoreTag.textContent = 'qsearch';
+  header.appendChild(scoreTag);
 
   // Static eval badge
   const staticBadge = document.createElement('span');
@@ -609,22 +721,9 @@ function renderTreeNode(node, isRoot, isBest) {
   staticBadge.title = 'Static PeSTO eval (STM perspective)';
   header.appendChild(staticBadge);
 
-  // Labels
-  const scoreTag = document.createElement('span');
-  scoreTag.className = 'eval-label-tag';
-  scoreTag.textContent = 'qsearch';
-  // insert before scoreBadge? Actually let's put labels after badges
   const staticTag = document.createElement('span');
   staticTag.className = 'eval-label-tag';
   staticTag.textContent = 'static';
-
-  // Reorganize: move, qsearch-score, "qsearch", static-score, "static"
-  header.innerHTML = '';
-  header.appendChild(toggle);
-  header.appendChild(moveLabel);
-  header.appendChild(scoreBadge);
-  header.appendChild(scoreTag);
-  header.appendChild(staticBadge);
   header.appendChild(staticTag);
 
   div.appendChild(header);
@@ -634,9 +733,6 @@ function renderTreeNode(node, isRoot, isBest) {
     const childDiv = document.createElement('div');
     childDiv.className = 'node-children' + (isRoot ? '' : ' collapsed');
 
-    // Determine best child (highest score from parent's POV = most negative child score_cp)
-    // Actually: children scores are in STM perspective at the child.
-    // From parent's POV, best child = lowest child.score_cp (most negative for child = best for parent)
     let bestIdx = 0;
     let bestParentScore = -Infinity;
     node.children.forEach((c, i) => {
