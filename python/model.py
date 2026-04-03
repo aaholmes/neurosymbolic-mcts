@@ -83,12 +83,10 @@ class OracleNet(nn.Module):
         self.v_out = nn.Linear(256, 1) # V_net (Residual)
         
         # --- DYNAMIC K (Confidence Scalar) ---
-        # Single learned scalar: k = softplus(k_logit) / (2*ln2).
-        # At init k_logit=0 → k=0.5 (half-trust quiescence).
-        # Position-dependent modulation is absorbed by the value head FC
-        # which receives q_result as a direct input.
+        # Single learned scalar: k = 0.47 * softplus(k_logit).
+        # Texel-calibrated: at init k_logit=0 → k = 0.47 * ln(2) ≈ 0.326.
+        # Maps PeSTO centipawn evals through tanh to calibrated win probabilities.
         self.k_logit = nn.Parameter(torch.tensor(0.0))
-        self.k_scale = 2 * math.log(2)
 
         # Apply Initialization
         self.apply(self._init_weights)
@@ -108,7 +106,7 @@ class OracleNet(nn.Module):
         q_result = scalars_input[:, 0:1]   # [B, 1]
 
         # K: global scalar confidence (position-independent)
-        k = F.softplus(self.k_logit) / self.k_scale  # scalar
+        k = 0.47 * F.softplus(self.k_logit)  # scalar, Texel-calibrated
         k_batch = k.unsqueeze(0).expand(x.size(0), 1)  # [B, 1]
 
         # Backbone
@@ -171,4 +169,4 @@ class OracleNet(nn.Module):
         nn.init.constant_(self.v_out.bias, 0.0)
         
         # 3. K scalar: k_logit is initialized to 0.0 in __init__
-        # Softplus(0) = ln(2). k = ln(2) / (2*ln(2)) = 0.5.
+        # Softplus(0) = ln(2). k = 0.47 * ln(2) ≈ 0.326.

@@ -165,6 +165,112 @@ pub fn forced_material_balance_counted(
     material_qsearch_counted(board, move_gen, -1000, 1000, 20)
 }
 
+/// PeSTO-based quiescence search for MCTS value function.
+///
+/// Uses `pesto.pst_eval_cp(board)` (centipawns, STM perspective) as eval —
+/// pure piece-square tables, no additional bonuses. Searches captures +
+/// promotions to find the best positional+material balance through forced exchanges.
+///
+/// Returns `(score_cp, completed)` where:
+/// - `score_cp`: best evaluation in centipawns from STM perspective
+/// - `completed`: `true` if search resolved naturally, `false` if depth limit hit
+pub fn pesto_qsearch(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+    alpha: i32,
+    beta: i32,
+    max_depth: u8,
+) -> (i32, bool) {
+    let (score, completed, _nodes, _depth) =
+        pesto_qsearch_counted(board, move_gen, pesto, alpha, beta, max_depth);
+    (score, completed)
+}
+
+/// PeSTO-based quiescence search that also returns the number of nodes visited
+/// and the maximum depth actually used.
+///
+/// Returns `(score_cp, completed, nodes, depth_used)`.
+pub fn pesto_qsearch_counted(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+    mut alpha: i32,
+    beta: i32,
+    max_depth: u8,
+) -> (i32, bool, u32, u8) {
+    let mut nodes: u32 = 1;
+    let stand_pat = pesto.pst_eval_cp(board.current_state());
+    if stand_pat >= beta {
+        return (beta, true, nodes, 0);
+    }
+    alpha = alpha.max(stand_pat);
+
+    let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
+
+    if max_depth == 0 {
+        let has_legal_capture = captures.iter().any(|&cap| {
+            board.make_move(cap);
+            let legal = board.current_state().is_legal(move_gen);
+            board.undo_move();
+            legal
+        });
+        return (alpha, !has_legal_capture, nodes, 0);
+    }
+
+    let mut all_completed = true;
+    let mut max_child_depth: u8 = 0;
+    for capture in captures {
+        board.make_move(capture);
+        if !board.current_state().is_legal(move_gen) {
+            board.undo_move();
+            continue;
+        }
+        let (score, child_completed, child_nodes, child_depth) =
+            pesto_qsearch_counted(board, move_gen, pesto, -beta, -alpha, max_depth - 1);
+        nodes += child_nodes;
+        max_child_depth = max_child_depth.max(child_depth + 1);
+        let score = -score;
+        if !child_completed {
+            all_completed = false;
+        }
+        board.undo_move();
+        if score >= beta {
+            return (beta, all_completed, nodes, max_child_depth);
+        }
+        if score > alpha {
+            alpha = score;
+        }
+    }
+    (alpha, all_completed, nodes, max_child_depth)
+}
+
+/// Convenience wrapper: returns `(pawn_units, completed)` where pawn_units
+/// is a float (centipawns / 100) from STM perspective after optimal forced
+/// captures/promotions using PeSTO piece-square table evaluation.
+pub fn forced_pesto_balance(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+) -> (f32, bool) {
+    let (score_cp, completed) = pesto_qsearch(board, move_gen, pesto, -100_000, 100_000, 20);
+    (score_cp as f32 / 100.0, completed)
+}
+
+/// Like `forced_pesto_balance` but also returns the number of nodes visited
+/// and the maximum depth actually used.
+///
+/// Returns `(pawn_units, completed, nodes, depth_used)`.
+pub fn forced_pesto_balance_counted(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+) -> (f32, bool, u32, u8) {
+    let (score_cp, completed, nodes, depth) =
+        pesto_qsearch_counted(board, move_gen, pesto, -100_000, 100_000, 20);
+    (score_cp as f32 / 100.0, completed, nodes, depth)
+}
+
 /// Tactical result from Quiescence Search for MCTS grafting
 #[derive(Clone, Debug)]
 pub struct TacticalTree {

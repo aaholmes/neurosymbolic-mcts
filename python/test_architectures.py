@@ -226,11 +226,11 @@ def test_v_fc_accepts_65_inputs():
     model = OracleNet()
     assert model.v_fc.in_features == 65
 
-def test_k_logit_zero_init_gives_half():
-    """softplus(0) / (2*ln2) = 0.5."""
+def test_k_logit_zero_init_gives_texel_calibrated():
+    """0.47 * softplus(0) = 0.47 * ln(2) ≈ 0.326."""
     model = OracleNet()
-    k = F.softplus(model.k_logit) / (2 * math.log(2))
-    assert abs(k.item() - 0.5) < 0.01
+    k = 0.47 * F.softplus(model.k_logit)
+    assert abs(k.item() - 0.326) < 0.01
 
 def test_q_result_influences_v_logit():
     """After minimal training, changing scalars[0] (q_result) must change v_logit.
@@ -312,7 +312,7 @@ if __name__ == "__main__":
     test_no_k_head_layers()
     test_scalar_k_is_position_independent()
     test_v_fc_accepts_65_inputs()
-    test_k_logit_zero_init_gives_half()
+    test_k_logit_zero_init_gives_texel_calibrated()
     test_q_result_influences_v_logit()
     test_param_count_reduced()
 

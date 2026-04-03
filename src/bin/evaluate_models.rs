@@ -13,7 +13,8 @@ use kingfisher::mcts::{
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::neural_net::NeuralNetPolicy;
-use kingfisher::search::quiescence::forced_material_balance;
+use kingfisher::eval::PestoEval;
+use kingfisher::search::quiescence::forced_pesto_balance;
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
 use kingfisher::transposition::TranspositionTable;
@@ -332,9 +333,10 @@ pub fn play_evaluation_game_with_servers(
                 }
 
                 let mut temp_stack = BoardStack::with_board(board.clone());
-                let (material_balance, qsearch_completed) =
-                    forced_material_balance(&mut temp_stack, &move_gen);
-                let material_scalar = material_balance as f32;
+                let pesto = PestoEval::new();
+                let (q_result, qsearch_completed) =
+                    forced_pesto_balance(&mut temp_stack, &move_gen, &pesto);
+                let material_scalar = q_result;
 
                 let sample = TrainingSample {
                     board: board.clone(),

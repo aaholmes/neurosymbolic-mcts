@@ -80,6 +80,41 @@ impl PestoEval {
         self.eg_table[color][piece][square]
     }
 
+    /// Pure piece-square-table evaluation in centipawns (no bonuses).
+    /// Returns score from side-to-move perspective.
+    /// Uses only PST values (base piece values + positional adjustments),
+    /// no bishop pair, king safety, mobility, or other bonus terms.
+    pub fn pst_eval_cp(&self, board: &Board) -> i32 {
+        let mut mg: [i32; 2] = [0, 0];
+        let mut eg: [i32; 2] = [0, 0];
+        let mut game_phase: i32 = 0;
+
+        for color in 0..2 {
+            for piece in 0..6 {
+                let mut piece_bb = board.pieces[color][piece];
+                while piece_bb != 0 {
+                    let sq = piece_bb.trailing_zeros() as usize;
+                    mg[color] += self.mg_table[color][piece][sq];
+                    eg[color] += self.eg_table[color][piece][sq];
+                    game_phase += GAMEPHASE_INC[piece];
+                    piece_bb &= piece_bb - 1;
+                }
+            }
+        }
+
+        let mg_score = mg[0] - mg[1];
+        let eg_score = eg[0] - eg[1];
+        let mg_phase = std::cmp::min(24, game_phase);
+        let eg_phase = 24 - mg_phase;
+        let score = (mg_score * mg_phase + eg_score * eg_phase) / 24;
+
+        if board.w_to_move {
+            score
+        } else {
+            -score
+        }
+    }
+
     pub fn eval_plus_game_phase(&self, board: &Board, move_gen: &MoveGen) -> (i32, i32, i32) {
         let mut mg: [i32; 2] = [0, 0];
         let mut eg: [i32; 2] = [0, 0];

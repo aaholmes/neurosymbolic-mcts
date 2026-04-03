@@ -14,7 +14,8 @@ use crate::mcts::search_logger::{GateReason, SearchLogger};
 use crate::mcts::selection::select_child_with_tactical_priority;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
-use crate::search::forced_material_balance_counted;
+use crate::eval::PestoEval;
+use crate::search::forced_pesto_balance_counted;
 use crate::search::koth_center_in_n_counted;
 use crate::search::mate_search;
 use crate::search::{koth_best_move, koth_center_in_n};
@@ -59,6 +60,8 @@ pub struct TacticalMctsConfig {
     /// Shuffle children after expansion to break move-generation-order bias
     /// Enable for training (self-play), disable for deterministic analysis/evaluation
     pub randomize_move_order: bool,
+    /// PeSTO evaluator for q-search (constructed once, reused across all searches)
+    pub pesto: PestoEval,
 }
 
 impl Default for TacticalMctsConfig {
@@ -81,6 +84,7 @@ impl Default for TacticalMctsConfig {
             dirichlet_alpha: 0.0,
             dirichlet_epsilon: 0.0,
             randomize_move_order: false,
+            pesto: PestoEval::new(),
         }
     }
 }
@@ -638,15 +642,15 @@ fn evaluate_leaf_node(
     }
 
     if node_ref.nn_value.is_none() {
-        let mut k_val: f32 = 0.5;
+        let mut k_val: f32 = 0.326;
         let mut v_logit: f64 = f64::NEG_INFINITY; // sentinel: no NN result yet
 
         // 1. Run Q-search FIRST so completion flag is available for NN inference
-        let (delta_m, qsearch_completed) = if config.enable_material_value {
+        let (q_result, qsearch_completed) = if config.enable_material_value {
             let qsearch_start = Instant::now();
             let mut board_stack = BoardStack::with_board(node_ref.state.clone());
             let (score, completed, nodes, depth_used) =
-                forced_material_balance_counted(&mut board_stack, move_gen);
+                forced_pesto_balance_counted(&mut board_stack, move_gen, &config.pesto);
             stats.qsearch_timing.record(qsearch_start.elapsed());
             stats.qsearch_nodes.record(nodes as f64);
             stats.qsearch_depth.record(depth_used as f64);
@@ -657,7 +661,7 @@ fn evaluate_leaf_node(
             }
             (score, completed)
         } else {
-            (0, true)
+            (0.0f32, true)
         };
 
         // 2. Batched Inference — NN now returns raw v_logit (unbounded)
@@ -665,7 +669,7 @@ fn evaluate_leaf_node(
             if let Some(server) = &config.inference_server {
                 if config.use_neural_policy {
                     let nn_start = Instant::now();
-                    let receiver = server.predict_async(node_ref.state.clone(), qsearch_completed, delta_m as f32);
+                    let receiver = server.predict_async(node_ref.state.clone(), qsearch_completed, q_result);
                     if let Ok(Some((policy, nn_v_logit, k))) = receiver.recv() {
                         v_logit = nn_v_logit as f64;
                         k_val = k;
@@ -678,8 +682,8 @@ fn evaluate_leaf_node(
 
         if config.enable_material_value {
             if v_logit.is_finite() {
-                // NN path: combine v_logit + k * delta_M
-                let final_value = (v_logit + k_val as f64 * delta_m as f64).tanh();
+                // NN path: combine v_logit + k * q_result
+                let final_value = (v_logit + k_val as f64 * q_result as f64).tanh();
                 if let Some(log) = logger {
                     log.log_tier3_neural(final_value, k_val);
                 }
@@ -690,13 +694,13 @@ fn evaluate_leaf_node(
                 }
                 stats.nn_evaluations += 1;
             } else {
-                // Classical fallback: v_logit = 0.0, k = 0.5, rely on material only
-                // k=0.5 matches NN init: softplus(0)/(2*ln2) ≈ 0.5
+                // Classical fallback: v_logit = 0.0, k = 0.326, rely on material only
+                // k=0.326 matches NN init: 0.47 * softplus(0) = 0.47 * ln(2) ≈ 0.326
                 let classical_v_logit = 0.0;
-                let classical_k: f32 = 0.5;
-                let final_value = (classical_v_logit + classical_k as f64 * delta_m as f64).tanh();
+                let classical_k: f32 = 0.326;
+                let final_value = (classical_v_logit + classical_k as f64 * q_result as f64).tanh();
                 if let Some(log) = logger {
-                    log.log_classical_eval(delta_m, final_value);
+                    log.log_classical_eval((q_result * 100.0) as i32, final_value);
                 }
                 node_ref.v_logit = Some(classical_v_logit);
                 node_ref.nn_value = Some(final_value);

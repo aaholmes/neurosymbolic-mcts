@@ -1,6 +1,6 @@
 //! Constants for the Pesto evaluation function module
 //! Values from Rofchade: <http://www.talkchess.com/forum3/viewtopic.php?f=2&t=68311&start=19>
-//! We only modify the middlegame king table, so that the king doesn't want to go forward when all the pieces are on the board.
+//! All tables are standard RofChade values (unmodified).
 //! Note that these apparently use a different indexing, so we need to flip the board vertically for white.
 
 // Piece values in middlegame
@@ -82,24 +82,16 @@ const EG_QUEEN_TABLE: [i32; 64] = [
     -22, -23, -30, -16, -16, -23, -36, -32, -33, -28, -22, -43, -5, -32, -20, -41,
 ];
 
-/// Piece-square tables for middlegame king
-/// Modify MG_KING_TABLE so at least the king doesn't want to go forward when all the pieces are on the board
-/// Original Pesto table:
-/// const MG_KING_TABLE: [i32; 64] = [
-///     -65, 23, 16, -15, -56, -34, 2, 13,
-///     29, -1, -20, -7, -8, -4, -38, -29,
-///     -9, 24, 2, -16, -20, 6, 22, -22,
-///     -17, -20, -12, -27, -30, -25, -14, -36,
-///     -49, -1, -27, -39, -46, -44, -33, -51,
-///     -14, -14, -22, -46, -44, -30, -15, -27,
-///     1, 7, -8, -64, -43, -16, 9, 8,
-///     -15, 36, 12, -54, 8, -28, 24, 14,
-/// ];
+/// Piece-square tables for middlegame king (standard RofChade values)
 const MG_KING_TABLE: [i32; 64] = [
-    -38, -38, -38, -38, -38, -38, -38, -38, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36,
-    -36, -36, -36, -36, -36, -17, -20, -12, -27, -30, -25, -14, -36, -12, -12, -12, -12, -12, -12,
-    -12, -12, -1, -1, -1, -1, -1, -1, -1, -1, 1, 7, -1, -1, -1, -1, 9, 8, 9, 36, 12, 9, 9, 9, 24,
-    14,
+    -65, 23, 16, -15, -56, -34, 2, 13,
+    29, -1, -20, -7, -8, -4, -38, -29,
+    -9, 24, 2, -16, -20, 6, 22, -22,
+    -17, -20, -12, -27, -30, -25, -14, -36,
+    -49, -1, -27, -39, -46, -44, -33, -51,
+    -14, -14, -22, -46, -44, -30, -15, -27,
+    1, 7, -8, -64, -43, -16, 9, 8,
+    -15, 36, 12, -54, 8, -28, 24, 14,
 ];
 
 // Piece-square tables for endgame king
