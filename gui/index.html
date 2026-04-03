@@ -247,6 +247,7 @@
   .move-type-tag.check { background: rgba(230,126,34,0.25); color: var(--orange); }
   .move-type-tag.evasion { background: rgba(155,89,182,0.25); color: var(--purple); }
   .move-type-tag.fork { background: rgba(241,196,15,0.25); color: var(--yellow); }
+  .move-type-tag.null-move { background: rgba(255,255,255,0.08); color: var(--text-dim); font-style: italic; }
 
   .node-children { display: block; }
   .node-children.collapsed { display: none; }
@@ -660,7 +661,8 @@ function renderTreeNode(node, isRoot, isBest) {
   // Toggle
   const toggle = document.createElement('span');
   toggle.className = 'toggle-btn';
-  toggle.textContent = hasChildren ? (isRoot ? '\u25BC' : '\u25B6') : '\u00B7';
+  const startExpanded = isRoot || node.is_null;
+  toggle.textContent = hasChildren ? (startExpanded ? '\u25BC' : '\u25B6') : '\u00B7';
   header.appendChild(toggle);
 
   // Move label
@@ -669,6 +671,10 @@ function renderTreeNode(node, isRoot, isBest) {
   if (isRoot) {
     moveLabel.textContent = 'Root';
     moveLabel.style.color = 'var(--blue)';
+  } else if (node.is_null) {
+    moveLabel.textContent = '(pass)';
+    moveLabel.style.color = 'var(--text-dim)';
+    moveLabel.style.fontStyle = 'italic';
   } else {
     moveLabel.textContent = node.move_san || node.move_uci || '?';
   }
@@ -698,6 +704,12 @@ function renderTreeNode(node, isRoot, isBest) {
       const tag = document.createElement('span');
       tag.className = 'move-type-tag fork';
       tag.textContent = 'fork';
+      header.appendChild(tag);
+    }
+    if (node.is_null) {
+      const tag = document.createElement('span');
+      tag.className = 'move-type-tag null-move';
+      tag.textContent = 'null';
       header.appendChild(tag);
     }
   }
@@ -731,7 +743,8 @@ function renderTreeNode(node, isRoot, isBest) {
   // Children
   if (hasChildren) {
     const childDiv = document.createElement('div');
-    childDiv.className = 'node-children' + (isRoot ? '' : ' collapsed');
+    const autoExpand = isRoot || node.is_null;
+    childDiv.className = 'node-children' + (autoExpand ? '' : ' collapsed');
 
     let bestIdx = 0;
     let bestParentScore = -Infinity;

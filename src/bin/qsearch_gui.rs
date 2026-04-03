@@ -46,6 +46,7 @@ struct QSearchTreeNode {
     is_check: bool,
     is_evasion: bool,
     is_fork: bool,
+    is_null: bool,
     children: Vec<QSearchTreeNode>,
 }
 
@@ -115,7 +116,7 @@ fn build_qsearch_tree(
     let leaf = |eval, score| QSearchTreeNode {
         fen: fen.clone(), eval_cp: eval, score_cp: score,
         move_uci: None, move_san: None,
-        is_capture: false, is_check: false, is_evasion: false, is_fork: false,
+        is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
         children: vec![],
     };
 
@@ -155,21 +156,28 @@ fn build_qsearch_tree(
     QSearchTreeNode {
         fen, eval_cp: stand_pat, score_cp: best_score,
         move_uci: None, move_san: None,
-        is_capture: false, is_check: false, is_evasion: false, is_fork: false,
+        is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
         children,
     }
 }
 
 // ── Extended Q-search tree builder (captures + checks + forks + evasions) ──
 
+/// Mirrors `ext_pesto_qsearch_counted` exactly — same alpha-beta pruning, same
+/// move ordering, same cutoffs — but captures the tree structure for visualization.
+/// Every node the engine visits becomes a tree node; alpha-beta cutoffs stop
+/// exploration just like the engine does.
 fn build_ext_qsearch_tree(
     board: &mut BoardStack,
     move_gen: &MoveGen,
     pesto: &PestoEval,
-    depth: u8,
+    mut alpha: i32,
+    beta: i32,
+    max_depth: u8,
     white_tactic_used: bool,
     black_tactic_used: bool,
-    forked_pieces: u64,
+    white_null_used: bool,
+    black_null_used: bool,
     nodes: &mut u32,
 ) -> QSearchTreeNode {
     *nodes += 1;
@@ -179,24 +187,62 @@ fn build_ext_qsearch_tree(
     let leaf = |eval, score| QSearchTreeNode {
         fen: fen.clone(), eval_cp: eval, score_cp: score,
         move_uci: None, move_san: None,
-        is_capture: false, is_check: false, is_evasion: false, is_fork: false,
+        is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
         children: vec![],
     };
 
     let stand_pat = pesto.pst_eval_cp(board.current_state());
+    let mut children = Vec::new();
 
-    if depth == 0 {
-        return leaf(stand_pat, stand_pat);
+    // ── Stand-pat with null-move probe (not in check) ──
+    if !in_check {
+        let stm_is_white = board.current_state().w_to_move;
+        let stm_null_used = if stm_is_white { white_null_used } else { black_null_used };
+
+        let adjusted_stand_pat = if !stm_null_used && max_depth > 1 {
+            board.make_null_move();
+            let mut null_child = build_ext_qsearch_tree(
+                board, move_gen, pesto,
+                -beta, -alpha, max_depth - 1,
+                white_tactic_used, black_tactic_used,
+                true, true, // one null move per branch total
+                nodes,
+            );
+            board.undo_null_move();
+            let null_threat = -null_child.score_cp;
+
+            // Add null-move as a visible child
+            null_child.move_san = Some("(pass)".to_string());
+            null_child.is_null = true;
+            children.push(null_child);
+
+            stand_pat.min(null_threat)
+        } else {
+            stand_pat
+        };
+
+        if adjusted_stand_pat >= beta {
+            return QSearchTreeNode {
+                fen, eval_cp: stand_pat, score_cp: beta,
+                move_uci: None, move_san: None,
+                is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
+                children,
+            };
+        }
+        if adjusted_stand_pat > alpha {
+            alpha = adjusted_stand_pat;
+        }
+    }
+
+    if max_depth == 0 {
+        return leaf(stand_pat, alpha);
     }
 
     let stm_is_white = board.current_state().w_to_move;
     let stm_tactic_used = if stm_is_white { white_tactic_used } else { black_tactic_used };
 
-    // Collect scored children: (move, parent-perspective score, tree, is_capture, is_check, is_evasion, is_fork)
-    let mut scored_children: Vec<(Move, i32, QSearchTreeNode, bool, bool, bool, bool)> = Vec::new();
-
     if in_check {
-        // In check: all legal moves are evasions
+        // ── In check: all legal moves as evasions ──
         let (caps, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
         let mut any_legal = false;
         for mv in caps.iter().chain(quiets.iter()) {
@@ -209,20 +255,37 @@ fn build_ext_qsearch_tree(
                 continue;
             }
             any_legal = true;
-            let child_tree = build_ext_qsearch_tree(
-                board, move_gen, pesto, depth - 1,
-                white_tactic_used, black_tactic_used, 0, nodes,
+            let mut child_tree = build_ext_qsearch_tree(
+                board, move_gen, pesto, -beta, -alpha, max_depth - 1,
+                white_tactic_used, black_tactic_used,
+                white_null_used, black_null_used, nodes,
             );
             let score = -child_tree.score_cp;
             board.undo_move();
-            scored_children.push((*mv, score, child_tree, is_cap, false, true, false));
+
+            child_tree.move_uci = Some(mv.to_uci());
+            child_tree.move_san = Some(move_to_san(board.current_state(), mv, move_gen));
+            child_tree.is_capture = is_cap;
+            child_tree.is_evasion = true;
+            children.push(child_tree);
+
+            if score >= beta {
+                return QSearchTreeNode {
+                    fen, eval_cp: stand_pat, score_cp: beta,
+                    move_uci: None, move_san: None,
+                    is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
+                    children,
+                };
+            }
+            if score > alpha { alpha = score; }
         }
         if !any_legal {
-            // Checkmate
             return leaf(stand_pat, -1_000_000);
         }
     } else {
-        // Not in check: captures first
+        // ── Not in check: captures, then tactical quiets ──
+
+        // 1. Captures
         let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
         for capture in &captures {
             board.make_move(*capture);
@@ -230,33 +293,38 @@ fn build_ext_qsearch_tree(
                 board.undo_move();
                 continue;
             }
-            let child_tree = build_ext_qsearch_tree(
-                board, move_gen, pesto, depth - 1,
-                white_tactic_used, black_tactic_used, 0, nodes,
+            let mut child_tree = build_ext_qsearch_tree(
+                board, move_gen, pesto, -beta, -alpha, max_depth - 1,
+                white_tactic_used, black_tactic_used,
+                white_null_used, black_null_used, nodes,
             );
             let score = -child_tree.score_cp;
             board.undo_move();
-            scored_children.push((*capture, score, child_tree, true, false, false, false));
+
+            child_tree.move_uci = Some(capture.to_uci());
+            child_tree.move_san = Some(move_to_san(board.current_state(), capture, move_gen));
+            child_tree.is_capture = true;
+            children.push(child_tree);
+
+            if score >= beta {
+                return QSearchTreeNode {
+                    fen, eval_cp: stand_pat, score_cp: beta,
+                    move_uci: None, move_san: None,
+                    is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
+                    children,
+                };
+            }
+            if score > alpha { alpha = score; }
         }
 
-        // Tactical quiets + forked piece retreats
-        if !stm_tactic_used || forked_pieces != 0 {
+        // 2. Tactical quiets (checks, forks)
+        if !stm_tactic_used {
             let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
             for mv in &quiets {
-                let from_bit = 1u64 << mv.from;
-                let is_forked_retreat = forked_pieces & from_bit != 0;
-                let is_tactical = !stm_tactic_used
-                    && is_tactical_quiet(board.current_state(), *mv, move_gen);
-
-                if !is_tactical && !is_forked_retreat {
+                if !is_tactical_quiet(board.current_state(), *mv, move_gen) {
                     continue;
                 }
-
-                let new_forked = if is_tactical {
-                    compute_fork_targets(board.current_state(), *mv, move_gen)
-                } else {
-                    0
-                };
+                let is_fork_move = compute_fork_targets(board.current_state(), *mv, move_gen) != 0;
 
                 board.make_move(*mv);
                 if !board.current_state().is_legal(move_gen) {
@@ -264,44 +332,41 @@ fn build_ext_qsearch_tree(
                     continue;
                 }
 
-                let new_w_used = if is_tactical && stm_is_white { true } else { white_tactic_used };
-                let new_b_used = if is_tactical && !stm_is_white { true } else { black_tactic_used };
-
+                let new_w_used = if stm_is_white { true } else { white_tactic_used };
+                let new_b_used = if !stm_is_white { true } else { black_tactic_used };
                 let gives_check = board.current_state().is_check(move_gen);
-                let is_fork_move = new_forked != 0;
 
-                let child_tree = build_ext_qsearch_tree(
-                    board, move_gen, pesto, depth - 1,
-                    new_w_used, new_b_used, new_forked, nodes,
+                let mut child_tree = build_ext_qsearch_tree(
+                    board, move_gen, pesto, -beta, -alpha, max_depth - 1,
+                    new_w_used, new_b_used,
+                    white_null_used, black_null_used, nodes,
                 );
                 let score = -child_tree.score_cp;
                 board.undo_move();
-                scored_children.push((*mv, score, child_tree, false, gives_check, is_forked_retreat, is_fork_move));
+
+                child_tree.move_uci = Some(mv.to_uci());
+                child_tree.move_san = Some(move_to_san(board.current_state(), mv, move_gen));
+                child_tree.is_check = gives_check;
+                child_tree.is_fork = is_fork_move;
+                children.push(child_tree);
+
+                if score >= beta {
+                    return QSearchTreeNode {
+                        fen, eval_cp: stand_pat, score_cp: beta,
+                        move_uci: None, move_san: None,
+                        is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
+                        children,
+                    };
+                }
+                if score > alpha { alpha = score; }
             }
         }
     }
 
-    scored_children.sort_by(|a, b| b.1.cmp(&a.1));
-    scored_children.truncate(TOP_N);
-
-    let mut best_score = if in_check { -1_000_000 } else { stand_pat };
-    let mut children = Vec::new();
-
-    for (mv, score, mut child_tree, is_cap, is_chk, is_evasion, is_fork) in scored_children {
-        if score > best_score { best_score = score; }
-        child_tree.move_uci = Some(mv.to_uci());
-        child_tree.move_san = Some(move_to_san(board.current_state(), &mv, move_gen));
-        child_tree.is_capture = is_cap;
-        child_tree.is_check = is_chk;
-        child_tree.is_evasion = is_evasion;
-        child_tree.is_fork = is_fork;
-        children.push(child_tree);
-    }
-
     QSearchTreeNode {
-        fen, eval_cp: stand_pat, score_cp: best_score,
+        fen, eval_cp: stand_pat, score_cp: alpha,
         move_uci: None, move_san: None,
-        is_capture: false, is_check: false, is_evasion: false, is_fork: false,
+        is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
         children,
     }
 }
@@ -458,7 +523,8 @@ fn handle_qsearch(fen: &str, extended: bool, move_gen: &MoveGen, pesto: &PestoEv
     let tree = if extended {
         build_ext_qsearch_tree(
             &mut board, move_gen, pesto,
-            MAX_DEPTH, false, false, 0, &mut nodes,
+            -100_000, 100_000, 20,
+            false, false, false, false, &mut nodes,
         )
     } else {
         build_qsearch_tree(

@@ -334,17 +334,20 @@ fn compute_fork_targets(board: &Board, mv: Move, move_gen: &MoveGen) -> u64 {
     }
 }
 
-/// Extended PeSTO-based quiescence search with tactical moves.
+/// Extended PeSTO-based quiescence search with tactical moves and null-move
+/// threat detection.
 ///
 /// Beyond captures+promotions, this search also considers:
 /// - **Check evasions**: When in check, all legal moves are searched (no stand-pat)
 /// - **Non-capture checks**: Quiet moves that give check (consume tactical budget)
 /// - **Pawn forks**: Pawn advances attacking 2+ enemy pieces worth > pawn
 /// - **Knight forks**: Knight moves attacking 2+ enemy pieces in {R, Q, K}
-/// - **Forked piece retreats**: Moves of pieces under fork threat (free)
+/// - **Null-move stand-pat**: Instead of trusting the static eval, pass the turn
+///   and let the opponent capture. This detects hanging pieces, fork threats, and
+///   any position where "doing nothing" loses material. Each side gets at most one
+///   null move per branch.
 ///
-/// Each side gets one non-capture tactical move per search. Check evasions and
-/// forked piece retreats don't consume the budget.
+/// Each side gets one non-capture tactical move per search.
 ///
 /// Returns `(score_cp, completed, nodes, depth_used)`.
 pub fn ext_pesto_qsearch_counted(
@@ -356,19 +359,59 @@ pub fn ext_pesto_qsearch_counted(
     max_depth: u8,
     white_tactic_used: bool,
     black_tactic_used: bool,
-    forked_pieces: u64,
+    white_null_used: bool,
+    black_null_used: bool,
 ) -> (i32, bool, u32, u8) {
     let mut nodes: u32 = 1;
+    let mut all_completed = true;
+    let mut max_child_depth: u8 = 0;
     let in_check = board.current_state().is_check(move_gen);
 
-    // Stand-pat (only when not in check)
+    // Stand-pat with null-move threat detection (only when not in check)
     if !in_check {
         let stand_pat = pesto.pst_eval_cp(board.current_state());
-        if stand_pat >= beta {
-            return (beta, true, nodes, 0);
+
+        let stm_is_white = board.current_state().w_to_move;
+        let stm_null_used = if stm_is_white { white_null_used } else { black_null_used };
+
+        // Null-move probe: pass the turn and see what opponent captures do.
+        // This catches threats that stand-pat misses (forks, hanging pieces).
+        let adjusted_stand_pat = if !stm_null_used && max_depth > 1 {
+            board.make_null_move();
+            // One null move per branch total — prevent opponent from also passing
+            let new_w_null = true;
+            let new_b_null = true;
+            let (null_score, null_completed, null_nodes, null_depth) =
+                ext_pesto_qsearch_counted(
+                    board,
+                    move_gen,
+                    pesto,
+                    -beta,
+                    -alpha,
+                    max_depth - 1,
+                    white_tactic_used,
+                    black_tactic_used,
+                    new_w_null,
+                    new_b_null,
+                );
+            nodes += null_nodes;
+            max_child_depth = max_child_depth.max(null_depth + 1);
+            if !null_completed {
+                all_completed = false;
+            }
+            board.undo_null_move();
+            let null_threat = -null_score;
+            // Can't be better than what happens when opponent punishes a pass
+            stand_pat.min(null_threat)
+        } else {
+            stand_pat
+        };
+
+        if adjusted_stand_pat >= beta {
+            return (beta, all_completed, nodes, max_child_depth);
         }
-        if stand_pat > alpha {
-            alpha = stand_pat;
+        if adjusted_stand_pat > alpha {
+            alpha = adjusted_stand_pat;
         }
     }
 
@@ -394,8 +437,6 @@ pub fn ext_pesto_qsearch_counted(
         black_tactic_used
     };
 
-    let mut all_completed = true;
-    let mut max_child_depth: u8 = 0;
     let mut any_legal = false;
 
     if in_check {
@@ -418,7 +459,8 @@ pub fn ext_pesto_qsearch_counted(
                     max_depth - 1,
                     white_tactic_used,
                     black_tactic_used,
-                    0, // fork state cleared after evasion
+                    white_null_used,
+                    black_null_used,
                 );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
@@ -439,7 +481,7 @@ pub fn ext_pesto_qsearch_counted(
             return (-1_000_000, true, nodes, 0);
         }
     } else {
-        // Not in check: captures first, then tactical quiets + forked retreats
+        // Not in check: captures first, then tactical quiets
 
         // 1. Captures (always, MVV-LVA sorted)
         let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
@@ -460,7 +502,8 @@ pub fn ext_pesto_qsearch_counted(
                     max_depth - 1,
                     white_tactic_used,
                     black_tactic_used,
-                    0,
+                    white_null_used,
+                    black_null_used,
                 );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
@@ -477,25 +520,13 @@ pub fn ext_pesto_qsearch_counted(
             }
         }
 
-        // 2. Tactical quiets + forked piece retreats (when applicable)
-        if !stm_tactic_used || forked_pieces != 0 {
+        // 2. Tactical quiets: non-capture checks and forks (when budget allows)
+        if !stm_tactic_used {
             let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
             for mv in &quiets {
-                let from_bit = 1u64 << mv.from;
-                let is_forked_retreat = forked_pieces & from_bit != 0;
-                let is_tactical = !stm_tactic_used
-                    && is_tactical_quiet(board.current_state(), *mv, move_gen);
-
-                if !is_tactical && !is_forked_retreat {
+                if !is_tactical_quiet(board.current_state(), *mv, move_gen) {
                     continue;
                 }
-
-                // Compute fork targets before applying the move
-                let new_forked = if is_tactical {
-                    compute_fork_targets(board.current_state(), *mv, move_gen)
-                } else {
-                    0
-                };
 
                 board.make_move(*mv);
                 if !board.current_state().is_legal(move_gen) {
@@ -504,13 +535,13 @@ pub fn ext_pesto_qsearch_counted(
                 }
                 any_legal = true;
 
-                // Update budget: tactical move consumes the moving side's budget
-                let new_w_used = if is_tactical && stm_is_white {
+                // Tactical move consumes the moving side's budget
+                let new_w_used = if stm_is_white {
                     true
                 } else {
                     white_tactic_used
                 };
-                let new_b_used = if is_tactical && !stm_is_white {
+                let new_b_used = if !stm_is_white {
                     true
                 } else {
                     black_tactic_used
@@ -526,7 +557,8 @@ pub fn ext_pesto_qsearch_counted(
                         max_depth - 1,
                         new_w_used,
                         new_b_used,
-                        new_forked,
+                        white_null_used,
+                        black_null_used,
                     );
                 nodes += child_nodes;
                 max_child_depth = max_child_depth.max(child_depth + 1);
@@ -555,7 +587,7 @@ pub fn forced_ext_pesto_balance(
     pesto: &PestoEval,
 ) -> (f32, bool) {
     let (score_cp, completed, _nodes, _depth) =
-        ext_pesto_qsearch_counted(board, move_gen, pesto, -100_000, 100_000, 20, false, false, 0);
+        ext_pesto_qsearch_counted(board, move_gen, pesto, -100_000, 100_000, 20, false, false, false, false);
     (score_cp as f32 / 100.0, completed)
 }
 
@@ -568,7 +600,7 @@ pub fn forced_ext_pesto_balance_counted(
     pesto: &PestoEval,
 ) -> (f32, bool, u32, u8) {
     let (score_cp, completed, nodes, depth) =
-        ext_pesto_qsearch_counted(board, move_gen, pesto, -100_000, 100_000, 20, false, false, 0);
+        ext_pesto_qsearch_counted(board, move_gen, pesto, -100_000, 100_000, 20, false, false, false, false);
     (score_cp as f32 / 100.0, completed, nodes, depth)
 }
 
