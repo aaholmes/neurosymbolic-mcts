@@ -368,6 +368,7 @@ pub fn ext_pesto_qsearch_counted(
     let in_check = board.current_state().is_check(move_gen);
 
     // Stand-pat with null-move threat detection (only when not in check)
+    let mut threatened_pieces: u64 = 0;
     if !in_check {
         let stand_pat = pesto.pst_eval_cp(board.current_state());
 
@@ -401,6 +402,23 @@ pub fn ext_pesto_qsearch_counted(
             }
             board.undo_null_move();
             let null_threat = -null_score;
+
+            // If threat exists, identify which pieces are under attack
+            if null_threat < stand_pat {
+                board.make_null_move();
+                let opp_captures = move_gen.gen_pseudo_legal_captures(board.current_state());
+                board.undo_null_move();
+                let stm_color = if stm_is_white { WHITE } else { BLACK };
+                let stm_valuable = board.current_state().get_piece_bitboard(stm_color, KNIGHT)
+                    | board.current_state().get_piece_bitboard(stm_color, BISHOP)
+                    | board.current_state().get_piece_bitboard(stm_color, ROOK)
+                    | board.current_state().get_piece_bitboard(stm_color, QUEEN);
+                for cap in &opp_captures {
+                    threatened_pieces |= 1u64 << cap.to;
+                }
+                threatened_pieces &= stm_valuable;
+            }
+
             // Can't be better than what happens when opponent punishes a pass
             stand_pat.min(null_threat)
         } else {
@@ -557,6 +575,49 @@ pub fn ext_pesto_qsearch_counted(
                         max_depth - 1,
                         new_w_used,
                         new_b_used,
+                        white_null_used,
+                        black_null_used,
+                    );
+                nodes += child_nodes;
+                max_child_depth = max_child_depth.max(child_depth + 1);
+                let score = -score;
+                if !child_completed {
+                    all_completed = false;
+                }
+                board.undo_move();
+                if score >= beta {
+                    return (beta, all_completed, nodes, max_child_depth);
+                }
+                if score > alpha {
+                    alpha = score;
+                }
+            }
+        }
+
+        // 3. Retreat moves for threatened pieces (when null-move revealed threats)
+        if threatened_pieces != 0 {
+            let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
+            for mv in &quiets {
+                if threatened_pieces & (1u64 << mv.from) == 0 {
+                    continue;
+                }
+                board.make_move(*mv);
+                if !board.current_state().is_legal(move_gen) {
+                    board.undo_move();
+                    continue;
+                }
+                any_legal = true;
+                // Retreats don't consume tactical budget
+                let (score, child_completed, child_nodes, child_depth) =
+                    ext_pesto_qsearch_counted(
+                        board,
+                        move_gen,
+                        pesto,
+                        -beta,
+                        -alpha,
+                        max_depth - 1,
+                        white_tactic_used,
+                        black_tactic_used,
                         white_null_used,
                         black_null_used,
                     );

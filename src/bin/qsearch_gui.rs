@@ -193,6 +193,7 @@ fn build_ext_qsearch_tree(
 
     let stand_pat = pesto.pst_eval_cp(board.current_state());
     let mut children = Vec::new();
+    let mut threatened_pieces: u64 = 0;
 
     // ── Stand-pat with null-move probe (not in check) ──
     if !in_check {
@@ -210,6 +211,22 @@ fn build_ext_qsearch_tree(
             );
             board.undo_null_move();
             let null_threat = -null_child.score_cp;
+
+            // If threat exists, identify which pieces are under attack
+            if null_threat < stand_pat {
+                board.make_null_move();
+                let opp_captures = move_gen.gen_pseudo_legal_captures(board.current_state());
+                board.undo_null_move();
+                let stm_color = if stm_is_white { WHITE } else { BLACK };
+                let stm_valuable = board.current_state().get_piece_bitboard(stm_color, KNIGHT)
+                    | board.current_state().get_piece_bitboard(stm_color, BISHOP)
+                    | board.current_state().get_piece_bitboard(stm_color, ROOK)
+                    | board.current_state().get_piece_bitboard(stm_color, QUEEN);
+                for cap in &opp_captures {
+                    threatened_pieces |= 1u64 << cap.to;
+                }
+                threatened_pieces &= stm_valuable;
+            }
 
             // Add null-move as a visible child
             null_child.move_san = Some("(pass)".to_string());
@@ -348,6 +365,43 @@ fn build_ext_qsearch_tree(
                 child_tree.move_san = Some(move_to_san(board.current_state(), mv, move_gen));
                 child_tree.is_check = gives_check;
                 child_tree.is_fork = is_fork_move;
+                children.push(child_tree);
+
+                if score >= beta {
+                    return QSearchTreeNode {
+                        fen, eval_cp: stand_pat, score_cp: beta,
+                        move_uci: None, move_san: None,
+                        is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
+                        children,
+                    };
+                }
+                if score > alpha { alpha = score; }
+            }
+        }
+
+        // 3. Retreat moves for threatened pieces (when null-move revealed threats)
+        if threatened_pieces != 0 {
+            let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
+            for mv in &quiets {
+                if threatened_pieces & (1u64 << mv.from) == 0 {
+                    continue;
+                }
+                board.make_move(*mv);
+                if !board.current_state().is_legal(move_gen) {
+                    board.undo_move();
+                    continue;
+                }
+                let mut child_tree = build_ext_qsearch_tree(
+                    board, move_gen, pesto, -beta, -alpha, max_depth - 1,
+                    white_tactic_used, black_tactic_used,
+                    white_null_used, black_null_used, nodes,
+                );
+                let score = -child_tree.score_cp;
+                board.undo_move();
+
+                child_tree.move_uci = Some(mv.to_uci());
+                child_tree.move_san = Some(move_to_san(board.current_state(), mv, move_gen));
+                child_tree.is_evasion = true;
                 children.push(child_tree);
 
                 if score >= beta {
