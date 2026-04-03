@@ -15,7 +15,7 @@ use crate::mcts::selection::select_child_with_tactical_priority;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use crate::eval::PestoEval;
-use crate::search::forced_pesto_balance_counted;
+use crate::search::forced_ext_pesto_balance_counted;
 use crate::search::koth_center_in_n_counted;
 use crate::search::mate_search;
 use crate::search::{koth_best_move, koth_center_in_n};
@@ -650,7 +650,7 @@ fn evaluate_leaf_node(
             let qsearch_start = Instant::now();
             let mut board_stack = BoardStack::with_board(node_ref.state.clone());
             let (score, completed, nodes, depth_used) =
-                forced_pesto_balance_counted(&mut board_stack, move_gen, &config.pesto);
+                forced_ext_pesto_balance_counted(&mut board_stack, move_gen, &config.pesto);
             stats.qsearch_timing.record(qsearch_start.elapsed());
             stats.qsearch_nodes.record(nodes as f64);
             stats.qsearch_depth.record(depth_used as f64);

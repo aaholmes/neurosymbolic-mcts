@@ -12,7 +12,7 @@ use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::search::mate_search;
-use kingfisher::search::quiescence::forced_pesto_balance;
+use kingfisher::search::quiescence::forced_ext_pesto_balance;
 use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
@@ -301,7 +301,7 @@ fn play_game(
 
         let mut temp_stack = BoardStack::with_board(board.clone());
         let (q_result, qsearch_completed) =
-            forced_pesto_balance(&mut temp_stack, &move_gen, &config.pesto);
+            forced_ext_pesto_balance(&mut temp_stack, &move_gen, &config.pesto);
         let material_scalar = q_result;
 
         samples.push(TrainingSample {
