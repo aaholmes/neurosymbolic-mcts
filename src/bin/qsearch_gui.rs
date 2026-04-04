@@ -297,6 +297,8 @@ fn build_ext_qsearch_tree(
             capture_entries.sort_by_key(|(s, _)| *s);
 
             // Build the (pass) node with opponent's responses as children
+            let mut recapture_node: Option<QSearchTreeNode> = None;
+            let mut retreat_label: Option<String> = None; // e.g., "B retreats"
             let null_threat = if all_scores.len() >= 2 {
                 let second_score = all_scores[1];
 
@@ -313,6 +315,17 @@ fn build_ext_qsearch_tree(
                         scored_opp[second_cap_idx].1.move_uci.as_ref().unwrap()
                     ).unwrap();
 
+                    // Identify the saved piece for the retreat label
+                    let saved_piece_info = board.current_state().get_piece(best_victim_sq);
+                    let saved_sq_name = sq_to_algebraic(best_victim_sq);
+                    let saved_piece_name = saved_piece_info
+                        .map(|(_, pt)| {
+                            let p = piece_char(pt);
+                            if p.is_empty() { "P".to_string() } else { p.to_string() }
+                        })
+                        .unwrap_or("?".to_string());
+                    retreat_label = Some(format!("{}{} retreats", saved_piece_name, saved_sq_name));
+
                     // Replay: null-move, second capture, mystery recapture
                     board.make_null_move();
                     board.make_move(second_cap_mv);
@@ -320,7 +333,24 @@ fn build_ext_qsearch_tree(
                         let recapture = Move::new(best_victim_sq, second_cap_mv.to, None);
                         let recaptured_board = board.current_state().apply_move_to_board(recapture);
                         let recapture_eval = pesto.pst_eval_cp(&recaptured_board);
-                        second_cap_score.max(-recapture_eval)
+                        let recapture_score = -recapture_eval;
+
+                        // Build a visible node for the recapture
+                        let dest = sq_to_algebraic(second_cap_mv.to);
+                        let recapture_san = format!("{}x{}", saved_piece_name, dest);
+                        let recapture_fen = recaptured_board.to_fen().unwrap_or_default();
+                        recapture_node = Some(QSearchTreeNode {
+                            fen: recapture_fen,
+                            eval_cp: recapture_eval,
+                            score_cp: recapture_score,
+                            move_uci: Some(recapture.to_uci()),
+                            move_san: Some(recapture_san),
+                            is_capture: true, is_check: false, is_evasion: true,
+                            is_fork: false, is_null: false,
+                            children: vec![],
+                        });
+
+                        second_cap_score.max(recapture_score)
                     } else {
                         second_cap_score
                     };
@@ -336,14 +366,18 @@ fn build_ext_qsearch_tree(
                 stand_pat
             };
 
-            // Add null-move as a visible "(pass)" node
-            let null_children: Vec<QSearchTreeNode> = scored_opp.into_iter().map(|(_, n)| n).collect();
+            // Add null-move node: labeled as piece retreat if recapture computed, else "(pass)"
+            let mut null_children: Vec<QSearchTreeNode> = scored_opp.into_iter().map(|(_, n)| n).collect();
+            if let Some(rn) = recapture_node {
+                null_children.push(rn);
+            }
+            let null_label = retreat_label.unwrap_or_else(|| "(pass)".to_string());
             let null_node = QSearchTreeNode {
                 fen: fen.clone(),
                 eval_cp: stand_pat,
                 score_cp: null_threat,
                 move_uci: None,
-                move_san: Some("(pass)".to_string()),
+                move_san: Some(null_label),
                 is_capture: false, is_check: false, is_evasion: false, is_fork: false,
                 is_null: true,
                 children: null_children,
