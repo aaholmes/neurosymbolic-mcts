@@ -200,7 +200,7 @@ cargo build --release --features neural  # With neural network support
 
 ## Testing
 
-~950 tests (700 Rust + 255 Python). See [TESTING.md](TESTING.md) for details.
+~860 tests (609 Rust + 255 Python). See [TESTING.md](TESTING.md) for details.
 
 ```bash
 cargo test                                        # Fast Rust tests (~50s)
@@ -227,6 +227,9 @@ cd python && python -m pytest test_*.py -v        # Python pipeline tests
 | `generate_training_data` | Standalone training data generation |
 | `play_engine` | Interactive human-vs-engine play |
 | `profile_engine` | Per-operation MCTS timing profiler |
+| `qsearch_gui` | Interactive Q-search tree visualizer (web UI at localhost:8088) |
+
+The `--qsearch` flag selects the quiescence search variant: `pe` (principal exchange), `cap1` (captures + checks), or `extended` (full with null-move threat detection). Available in `profile_engine`, with other binaries adopting it as needed.
 
 ## Further Reading
 

@@ -28,7 +28,7 @@ pub use self::search_logger::{GateReason, SearchLogger, SelectionReason, Verbosi
 pub use self::tactical_mcts::{
     apply_dirichlet_noise, reuse_subtree, tactical_mcts_search, tactical_mcts_search_for_training,
     tactical_mcts_search_for_training_with_reuse, tactical_mcts_search_with_tt, MctsTrainingResult,
-    StatsAccumulator, TacticalMctsConfig, TacticalMctsStats, TimingAccumulator,
+    QSearchVariant, StatsAccumulator, TacticalMctsConfig, TacticalMctsStats, TimingAccumulator,
 };
 
 /// Exploration constant for UCB (sqrt(2))

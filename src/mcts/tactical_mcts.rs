@@ -15,7 +15,7 @@ use crate::mcts::selection::select_child_with_tactical_priority;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use crate::eval::PestoEval;
-use crate::search::forced_ext_pesto_balance_counted;
+use crate::search::{forced_cap1_pesto_balance, forced_ext_pesto_balance_counted, forced_principal_exchange};
 use crate::search::koth_center_in_n_counted;
 use crate::search::mate_search;
 use crate::search::{koth_best_move, koth_center_in_n};
@@ -25,6 +25,39 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Which quiescence search variant to use for computing ΔM.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QSearchVariant {
+    /// Principal exchange: follow the single best MVV-LVA capture at each node.
+    /// A straight line (not a tree). ~1–5 nodes. GPU-friendly.
+    PrincipalExchange,
+    /// Cap=1: best MVV-LVA capture + one checking move per side + full check
+    /// evasions. ~5–90 nodes.
+    Cap1,
+    /// Full extended q-search: captures + checks + forks + null-move threat
+    /// detection + mystery-square recapture. ~50–500+ nodes.
+    Extended,
+}
+
+impl QSearchVariant {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pe" | "principal-exchange" => Some(QSearchVariant::PrincipalExchange),
+            "cap1" => Some(QSearchVariant::Cap1),
+            "extended" | "ext" => Some(QSearchVariant::Extended),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            QSearchVariant::PrincipalExchange => "principal-exchange",
+            QSearchVariant::Cap1 => "cap1",
+            QSearchVariant::Extended => "extended",
+        }
+    }
+}
 
 /// Configuration for tactical-first MCTS search
 #[derive(Debug, Clone)]
@@ -53,6 +86,8 @@ pub struct TacticalMctsConfig {
     /// Enable material integration in value: V = tanh(V_logit + k·ΔM)
     /// When false (pure AlphaZero): V = tanh(V_logit), no Q-search material
     pub enable_material_value: bool,
+    /// Which q-search variant to use for ΔM computation
+    pub qsearch_variant: QSearchVariant,
     /// Dirichlet noise alpha (0.0 = disabled, 0.3 for chess training)
     pub dirichlet_alpha: f64,
     /// Dirichlet noise epsilon (0.0 = disabled, 0.25 for chess training)
@@ -81,6 +116,7 @@ impl Default for TacticalMctsConfig {
             enable_koth: false,
             koth_depth: 3,
             enable_material_value: true,
+            qsearch_variant: QSearchVariant::Extended,
             dirichlet_alpha: 0.0,
             dirichlet_epsilon: 0.0,
             randomize_move_order: false,
@@ -649,8 +685,18 @@ fn evaluate_leaf_node(
         let (q_result, qsearch_completed) = if config.enable_material_value {
             let qsearch_start = Instant::now();
             let mut board_stack = BoardStack::with_board(node_ref.state.clone());
-            let (score, completed, nodes, depth_used) =
-                forced_ext_pesto_balance_counted(&mut board_stack, move_gen, &config.pesto);
+            let (score, completed, nodes, depth_used) = match config.qsearch_variant {
+                QSearchVariant::PrincipalExchange => {
+                    let (s, n) = forced_principal_exchange(&mut board_stack, move_gen, &config.pesto);
+                    (s, true, n, 0u8) // PE always completes
+                }
+                QSearchVariant::Cap1 => {
+                    forced_cap1_pesto_balance(&mut board_stack, move_gen, &config.pesto)
+                }
+                QSearchVariant::Extended => {
+                    forced_ext_pesto_balance_counted(&mut board_stack, move_gen, &config.pesto)
+                }
+            };
             stats.qsearch_timing.record(qsearch_start.elapsed());
             stats.qsearch_nodes.record(nodes as f64);
             stats.qsearch_depth.record(depth_used as f64);

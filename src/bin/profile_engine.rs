@@ -5,8 +5,8 @@
 
 use kingfisher::boardstack::BoardStack;
 use kingfisher::mcts::{
-    reuse_subtree, tactical_mcts_search_for_training_with_reuse, StatsAccumulator,
-    TacticalMctsConfig, TimingAccumulator,
+    reuse_subtree, tactical_mcts_search_for_training_with_reuse, QSearchVariant,
+    StatsAccumulator, TacticalMctsConfig, TimingAccumulator,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
@@ -47,6 +47,12 @@ fn main() {
     let enable_koth = args.iter().any(|a| a == "--koth");
     let disable_tier1 = args.iter().any(|a| a == "--disable-tier1");
     let disable_material = args.iter().any(|a| a == "--disable-material");
+    let qsearch_variant = args
+        .iter()
+        .position(|a| a == "--qsearch")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| QSearchVariant::from_str(v))
+        .unwrap_or(QSearchVariant::Extended);
 
     let batch_size: usize = args
         .iter()
@@ -82,6 +88,7 @@ fn main() {
     println!("  KOTH: {}", enable_koth);
     println!("  Tier1: {}", !disable_tier1);
     println!("  Material: {}", !disable_material);
+    println!("  Q-search: {}", qsearch_variant.name());
     println!("  Model: {:?}", model_path);
     println!("  Batch size: {}", batch_size);
     println!("  KOTH depth: {}", koth_depth);
@@ -144,6 +151,7 @@ fn main() {
             koth_depth,
             enable_tier1_gate: !disable_tier1,
             enable_material_value: !disable_material,
+            qsearch_variant,
             enable_tier3_neural: has_nn,
             randomize_move_order: true,
             ..Default::default()
