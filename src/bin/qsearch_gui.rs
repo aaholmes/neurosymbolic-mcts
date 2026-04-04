@@ -126,12 +126,18 @@ fn build_qsearch_tree(
 
     let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
     let mut scored_children: Vec<(Move, i32, QSearchTreeNode)> = Vec::new();
+    let mut legal_cap_count = 0;
 
     for capture in &captures {
         board.make_move(*capture);
         if !board.current_state().is_legal(move_gen) {
             board.undo_move();
             continue;
+        }
+        legal_cap_count += 1;
+        if legal_cap_count > 3 {
+            board.undo_move();
+            break;
         }
         let child_tree = build_qsearch_tree(board, move_gen, pesto, depth - 1, nodes);
         let score = -child_tree.score_cp;
@@ -207,6 +213,7 @@ fn build_ext_qsearch_tree(
             // Evaluate each opponent capture/tactical individually
             let opp_captures = move_gen.gen_pseudo_legal_captures(board.current_state());
             let mut scored_opp: Vec<(i32, QSearchTreeNode)> = Vec::new();
+            let mut legal_cap_count = 0;
 
             for cap in &opp_captures {
                 board.make_move(*cap);
@@ -220,16 +227,7 @@ fn build_ext_qsearch_tree(
                     white_tactic_used, black_tactic_used,
                     new_w_null, new_b_null, nodes,
                 );
-                let score_for_passer = -(-child.score_cp); // child is opponent's POV, negate twice = opponent's score
-                // Actually: child.score_cp is from child's STM. After cap, STM is passer again.
-                // The opponent played cap, so from opponent's POV the score is -child.score_cp.
-                // From passer's POV: -(opponent's score) = -(-child.score_cp) = child.score_cp...
-                // No: passer passed, opponent played cap. child.score_cp is from passer's POV
-                // (since after opponent's capture, it's passer's turn again).
-                // From opponent's perspective: -child.score_cp (good for opponent = bad for passer).
-                // From passer's perspective: child.score_cp.
-                // We want to sort by what's worst for the passer (opponent's best).
-                let passer_score = child.score_cp; // from passer's POV after opponent captures
+                let passer_score = child.score_cp; // from passer's POV
                 board.undo_move();
 
                 let mut tree_node = child;
@@ -237,9 +235,11 @@ fn build_ext_qsearch_tree(
                 tree_node.move_san = Some(move_to_san(board.current_state(), cap, move_gen));
                 tree_node.is_capture = true;
                 scored_opp.push((passer_score, tree_node));
+                legal_cap_count += 1;
+                if legal_cap_count >= 2 { break; } // only need top 2 (MVV-LVA sorted)
             }
 
-            // Also evaluate opponent tactical quiets
+            // Also evaluate one opponent tactical quiet (check or fork)
             let opp_tactic_used = if stm_is_white { black_tactic_used } else { white_tactic_used };
             if !opp_tactic_used {
                 let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
@@ -271,6 +271,7 @@ fn build_ext_qsearch_tree(
                     tree_node.is_check = gives_check;
                     tree_node.is_fork = is_fork_move;
                     scored_opp.push((passer_score, tree_node));
+                    break; // only need one tactical quiet
                 }
             }
 
@@ -453,13 +454,19 @@ fn build_ext_qsearch_tree(
     } else {
         // ── Not in check: captures, then tactical quiets ──
 
-        // 1. Captures
+        // 1. Captures (MVV-LVA sorted, capped at top 3 per node)
         let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
+        let mut main_cap_count = 0;
         for capture in &captures {
             board.make_move(*capture);
             if !board.current_state().is_legal(move_gen) {
                 board.undo_move();
                 continue;
+            }
+            main_cap_count += 1;
+            if main_cap_count > 3 {
+                board.undo_move();
+                break;
             }
             let mut child_tree = build_ext_qsearch_tree(
                 board, move_gen, pesto, -beta, -alpha, max_depth - 1,

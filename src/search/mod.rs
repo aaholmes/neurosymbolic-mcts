@@ -57,9 +57,10 @@ pub use koth::{
 };
 pub use mate_search::mate_search;
 pub use quiescence::{
-    ext_pesto_qsearch_counted, forced_ext_pesto_balance, forced_ext_pesto_balance_counted,
-    forced_material_balance, forced_material_balance_counted, forced_pesto_balance,
-    forced_pesto_balance_counted, material_qsearch, pesto_qsearch, quiescence_search,
-    quiescence_search_tactical,
+    cap1_pesto_qsearch, ext_pesto_qsearch_counted, forced_cap1_pesto_balance,
+    forced_ext_pesto_balance, forced_ext_pesto_balance_counted, forced_material_balance,
+    forced_material_balance_counted, forced_pesto_balance, forced_pesto_balance_counted,
+    forced_principal_exchange, material_qsearch, pesto_qsearch, principal_exchange,
+    quiescence_search, quiescence_search_tactical,
 };
 pub use see::see;

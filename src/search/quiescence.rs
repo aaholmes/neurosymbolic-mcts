@@ -389,10 +389,11 @@ pub fn ext_pesto_qsearch_counted(
             let new_w_null = true;
             let new_b_null = true;
 
-            // Evaluate each opponent capture/tactic, tracking (score, move)
+            // Evaluate the top 2 opponent captures (MVV-LVA sorted) and up to 1 tactical quiet.
+            // We only need first and second choice for deny-first-choice + recapture.
             let opp_captures = move_gen.gen_pseudo_legal_captures(board.current_state());
-            // (passer_score, the_move)
             let mut scored_moves: Vec<(i32, Move)> = Vec::new();
+            let mut legal_cap_count = 0;
 
             for cap in &opp_captures {
                 board.make_move(*cap);
@@ -410,9 +411,11 @@ pub fn ext_pesto_qsearch_counted(
                 if !child_completed { all_completed = false; }
                 board.undo_move();
                 scored_moves.push((-score, *cap));
+                legal_cap_count += 1;
+                if legal_cap_count >= 2 { break; } // only need top 2
             }
 
-            // Also evaluate opponent tactical quiets (checks, forks)
+            // Also evaluate one opponent tactical quiet (check or fork) if budget allows
             let opp_tactic_used = if stm_is_white { black_tactic_used } else { white_tactic_used };
             if !opp_tactic_used {
                 let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
@@ -437,6 +440,7 @@ pub fn ext_pesto_qsearch_counted(
                     if !child_completed { all_completed = false; }
                     board.undo_move();
                     scored_moves.push((-score, *mv));
+                    break; // only need one tactical quiet
                 }
             }
 
@@ -583,7 +587,7 @@ pub fn ext_pesto_qsearch_counted(
     } else {
         // Not in check: captures first, then tactical quiets
 
-        // 1. Captures (always, MVV-LVA sorted)
+        // 1. Captures (MVV-LVA sorted)
         let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
         for capture in &captures {
             board.make_move(*capture);
@@ -705,6 +709,228 @@ pub fn forced_ext_pesto_balance_counted(
 ) -> (f32, bool, u32, u8) {
     let (score_cp, completed, nodes, depth) =
         ext_pesto_qsearch_counted(board, move_gen, pesto, -100_000, 100_000, 20, false, false, false, false);
+    (score_cp as f32 / 100.0, completed, nodes, depth)
+}
+
+// ======== Iterative Widening Q-Search Levels ========
+
+/// Principal exchange evaluation (cap=0): follow the single best MVV-LVA capture
+/// at each node. Produces a straight line (not a tree). Answers: "what's the
+/// material outcome of the most forcing exchange sequence?"
+///
+/// Returns `(score_cp, nodes)`.
+pub fn principal_exchange(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+    mut alpha: i32,
+    beta: i32,
+    max_depth: u8,
+) -> (i32, u32) {
+    let mut nodes: u32 = 1;
+    let stand_pat = pesto.pst_eval_cp(board.current_state());
+    if stand_pat >= beta {
+        return (beta, nodes);
+    }
+    if stand_pat > alpha {
+        alpha = stand_pat;
+    }
+    if max_depth == 0 {
+        return (alpha, nodes);
+    }
+
+    let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
+    for capture in captures {
+        board.make_move(capture);
+        if !board.current_state().is_legal(move_gen) {
+            board.undo_move();
+            continue;
+        }
+        let (score, child_nodes) = principal_exchange(
+            board, move_gen, pesto, -beta, -alpha, max_depth - 1,
+        );
+        nodes += child_nodes;
+        let score = -score;
+        board.undo_move();
+        if score >= beta {
+            return (beta, nodes);
+        }
+        if score > alpha {
+            alpha = score;
+        }
+        break; // only the first legal capture (top MVV-LVA)
+    }
+    (alpha, nodes)
+}
+
+/// Convenience wrapper for principal exchange.
+pub fn forced_principal_exchange(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+) -> (f32, u32) {
+    let (score_cp, nodes) = principal_exchange(board, move_gen, pesto, -100_000, 100_000, 20);
+    (score_cp as f32 / 100.0, nodes)
+}
+
+/// Cap=1 quiescence search: single best MVV-LVA capture per node, plus one
+/// checking move per side per branch, plus full check evasions. No null-move
+/// probe, no fork detection (those require cap>=2).
+///
+/// This is the first "real" level of iterative widening — it produces a narrow
+/// tree (up to 2 children per node: 1 capture + 1 check) that resolves the
+/// principal exchange AND one tactical check per side.
+///
+/// Returns `(score_cp, completed, nodes, depth_used)`.
+pub fn cap1_pesto_qsearch(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+    mut alpha: i32,
+    beta: i32,
+    max_depth: u8,
+    white_check_used: bool,
+    black_check_used: bool,
+) -> (i32, bool, u32, u8) {
+    let mut nodes: u32 = 1;
+    let mut all_completed = true;
+    let mut max_child_depth: u8 = 0;
+    let in_check = board.current_state().is_check(move_gen);
+
+    // Stand-pat (no null-move at cap=1)
+    if !in_check {
+        let stand_pat = pesto.pst_eval_cp(board.current_state());
+        if stand_pat >= beta {
+            return (beta, true, nodes, 0);
+        }
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
+    }
+
+    if max_depth == 0 {
+        if in_check {
+            return (alpha, false, nodes, 0);
+        }
+        return (alpha, true, nodes, 0);
+    }
+
+    let stm_is_white = board.current_state().w_to_move;
+
+    if in_check {
+        // In check: try all legal evasions (uncapped)
+        let (caps, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
+        let mut any_legal = false;
+        for mv in caps.iter().chain(quiets.iter()) {
+            board.make_move(*mv);
+            if !board.current_state().is_legal(move_gen) {
+                board.undo_move();
+                continue;
+            }
+            any_legal = true;
+            let (score, child_completed, child_nodes, child_depth) =
+                cap1_pesto_qsearch(
+                    board, move_gen, pesto, -beta, -alpha, max_depth - 1,
+                    white_check_used, black_check_used,
+                );
+            nodes += child_nodes;
+            max_child_depth = max_child_depth.max(child_depth + 1);
+            let score = -score;
+            if !child_completed { all_completed = false; }
+            board.undo_move();
+            if score >= beta {
+                return (beta, all_completed, nodes, max_child_depth);
+            }
+            if score > alpha { alpha = score; }
+        }
+        if !any_legal {
+            return (-1_000_000, true, nodes, 0); // checkmate
+        }
+    } else {
+        // Not in check: 1 best capture + 1 checking move
+
+        // 1. Best MVV-LVA capture (cap=1)
+        let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
+        let mut best_capture_to: Option<usize> = None;
+        for capture in &captures {
+            board.make_move(*capture);
+            if !board.current_state().is_legal(move_gen) {
+                board.undo_move();
+                continue;
+            }
+            best_capture_to = Some(capture.to);
+            let (score, child_completed, child_nodes, child_depth) =
+                cap1_pesto_qsearch(
+                    board, move_gen, pesto, -beta, -alpha, max_depth - 1,
+                    white_check_used, black_check_used,
+                );
+            nodes += child_nodes;
+            max_child_depth = max_child_depth.max(child_depth + 1);
+            let score = -score;
+            if !child_completed { all_completed = false; }
+            board.undo_move();
+            if score >= beta {
+                return (beta, all_completed, nodes, max_child_depth);
+            }
+            if score > alpha { alpha = score; }
+            break; // only the first legal capture
+        }
+
+        // 2. One checking move (if check budget not spent)
+        let stm_check_used = if stm_is_white { white_check_used } else { black_check_used };
+        if !stm_check_used {
+            // Try all moves, find the first legal one that gives check
+            // (that isn't the same as the capture we already tried)
+            let (cap_moves, quiet_moves) = move_gen.gen_pseudo_legal_moves(board.current_state());
+            for mv in cap_moves.iter().chain(quiet_moves.iter()) {
+                // Skip if this is the same as the capture we already explored
+                if let Some(best_to) = best_capture_to {
+                    if mv.from == captures.iter().find(|c| c.to == best_to).map_or(usize::MAX, |c| c.from)
+                        && mv.to == best_to {
+                        continue;
+                    }
+                }
+                if !board.current_state().gives_check(*mv, move_gen) {
+                    continue;
+                }
+                board.make_move(*mv);
+                if !board.current_state().is_legal(move_gen) {
+                    board.undo_move();
+                    continue;
+                }
+                // This side used their check budget
+                let new_w_check = if stm_is_white { true } else { white_check_used };
+                let new_b_check = if !stm_is_white { true } else { black_check_used };
+                let (score, child_completed, child_nodes, child_depth) =
+                    cap1_pesto_qsearch(
+                        board, move_gen, pesto, -beta, -alpha, max_depth - 1,
+                        new_w_check, new_b_check,
+                    );
+                nodes += child_nodes;
+                max_child_depth = max_child_depth.max(child_depth + 1);
+                let score = -score;
+                if !child_completed { all_completed = false; }
+                board.undo_move();
+                if score >= beta {
+                    return (beta, all_completed, nodes, max_child_depth);
+                }
+                if score > alpha { alpha = score; }
+                break; // only one check
+            }
+        }
+    }
+
+    (alpha, all_completed, nodes, max_child_depth)
+}
+
+/// Convenience wrapper for cap=1 q-search.
+pub fn forced_cap1_pesto_balance(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+) -> (f32, bool, u32, u8) {
+    let (score_cp, completed, nodes, depth) =
+        cap1_pesto_qsearch(board, move_gen, pesto, -100_000, 100_000, 20, false, false);
     (score_cp as f32 / 100.0, completed, nodes, depth)
 }
 

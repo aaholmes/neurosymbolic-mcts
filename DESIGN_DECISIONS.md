@@ -215,7 +215,35 @@ To test whether the extended Q-search correctly captures forcing tactical sequen
 - **Positional compensation** (R2: Bxf5+ sacrifice evaluated at -1.73 despite the game being drawn — the passed g6 pawn is full compensation, but assessing pawn structure is the NN's job)
 - **Multi-move quiet plans** (R5 pre-14.b4: both basic and extended evaluate the position as only slightly worse for White; discovering that b4 is a blunder requires full search depth, not leaf evaluation)
 
-**Conclusion:** The extended Q-search fires selectively (8% of positions) and is accurate when it fires — the three major divergences all correspond to real tactical features visible to grandmasters (Pragg's blunder, Nakamura's knight fork vulnerability, coordinated piece pressure). In quiet positions the extended search adds just 1 extra node (the null-move probe finds no threats). In typical tactical positions it uses 100–300 nodes (e.g., fork trick: 251 nodes). Highly tactical positions with many pieces hanging can reach 15K–130K nodes (R5 after Nxb4: 14,971; R3 after Qf7?? Rxc2+: 130,389), though these are rare — mean Q-search cost across all positions in the profiled tournament data is 15 nodes / 8 us, confirming the extensions remain effectively free relative to NN inference. The remaining evaluation gaps (positional compensation, long-range plans) are by design — Tier 3's neural network handles what the Q-search cannot.
+**Conclusion:** The extended Q-search fires selectively (8% of positions) and is accurate when it fires — the three major divergences all correspond to real tactical features visible to grandmasters. The remaining evaluation gaps (positional compensation, long-range plans) are by design — Tier 3's neural network handles what the Q-search cannot.
+
+#### Iterative widening: bounded Q-search with progressive accuracy
+
+The full extended Q-search (captures + checks + forks + null-move + mystery recapture) can explode in highly tactical positions — 130K nodes in the worst case, because captures are explored at unlimited width. SEE (Static Exchange Evaluation) pruning was tried but damaged accuracy: it correctly prunes QxP-when-defended (-875 centipawns) but also prunes NxP-when-defended (-220 cp), which might initiate a fork trick. SEE evaluates exchanges on one square but is blind to cross-square tactics.
+
+The solution is **iterative widening** — analogous to iterative deepening, but controlling the branching factor (captures per node) instead of depth:
+
+| Level | Captures/node | Checks | Forks/null-move | Typical nodes | What it resolves |
+|:---|:---|:---|:---|:---|:---|
+| **Principal exchange** | 1 (best MVV-LVA only) | No | No | 1–5 | Principal exchange line: "what if both sides keep making the best capture?" A straight line, not a tree. |
+| **Cap=1** | 1 | 1 per side per branch (any move giving check) | No | 5–90 | Principal exchange + one tactical check per side + full check evasions. Catches Nc7+ forking K+R, back-rank mates, etc. |
+| **Cap=2+** | 2+ | 1 per side | Yes (null-move, deny-first-choice, mystery recapture) | 50–500 | Full fork detection, hanging piece threats, cross-square tactics. |
+
+The search runs iteratively: principal exchange first (very cheap), then cap=1 (adds checks), then cap=2 (adds forks/null-move), stopping when cumulative nodes exceed a budget `N_max`. Each level gives a complete, valid score, and later levels refine it.
+
+**Why checks are separate from the capture cap.** A non-capture check (like Nc7+ forking king and rook) is qualitatively different from a capture — it forces a response and often wins material indirectly. It doesn't compete with captures for MVV-LVA slots; it's an additional tactical dimension. At each node (when not in check), the side to move explores up to `cap` captures PLUS one checking move, for `cap+1` children total.
+
+**Why forks require cap≥2.** The deny-first-choice mechanism needs two opponent captures to work: one to deny (save the best piece) and one for the opponent's consolation capture. With cap=1, the null-move probe sees only one opponent capture — the "single threat" rule says the pass fully saves, which is correct for single hanging pieces but can't model forks. Cap=2 activates the full fork machinery.
+
+**Stand-pat at every level.** At all levels, the side to move can "stand pat" — accept the static PeSTO eval and not capture. This prevents the search from forcing bad captures. In the center fork trick setup (after 3.Bc4), Black's Nxe4 has negative SEE (-220 cp, loses a knight for a pawn). The principal exchange correctly rejects it via stand-pat. Only at cap≥2, where the d5 fork follow-up is visible, does the exchange become worthwhile.
+
+**Center fork trick across levels** (1.e4 e5 2.Nc3 Nf6 3.Bc4, Black to move):
+
+| Level | Score (Black POV) | Nodes | What it sees |
+|:---|---:|---:|:---|
+| Principal exchange | -0.22 | 1 | Stand pat. Rejects Nxe4 (loses knight). |
+| Cap=1 | -0.22 | 1 | Same — no checks available for Black. |
+| Cap=2+ (full) | ~-0.10 | ~200 | Nxe4 Nxe4 d5! Fork detected, mystery recapture → near equality. |
 
 The visit-ordering component (MVV-LVA) is a minor addition: captures are visited in Most-Valuable-Victim / Least-Valuable-Attacker order on their first visit. After the first visit, normal UCB selection takes over.
 
