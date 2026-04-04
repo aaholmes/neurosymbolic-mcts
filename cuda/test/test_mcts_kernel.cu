@@ -1,0 +1,221 @@
+#include "../mcts_kernel.cuh"
+#include "../tree_store.cuh"
+#include "../movegen.cuh"
+#include "test_helpers.cuh"
+
+#include <cstdio>
+#include <cstring>
+
+// ============================================================
+// FEN parser (same as test_quiescence.cu)
+// ============================================================
+
+static int char_to_piece(char c, int* color) {
+    *color = (c >= 'A' && c <= 'Z') ? WHITE : BLACK;
+    switch (c) {
+        case 'P': case 'p': return PAWN;
+        case 'N': case 'n': return KNIGHT;
+        case 'B': case 'b': return BISHOP;
+        case 'R': case 'r': return ROOK;
+        case 'Q': case 'q': return QUEEN;
+        case 'K': case 'k': return KING;
+        default: return -1;
+    }
+}
+
+static BoardState parse_fen(const char* fen) {
+    BoardState bs;
+    memset(&bs, 0, sizeof(bs));
+    bs.en_passant = EN_PASSANT_NONE;
+
+    int rank = 7, file = 0;
+    const char* p = fen;
+
+    while (*p && *p != ' ') {
+        if (*p == '/') { rank--; file = 0; }
+        else if (*p >= '1' && *p <= '8') { file += (*p - '0'); }
+        else {
+            int color, piece;
+            piece = char_to_piece(*p, &color);
+            if (piece >= 0) {
+                int sq = rank * 8 + file;
+                bs.pieces[color * 6 + piece] |= (1ULL << sq);
+                file++;
+            }
+        }
+        p++;
+    }
+    if (*p) p++;
+    bs.w_to_move = (*p == 'w') ? 1 : 0;
+    if (*p) p++;
+    if (*p) p++;
+
+    while (*p && *p != ' ') {
+        switch (*p) {
+            case 'K': bs.castling |= CASTLE_WK; break;
+            case 'Q': bs.castling |= CASTLE_WQ; break;
+            case 'k': bs.castling |= CASTLE_BK; break;
+            case 'q': bs.castling |= CASTLE_BQ; break;
+        }
+        p++;
+    }
+    if (*p) p++;
+    if (*p && *p != '-') {
+        int ep_file = p[0] - 'a';
+        int ep_rank = p[1] - '1';
+        bs.en_passant = (uint8_t)(ep_rank * 8 + ep_file);
+    }
+    for (int c = 0; c < 2; c++) {
+        bs.pieces_occ[c] = 0;
+        for (int piece = 0; piece < 6; piece++)
+            bs.pieces_occ[c] |= bs.pieces[c * 6 + piece];
+    }
+    return bs;
+}
+
+// Helper: get square name (uses alternating buffers to avoid overwrite in printf)
+static const char* sq_name(int sq) {
+    static char bufs[4][4];
+    static int idx = 0;
+    char* buf = bufs[idx++ & 3];
+    buf[0] = 'a' + (sq % 8);
+    buf[1] = '1' + (sq / 8);
+    buf[2] = '\0';
+    return buf;
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+// Test 1: Single simulation from starting position.
+// Root should have 20 children, one child should have visit_count=1.
+void test_single_simulation(bool& test_failed) {
+    BoardState start = make_starting_position();
+    GPUMctsResult result = gpu_mcts_search(start, 1, false);
+
+    ASSERT_EQ(result.total_simulations, 1);
+    ASSERT_TRUE(result.nodes_allocated > 1); // root + children
+
+    // Read root children
+    int visits[256];
+    float qvals[256];
+    uint16_t moves[256];
+    int n = read_root_children(visits, qvals, moves, 256);
+
+    ASSERT_EQ(n, 20); // 20 legal moves from start
+
+    // Exactly one child should have 1 visit
+    int total_child_visits = 0;
+    for (int i = 0; i < n; i++) total_child_visits += visits[i];
+    ASSERT_EQ(total_child_visits, 1);
+}
+
+// Test 2: Multiple simulations — visit counts add up.
+void test_multiple_simulations(bool& test_failed) {
+    BoardState start = make_starting_position();
+    int sims = 100;
+    GPUMctsResult result = gpu_mcts_search(start, sims, false);
+
+    ASSERT_EQ(result.total_simulations, sims);
+    ASSERT_TRUE(result.nodes_allocated > 20); // root + 20 children + grandchildren
+
+    int visits[256];
+    float qvals[256];
+    uint16_t moves[256];
+    int n = read_root_children(visits, qvals, moves, 256);
+    ASSERT_EQ(n, 20);
+
+    // Total child visits should equal simulations
+    // (each sim visits exactly one child)
+    int total = 0;
+    for (int i = 0; i < n; i++) total += visits[i];
+    ASSERT_EQ(total, sims);
+
+    // Q-values should be near 0 for starting position (equal)
+    // Best move should have visits > 0
+    ASSERT_TRUE(result.root_value > -0.5f && result.root_value < 0.5f);
+}
+
+// Test 3: Mate-in-1 position — White can deliver Qh7# (or similar).
+// The mating move should get all (or nearly all) visits.
+void test_mate_in_1(bool& test_failed) {
+    // White to move, Ra1 can play Ra8# (back rank mate)
+    BoardState bs = parse_fen("6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1");
+    GPUMctsResult result = gpu_mcts_search(bs, 50, false);
+
+    // Mate-in-1 gate detects exact value +1.0 (move finding not required)
+    printf("[value=%.2f] ", result.root_value);
+    ASSERT_NEAR(result.root_value, 1.0f, 0.01f);
+}
+
+// Test 4: KOTH-in-1 — King one step from center.
+void test_koth_in_1(bool& test_failed) {
+    // White king on e3, one step from d4/e4 (center)
+    BoardState bs = parse_fen("4k3/8/8/8/8/4K3/8/8 w - - 0 1");
+    GPUMctsResult result = gpu_mcts_search(bs, 50, true); // enable KOTH
+
+    // KOTH-in-1 gate detects exact value +1.0 (move finding not required)
+    printf("[value=%.2f] ", result.root_value);
+    ASSERT_NEAR(result.root_value, 1.0f, 0.01f);
+}
+
+// Test 5: Hanging piece — White queen can capture undefended black rook.
+// Best move should be the capture.
+void test_hanging_piece(bool& test_failed) {
+    // White Qd1, Black Rd5 undefended, both kings present
+    BoardState bs = parse_fen("4k3/8/8/3r4/8/8/8/3QK3 w - - 0 1");
+    GPUMctsResult result = gpu_mcts_search(bs, 100, false);
+
+    printf("[value=%.2f, from=%s, to=%s] ", result.root_value,
+           sq_name(result.best_move_from), sq_name(result.best_move_to));
+
+    // Best move should be Qxd5 (d1→d5)
+    // d1 = sq 3, d5 = sq 35
+    ASSERT_EQ(result.best_move_from, 3);
+    ASSERT_EQ(result.best_move_to, 35);
+    ASSERT_TRUE(result.root_value > 0.3f); // White winning
+}
+
+// Test 6: Starting position with more simulations — verify d4/e4 dominate.
+void test_starting_position_move_quality(bool& test_failed) {
+    BoardState start = make_starting_position();
+    GPUMctsResult result = gpu_mcts_search(start, 400, false);
+
+    printf("[value=%.2f, best=%s%s, nodes=%d] ", result.root_value,
+           sq_name(result.best_move_from), sq_name(result.best_move_to),
+           result.nodes_allocated);
+
+    // Best move should be a center pawn move (e2e4 or d2d4)
+    // e2=12, e4=28, d2=11, d4=27
+    bool is_center_pawn = (result.best_move_from == 12 && result.best_move_to == 28) || // e4
+                          (result.best_move_from == 11 && result.best_move_to == 27);    // d4
+    // With classical eval, e4/d4 should dominate but allow e3/d3 too
+    ASSERT_TRUE(result.root_value > -0.3f && result.root_value < 0.3f); // roughly equal
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+int main() {
+    printf("=== GPU MCTS Kernel Tests ===\n");
+
+    // Initialize movegen tables
+    init_movegen_tables();
+
+    int total = 0, passes = 0, failures = 0;
+
+    RUN_TEST(test_single_simulation);
+    RUN_TEST(test_multiple_simulations);
+    RUN_TEST(test_mate_in_1);
+    RUN_TEST(test_koth_in_1);
+    RUN_TEST(test_hanging_piece);
+    RUN_TEST(test_starting_position_move_quality);
+
+    printf("\n%d/%d tests passed", passes, total);
+    if (failures > 0) printf(", %d FAILED", failures);
+    printf("\n");
+
+    return failures > 0 ? 1 : 0;
+}

@@ -1,0 +1,56 @@
+#pragma once
+
+#include "common.cuh"
+
+// ============================================================
+// GPU MCTS Kernel — Single-Explorer Classical Mode
+//
+// A persistent kernel running one explorer warp that performs the
+// full MCTS loop: select → expand → quick checks → PE q-search →
+// classical value → backup.
+//
+// Classical mode: V = tanh(0.326 * q_result), no neural network.
+// Uniform policy priors (1/num_children for each child).
+// ============================================================
+
+#ifdef __CUDACC__
+
+// The persistent MCTS kernel. Runs `max_simulations` iterations of
+// select→expand→evaluate→backup on a single warp.
+__global__ void mcts_kernel(int max_simulations, bool enable_koth, float c_puct);
+
+#endif // __CUDACC__
+
+// ============================================================
+// Host-side API
+// ============================================================
+
+// Result of a GPU MCTS search.
+struct GPUMctsResult {
+    int best_move_from;
+    int best_move_to;
+    int best_move_promo;
+    float root_value;       // Q-value of root (average of children)
+    int total_simulations;
+    int nodes_allocated;
+};
+
+// Run a full MCTS search on the GPU.
+// Initializes the tree, uploads the root position, runs the kernel,
+// and reads back the best move.
+GPUMctsResult gpu_mcts_search(
+    const BoardState& root_position,
+    int simulations,
+    bool enable_koth,
+    float c_puct = 1.414f
+);
+
+// Read root children info for debugging/comparison.
+// Fills arrays with visit counts and Q-values for each root child.
+// Returns number of children.
+int read_root_children(
+    int* visit_counts,  // array of size MAX_CHILDREN
+    float* q_values,    // array of size MAX_CHILDREN
+    uint16_t* moves,    // array of size MAX_CHILDREN (GPUMove encoding)
+    int max_children
+);

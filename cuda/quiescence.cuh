@@ -35,6 +35,22 @@ __device__ int32_t gpu_ext_qsearch(
 __device__ float gpu_forced_pesto_balance(const BoardState* bs, int* completed);
 
 // ============================================================
+// Principal Exchange (PE) q-search
+// Follow the single best MVV-LVA capture at each node.
+// A straight line, not a tree. ~1–5 nodes. GPU-friendly.
+// ============================================================
+
+// PE search with alpha-beta bounds. Returns score in centipawns from STM perspective.
+__device__ int32_t gpu_principal_exchange_search(
+    const BoardState* bs,
+    int32_t alpha, int32_t beta,
+    int max_depth
+);
+
+// Convenience wrapper: returns PeSTO balance in pawn units (float).
+__device__ float gpu_principal_exchange(const BoardState* bs);
+
+// ============================================================
 // Helper functions
 // ============================================================
 

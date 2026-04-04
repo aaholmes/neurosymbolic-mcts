@@ -290,3 +290,43 @@ __device__ float gpu_forced_pesto_balance(const BoardState* bs, int* completed) 
     int32_t score_cp = gpu_ext_qsearch(bs, -100000, 100000, 20, false, false, 0, completed);
     return (float)score_cp / 100.0f;
 }
+
+// ============================================================
+// Principal Exchange (PE) q-search
+// Follow the single best MVV-LVA capture at each node.
+// A straight line, not a tree. ~1–5 nodes. GPU-friendly.
+// ============================================================
+
+__device__ int32_t gpu_principal_exchange_search(
+    const BoardState* bs,
+    int32_t alpha, int32_t beta,
+    int max_depth
+) {
+    int32_t stand_pat = pesto_eval_cp(bs);
+    if (stand_pat >= beta) return beta;
+    if (stand_pat > alpha) alpha = stand_pat;
+    if (max_depth <= 0) return alpha;
+
+    // Generate captures (MVV-LVA sorted)
+    MoveList caps;
+    caps.clear();
+    gen_pseudo_legal_captures(bs, &caps);
+
+    // Try only the FIRST legal capture (top MVV-LVA)
+    for (int i = 0; i < caps.count; i++) {
+        BoardState child = *bs;
+        apply_move(&child, caps.moves[i]);
+        if (!is_legal(&child)) continue;
+
+        int32_t score = -gpu_principal_exchange_search(&child, -beta, -alpha, max_depth - 1);
+        if (score >= beta) return beta;
+        if (score > alpha) alpha = score;
+        break; // only the first legal capture
+    }
+    return alpha;
+}
+
+__device__ float gpu_principal_exchange(const BoardState* bs) {
+    int32_t score_cp = gpu_principal_exchange_search(bs, -100000, 100000, 20);
+    return (float)score_cp / 100.0f;
+}
