@@ -193,45 +193,116 @@ fn build_ext_qsearch_tree(
 
     let stand_pat = pesto.pst_eval_cp(board.current_state());
     let mut children = Vec::new();
-    let mut threatened_pieces: u64 = 0;
 
-    // ── Stand-pat with null-move probe (not in check) ──
+    // ── Stand-pat with null-move "deny first choice" probe (not in check) ──
     if !in_check {
         let stm_is_white = board.current_state().w_to_move;
         let stm_null_used = if stm_is_white { white_null_used } else { black_null_used };
 
         let adjusted_stand_pat = if !stm_null_used && max_depth > 1 {
             board.make_null_move();
-            let mut null_child = build_ext_qsearch_tree(
-                board, move_gen, pesto,
-                -beta, -alpha, max_depth - 1,
-                white_tactic_used, black_tactic_used,
-                true, true, // one null move per branch total
-                nodes,
-            );
-            board.undo_null_move();
-            let null_threat = -null_child.score_cp;
+            let new_w_null = true;
+            let new_b_null = true;
 
-            // If threat exists, identify which pieces are under attack
-            if null_threat < stand_pat {
-                board.make_null_move();
-                let opp_captures = move_gen.gen_pseudo_legal_captures(board.current_state());
-                board.undo_null_move();
-                let stm_color = if stm_is_white { WHITE } else { BLACK };
-                let stm_valuable = board.current_state().get_piece_bitboard(stm_color, KNIGHT)
-                    | board.current_state().get_piece_bitboard(stm_color, BISHOP)
-                    | board.current_state().get_piece_bitboard(stm_color, ROOK)
-                    | board.current_state().get_piece_bitboard(stm_color, QUEEN);
-                for cap in &opp_captures {
-                    threatened_pieces |= 1u64 << cap.to;
+            // Evaluate each opponent capture/tactical individually
+            let opp_captures = move_gen.gen_pseudo_legal_captures(board.current_state());
+            let mut scored_opp: Vec<(i32, QSearchTreeNode)> = Vec::new();
+
+            for cap in &opp_captures {
+                board.make_move(*cap);
+                if !board.current_state().is_legal(move_gen) {
+                    board.undo_move();
+                    continue;
                 }
-                threatened_pieces &= stm_valuable;
+                let child = build_ext_qsearch_tree(
+                    board, move_gen, pesto,
+                    -beta, -alpha, max_depth - 2,
+                    white_tactic_used, black_tactic_used,
+                    new_w_null, new_b_null, nodes,
+                );
+                let score_for_passer = -(-child.score_cp); // child is opponent's POV, negate twice = opponent's score
+                // Actually: child.score_cp is from child's STM. After cap, STM is passer again.
+                // The opponent played cap, so from opponent's POV the score is -child.score_cp.
+                // From passer's POV: -(opponent's score) = -(-child.score_cp) = child.score_cp...
+                // No: passer passed, opponent played cap. child.score_cp is from passer's POV
+                // (since after opponent's capture, it's passer's turn again).
+                // From opponent's perspective: -child.score_cp (good for opponent = bad for passer).
+                // From passer's perspective: child.score_cp.
+                // We want to sort by what's worst for the passer (opponent's best).
+                let passer_score = child.score_cp; // from passer's POV after opponent captures
+                board.undo_move();
+
+                let mut tree_node = child;
+                tree_node.move_uci = Some(cap.to_uci());
+                tree_node.move_san = Some(move_to_san(board.current_state(), cap, move_gen));
+                tree_node.is_capture = true;
+                scored_opp.push((passer_score, tree_node));
             }
 
-            // Add null-move as a visible child
-            null_child.move_san = Some("(pass)".to_string());
-            null_child.is_null = true;
-            children.push(null_child);
+            // Also evaluate opponent tactical quiets
+            let opp_tactic_used = if stm_is_white { black_tactic_used } else { white_tactic_used };
+            if !opp_tactic_used {
+                let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
+                for mv in &quiets {
+                    if !is_tactical_quiet(board.current_state(), *mv, move_gen) {
+                        continue;
+                    }
+                    let is_fork_move = compute_fork_targets(board.current_state(), *mv, move_gen) != 0;
+                    board.make_move(*mv);
+                    if !board.current_state().is_legal(move_gen) {
+                        board.undo_move();
+                        continue;
+                    }
+                    let opp_w_used = if !stm_is_white { true } else { white_tactic_used };
+                    let opp_b_used = if stm_is_white { true } else { black_tactic_used };
+                    let gives_check = board.current_state().is_check(move_gen);
+                    let child = build_ext_qsearch_tree(
+                        board, move_gen, pesto,
+                        -beta, -alpha, max_depth - 2,
+                        opp_w_used, opp_b_used,
+                        new_w_null, new_b_null, nodes,
+                    );
+                    let passer_score = child.score_cp;
+                    board.undo_move();
+
+                    let mut tree_node = child;
+                    tree_node.move_uci = Some(mv.to_uci());
+                    tree_node.move_san = Some(move_to_san(board.current_state(), mv, move_gen));
+                    tree_node.is_check = gives_check;
+                    tree_node.is_fork = is_fork_move;
+                    scored_opp.push((passer_score, tree_node));
+                }
+            }
+
+            board.undo_null_move();
+
+            // Sort by passer_score ascending (worst for passer first = opponent's best)
+            scored_opp.sort_by_key(|(s, _)| *s);
+
+            // Build the (pass) node with opponent's responses as children
+            let null_threat = if scored_opp.len() >= 2 {
+                // Deny first choice, opponent gets second choice
+                scored_opp[1].0
+            } else if scored_opp.len() == 1 {
+                // Single threat — pass fully addresses it
+                stand_pat
+            } else {
+                stand_pat
+            };
+
+            // Add null-move as a visible "(pass)" node
+            let null_children: Vec<QSearchTreeNode> = scored_opp.into_iter().map(|(_, n)| n).collect();
+            let null_node = QSearchTreeNode {
+                fen: fen.clone(),
+                eval_cp: stand_pat,
+                score_cp: null_threat,
+                move_uci: None,
+                move_san: Some("(pass)".to_string()),
+                is_capture: false, is_check: false, is_evasion: false, is_fork: false,
+                is_null: true,
+                children: null_children,
+            };
+            children.push(null_node);
 
             stand_pat.min(null_threat)
         } else {
@@ -379,42 +450,6 @@ fn build_ext_qsearch_tree(
             }
         }
 
-        // 3. Retreat moves for threatened pieces (when null-move revealed threats)
-        if threatened_pieces != 0 {
-            let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
-            for mv in &quiets {
-                if threatened_pieces & (1u64 << mv.from) == 0 {
-                    continue;
-                }
-                board.make_move(*mv);
-                if !board.current_state().is_legal(move_gen) {
-                    board.undo_move();
-                    continue;
-                }
-                let mut child_tree = build_ext_qsearch_tree(
-                    board, move_gen, pesto, -beta, -alpha, max_depth - 1,
-                    white_tactic_used, black_tactic_used,
-                    white_null_used, black_null_used, nodes,
-                );
-                let score = -child_tree.score_cp;
-                board.undo_move();
-
-                child_tree.move_uci = Some(mv.to_uci());
-                child_tree.move_san = Some(move_to_san(board.current_state(), mv, move_gen));
-                child_tree.is_evasion = true;
-                children.push(child_tree);
-
-                if score >= beta {
-                    return QSearchTreeNode {
-                        fen, eval_cp: stand_pat, score_cp: beta,
-                        move_uci: None, move_san: None,
-                        is_capture: false, is_check: false, is_evasion: false, is_fork: false, is_null: false,
-                        children,
-                    };
-                }
-                if score > alpha { alpha = score; }
-            }
-        }
     }
 
     QSearchTreeNode {

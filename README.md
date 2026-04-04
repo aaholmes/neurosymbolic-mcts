@@ -18,7 +18,7 @@ The name is a hybrid, like the engine: **Caissa** (the mythical goddess of chess
 | Tier | Mechanism | Property | Mean cost |
 |------|-----------|----------|-----------|
 | **Tier 1** | Safety Gates (mate-in-5, KOTH-in-3) | Provably correct, exact values | 149 us (KOTH-in-3) / 132 us (mate-in-5) |
-| **Tier 2** | Extended quiescence search + MVV-LVA ordering | PeSTO eval after forced captures, checks, and forks | 7 us |
+| **Tier 2** | Extended quiescence search + null-move threat detection | PeSTO eval after forced captures, checks, forks, and threat resolution | 7 us |
 | **Tier 3** | Neural network (OracleNet) | Learned positional evaluation for uncertain positions | 1,765 us |
 
 Gate-resolved nodes are **terminal** — identical to checkmate or stalemate — so proven values propagate through the tree without dilution.
@@ -27,7 +27,15 @@ Gate-resolved nodes are **terminal** — identical to checkmate or stalemate —
 
 **Tier 1** runs ultra-fast safety gates before expansion: a checks-only mate search (up to mate-in-5) and KOTH geometric pruning (configurable depth, default center-in-3). When a gate fires, the node receives an exact cached value and becomes terminal — identical to checkmate/stalemate. An `exhaustive_depth` parameter can optionally enable exhaustive search at shallower depths to catch quiet-first forced mates, but checks-only is sufficient in practice and keeps the node budget low.
 
-**Tier 2** runs `forced_ext_pesto_balance()` at every leaf: an extended PeSTO piece-square-table quiescence search (depth 20) that resolves forced captures, promotions, and tactical sequences to compute $\Delta M$ — the tapered positional+material evaluation after tactical dust settles. Beyond pure captures, the extended Q-search allows each side one non-capture tactical move per search: non-capture checks, pawn forks (pawn advance attacking 2+ enemy pieces worth more than a pawn), and knight forks (knight move attacking 2+ enemy pieces in {R, Q, K}). Check evasions generate all legal moves (no stand-pat when in check), and forked piece retreats are free (don't consume the tactical budget). Unlike simple piece counting, PeSTO uses Texel-tuned piece-square tables (RofChade values) that account for piece placement, not just piece counts. This is a classical tree search whose results no neural network can easily replicate, since it explores variable-depth exchange and tactical sequences. The Q-search result feeds directly into the value head as an input feature, letting the NN learn position-dependent modulation of material trust. Additionally, captures are visited in MVV-LVA order on first visit (PxQ before QxP), though this is a minor optimization.
+**Tier 2** runs `forced_ext_pesto_balance()` at every leaf: an extended PeSTO piece-square-table quiescence search (depth 20) that resolves forced captures, promotions, and tactical sequences to compute $\Delta M$ — the tapered positional+material evaluation after tactical dust settles. Beyond pure captures, the extended Q-search has three innovations:
+
+1. **Tactical quiet moves** (budget-limited, one per side per search): non-capture checks, pawn forks (pawn advance attacking 2+ enemy pieces), and knight forks (knight move attacking 2+ enemy pieces in {R, Q, K}). Check evasions generate all legal moves (no stand-pat when in check).
+
+2. **Null-move threat detection** with "deny first choice": instead of blindly trusting the static eval as stand-pat, the search passes the turn and evaluates each opponent response. When there are 2+ threats (a fork), the pass "denies" the opponent's best capture (the side would save that piece with a quiet retreat) and the opponent gets only their second-best. One null-move per branch total.
+
+3. **Mystery-square recapture** for forks: after denying the first capture and accepting the second, the saved piece "recaptures" the attacker by teleporting to the capture square — bending chess geometry slightly but correctly modeling the common fork resolution pattern (e.g., d5 forks Bc4 and Ne4 → bishop retreats to mystery square → dxe4 → Bxe4). This recovers the forking piece's value, making the fork cost one exchange rather than a full piece.
+
+Unlike simple piece counting, PeSTO uses Texel-tuned piece-square tables (RofChade values) that account for piece placement, not just piece counts. This is a classical tree search whose results no neural network can easily replicate, since it explores variable-depth exchange and tactical sequences. The Q-search result feeds directly into the value head as an input feature, letting the NN learn position-dependent modulation of material trust. Captures are visited in MVV-LVA order on first visit (PxQ before QxP).
 
 **Tier 3** provides the neural component. OracleNet outputs a policy prior over moves (for PUCT selection) and $V_{logit}$ (positional assessment). The Tier 2 and Tier 3 outputs combine in the leaf value function:
 

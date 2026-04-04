@@ -52,13 +52,12 @@ fn test_ext_knight_fork_improves_score() {
     let (orig_score, _, _, _) =
         pesto_qsearch_counted(&mut stack2, &move_gen, &pesto, -100_000, 100_000, 20);
 
-    // Ne5 forks both rooks; the extended search should find the fork.
-    // With null-move threat detection, the score may differ slightly from
-    // capture-only due to retreat considerations, but should be in the same ballpark.
+    // Ne5 forks both rooks; the extended search should find the fork and
+    // show a better score than capture-only (which misses the fork entirely).
     println!("Knight fork: ext={ext_score}, orig={orig_score}");
     assert!(
-        (ext_score - orig_score).abs() < 100,
-        "Knight fork score should be close to capture-only: ext={ext_score}, orig={orig_score}"
+        ext_score > orig_score,
+        "Extended should find the knight fork: ext={ext_score}, orig={orig_score}"
     );
 }
 

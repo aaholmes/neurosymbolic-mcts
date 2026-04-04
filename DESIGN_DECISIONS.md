@@ -132,17 +132,63 @@ Tier 2's core contribution is `forced_ext_pesto_balance()` — an extended PeSTO
 
 ### Extended quiescence: beyond pure captures
 
-The original Q-search (`pesto_qsearch`) only considered captures and promotions. The extended version (`ext_pesto_qsearch_counted`) adds three types of non-capture tactical moves, each side getting one per search:
+The original Q-search (`pesto_qsearch`) only considered captures and promotions. The extended version (`ext_pesto_qsearch_counted`) adds three innovations: tactical quiet moves, null-move threat detection, and mystery-square fork resolution.
+
+#### Tactical quiet moves (budget-limited)
+
+Each side gets one non-capture tactical move per search:
 
 - **Non-capture checks**: any quiet move that gives check, detected via `gives_check()` before move application
 - **Pawn forks**: a pawn advance where the pawn's capture bitboard at the destination attacks 2+ enemy pieces in {N, B, R, Q, K}
 - **Knight forks**: a knight move where the knight's attack bitboard at the destination attacks 2+ enemy pieces in {R, Q, K}
 
-Budget rules keep the search bounded: each side's single tactical move is tracked via `white_tactic_used`/`black_tactic_used` flags threaded through recursion. Two categories of moves are free (don't consume budget): **check evasions** (when in check, all legal moves are generated — no stand-pat) and **forked piece retreats** (moves of pieces on the `forked_pieces` bitboard, set when the opponent plays a fork).
+Budget rules keep the search bounded: each side's single tactical move is tracked via `white_tactic_used`/`black_tactic_used` flags threaded through recursion. Check evasions are free (when in check, all legal moves are generated — no stand-pat).
 
 **Why one tactic per side.** Allowing unlimited tactical moves would explode the search tree — every quiet check or fork spawns a subtree. One per side is sufficient to detect the most common tactical patterns (Nc7+ forking K+R, d5 forking two minor pieces) while keeping node counts manageable. The budget ensures the extended Q-search remains effectively free relative to NN inference (<1% of wall time).
 
 **Why these three move types.** Non-capture checks are the highest-value tactical moves: they force the opponent to deal with check (often losing material). Pawn and knight forks are the next most common tactical patterns that pure capture search misses — a knight fork winning an exchange is invisible to capture-only Q-search because the fork move itself is quiet. Bishop and rook forks are rarer and harder to detect without full sliding-piece attack generation, so they're excluded from the budget-limited search.
+
+#### Null-move threat detection with "deny first choice"
+
+Standard Q-search has a **stand-pat** assumption: at every node, the side to move can "choose" not to capture and accept the static eval. This is a lie when pieces are hanging — if you "do nothing," the opponent captures them. The extended Q-search replaces blind stand-pat with a **null-move probe**:
+
+1. **Pass the turn** to the opponent (one null-move per branch total, tracked by `white_null_used`/`black_null_used`)
+2. **Evaluate each opponent response** — all captures and tactical quiets, each scored recursively
+3. **Deny the opponent's first choice** — the pass represents making a quiet move that addresses the most urgent threat
+
+The "deny first choice" logic handles three cases:
+
+- **0 threats**: Stand-pat holds. Position is quiet.
+- **1 threat**: Pass fully addresses it — you'd retreat the threatened piece. `adjusted_stand_pat = stand_pat`.
+- **2+ threats (fork)**: You can only save one piece. Deny the opponent's best capture; they get their second-best. The adjusted stand-pat drops accordingly.
+
+**Why not a full recursive null-move.** The earlier approach ran a single recursive Q-search after the null-move, returning the opponent's best score. This was simpler but had a critical flaw: it assumed "doing nothing" meant losing the *best* piece, when in reality you'd save the best piece and lose the *second-best*. Evaluating captures individually and denying the first choice correctly models fork resolution.
+
+#### Mystery-square recapture
+
+The "deny first choice" alone still underestimates the side-to-move's resources in a fork. After d5 forks Bc4 and Ne4: deny dxc4 (save bishop), opponent plays dxe4 (capture knight). But the evaluation stops there — it doesn't see that the bishop, now on a "mystery square" after retreating, can recapture the pawn on e4 (e.g., via Bd3, dxe4, Bxe4). Without this recapture, the fork costs a full knight; with it, the fork costs knight minus pawn = one exchange.
+
+When there are 2+ opponent captures, the null-move probe adds a **mystery-square recapture step**:
+
+1. Opponent makes their second-choice capture (the one not denied)
+2. The saved piece (from the denied first-choice's target square) "teleports" to the capture landing square, recapturing the attacker
+3. The resulting position is evaluated with PeSTO
+
+This bends chess geometry — the saved piece moves from its current square to the capture square regardless of whether this is a legal piece move. But it correctly models what happens in practice: the saved piece retreats to *some* square from which it can recapture. In the center fork trick, this is exactly Bd3→Bxe4. In a knight fork of queen and rook, it's Q→(mystery)→Qx(knight's landing square).
+
+The `adjusted_stand_pat` uses the better of the raw second-choice score and the recapture-adjusted score, capped at the original static eval. This means:
+- If the recapture improves the evaluation (common in forks): use the recapture score
+- If the recapture makes things worse (rare): fall back to the raw second-choice
+- If neither threat matters (quiet position): stand-pat holds
+
+**Benchmark: center fork trick** (1.e4 e5 2.Nc3 Nf6 3.Bc4 Nxe4 4.Nxe4, Black to move with d5 fork available):
+
+| Q-search variant | Score (Black POV) | Nodes | Assessment |
+|:---|---:|---:|:---|
+| Basic (captures only) | -2.90 | 1 | Completely wrong — misses d5 |
+| Extended (checks + forks) | -2.90 | 6 | Finds d5 but can't evaluate it |
+| + Null-move (deny first choice) | +0.10 | 251 | Correct — fork equalizes |
+| + Mystery recapture | +0.10 | 251 | Correct with accurate floor |
 
 The visit-ordering component (MVV-LVA) is a minor addition: captures are visited in Most-Valuable-Victim / Least-Valuable-Attacker order on their first visit. After the first visit, normal UCB selection takes over.
 
