@@ -279,13 +279,59 @@ fn build_ext_qsearch_tree(
             // Sort by passer_score ascending (worst for passer first = opponent's best)
             scored_opp.sort_by_key(|(s, _)| *s);
 
+            // Separate captures (eligible for recapture) from tactical quiets
+            let mut capture_entries: Vec<(i32, usize)> = Vec::new(); // (score, index in scored_opp)
+            let mut all_scores: Vec<i32> = Vec::new();
+            for (i, &(score, ref node)) in scored_opp.iter().enumerate() {
+                all_scores.push(score);
+                // Check if this was a capture (piece exists on target square in current board)
+                if let Some(uci) = &node.move_uci {
+                    if let Some(mv) = Move::from_uci(uci) {
+                        if board.current_state().get_piece(mv.to).is_some() {
+                            capture_entries.push((score, i));
+                        }
+                    }
+                }
+            }
+            all_scores.sort_unstable();
+            capture_entries.sort_by_key(|(s, _)| *s);
+
             // Build the (pass) node with opponent's responses as children
-            let null_threat = if scored_opp.len() >= 2 {
-                // Deny first choice, opponent gets second choice
-                scored_opp[1].0
-            } else if scored_opp.len() == 1 {
-                // Single threat — pass fully addresses it
-                stand_pat
+            let null_threat = if all_scores.len() >= 2 {
+                let second_score = all_scores[1];
+
+                // Mystery-square recapture if 2+ captures
+                if capture_entries.len() >= 2 {
+                    let best_cap_idx = capture_entries[0].1;
+                    let second_cap_idx = capture_entries[1].1;
+                    let second_cap_score = capture_entries[1].0;
+
+                    let best_victim_sq = Move::from_uci(
+                        scored_opp[best_cap_idx].1.move_uci.as_ref().unwrap()
+                    ).unwrap().to;
+                    let second_cap_mv = Move::from_uci(
+                        scored_opp[second_cap_idx].1.move_uci.as_ref().unwrap()
+                    ).unwrap();
+
+                    // Replay: null-move, second capture, mystery recapture
+                    board.make_null_move();
+                    board.make_move(second_cap_mv);
+                    let recapture_threat = if board.current_state().is_legal(move_gen) {
+                        let recapture = Move::new(best_victim_sq, second_cap_mv.to, None);
+                        let recaptured_board = board.current_state().apply_move_to_board(recapture);
+                        let recapture_eval = pesto.pst_eval_cp(&recaptured_board);
+                        second_cap_score.max(-recapture_eval)
+                    } else {
+                        second_cap_score
+                    };
+                    board.undo_move();
+                    board.undo_null_move();
+                    second_score.max(recapture_threat)
+                } else {
+                    second_score
+                }
+            } else if all_scores.len() == 1 {
+                stand_pat // single threat — pass fully saves
             } else {
                 stand_pat
             };
