@@ -229,7 +229,34 @@ cd python && python -m pytest test_*.py -v        # Python pipeline tests
 | `profile_engine` | Per-operation MCTS timing profiler |
 | `qsearch_gui` | Interactive Q-search tree visualizer (web UI at localhost:8088) |
 
-The `--qsearch` flag selects the quiescence search variant: `pe` (principal exchange), `cap1` (captures + checks), or `extended` (full with null-move threat detection). Available in `profile_engine`, with other binaries adopting it as needed.
+The `--qsearch` flag selects the quiescence search variant: `pe` (principal exchange), `cap1` (captures + checks), or `extended` (full with null-move threat detection). Available in `profile_engine`, `self_play`, and `evaluate_models`.
+
+## GPU MCTS (CUDA)
+
+A fully GPU-resident MCTS implementation is under development in `cuda/`. The goal is to run the entire search loop — tree traversal, node expansion, quick checks, quiescence search, and (eventually) batched neural inference — inside a single persistent CUDA kernel with no CPU interaction during search.
+
+**Current status:**
+
+| Component | Status | Tests |
+|-----------|--------|-------|
+| Tree store (atomic alloc, expansion locks, backprop) | Complete | 7/7 pass |
+| Move generator (magic bitboards, full legality) | Complete | 30/30 perft pass |
+| Quick checks (mate-in-1, KOTH-in-1) | Complete | 8/8 pass |
+| PeSTO eval + extended q-search | Complete | 11/11 pass |
+| **Single-explorer MCTS kernel (classical mode)** | **Complete** | **6/6 pass** |
+| Multi-explorer + batched NN inference | Not started | — |
+
+The kernel currently runs in classical mode: `V = tanh(0.326 * q_result)` using the principal exchange q-search (single best MVV-LVA capture per node, GPU-friendly linear descent). Mate-in-1 and KOTH-in-1 act as exact-value gates. Neural network inference will be added as the next phase.
+
+```bash
+cd cuda && mkdir -p build && cd build && cmake .. && make
+cd /path/to/neurosymbolic-mcts  # run from project root for table paths
+cuda/build/test_mcts_kernel      # 6/6 tests
+cuda/build/test_movegen          # 30/30 perft tests
+cuda/build/test_quick_checks     # 8/8 tests
+cuda/build/test_quiescence       # 11/11 tests
+cuda/build/test_tree_store       # 7/7 tests
+```
 
 ## Further Reading
 

@@ -486,7 +486,39 @@ Each move XOR-updates the hash rather than recomputing from scratch. This makes 
 
 Static Exchange Evaluation (SEE) uses a lightweight `SeeBoard` struct instead of cloning the full `Board`. `SeeBoard` contains only the minimum state needed for exchange evaluation — occupancy bitboards and piece types.
 
-## 8. Tournament Design: Adaptive CI-Targeted Pairing
+## 8. GPU-Resident MCTS
+
+### Motivation: CPU→GPU data transfer dominates
+
+In the CPU implementation, each MCTS simulation requires a round-trip: CPU selects a leaf, copies the position tensor to GPU, runs inference, copies the result back. At 400 simulations/move, the 1,765 µs per-inference cost (dominated by GPU forward pass at 1,122 µs) accounts for 84% of wall time. The symbolic checks (mate-in-5 at 132 µs, KOTH-in-3 at 149 µs) are designed to *avoid* NN calls, but they themselves cost more than a batched inference would.
+
+The solution: move the entire MCTS loop onto the GPU. A persistent CUDA kernel runs select→expand→evaluate→backup with no CPU interaction during search.
+
+### Architecture simplification for GPU
+
+The deep symbolic searches (mate-in-5, KOTH-in-3) are replaced by lightweight GPU-side gates:
+- **Mate-in-1**: exact terminal detection at negligible cost. Deeper mates are expected to be learned by the NN from training.
+- **KOTH-in-1**: king already on center, or one legal king move to center.
+
+The K-head (~21K parameters of patch-based FC layers producing position-dependent k) is replaced by a single learned scalar `k_logit`. The quiescence search result is added as a direct input to the value head's first FC layer (65→256 instead of 64→256). This eliminates the CUDA-hostile dynamic king-patch extraction while preserving both the additive `k·ΔM` path and a learned position-dependent channel through the value head FC weights.
+
+### Principal exchange on GPU
+
+The quiescence search uses the principal exchange (PE) variant: follow the single best MVV-LVA capture at each node. This produces a straight line (not a tree), with ~1-5 nodes per call, bounded cost, zero warp divergence, and register-resident PeSTO incremental evaluation. The full iterative-widening q-search (cap=1 checks, cap=2+ forks/null-move) remains available as a CPU-side option via the `--qsearch` flag, but the PE is the GPU-native variant.
+
+### Current implementation status
+
+The GPU MCTS kernel runs in classical mode: `V = tanh(0.326 * q_result)` with uniform policy priors, no neural network. This validates the correctness of the full MCTS loop (PUCT selection, atomic expansion, quick check gates, PE q-search, backpropagation) before adding cuDNN complexity. All components are tested:
+
+- Tree store: atomic allocation, expansion locks, backprop under contention (7 tests)
+- Move generator: full legal movegen via magic bitboards, verified by perft (30 positions)
+- Quick checks: mate-in-1 and KOTH-in-1 as exact-value gates (8 tests)
+- PeSTO evaluation + extended q-search (11 tests)
+- MCTS kernel: single-explorer loop with classical eval (6 tests — single sim, multi sim, mate gate, KOTH gate, hanging piece capture, starting position move quality)
+
+Next: batched neural network inference via cuDNN, replacing the classical `tanh(0.326 * q_result)` with the full `tanh(v_logit + k * q_result)` learned value function.
+
+## 9. Tournament Design: Adaptive CI-Targeted Pairing
 
 ### The problem: uniform round-robins waste games
 
@@ -528,7 +560,7 @@ Results are saved to JSON after every batch. The adaptive phase picks up where i
 
 Each model plays with the search configuration it was trained with. Tiered models use all three tiers; vanilla models disable Tier 1 and material evaluation. The tournament script takes model directories and generation numbers as CLI arguments (`--tiered-dir`, `--tiered-gens`, `--vanilla-dir`, `--vanilla-gens`) and enforces correct per-side tier flags automatically, so mixed matchups are valid comparisons of the full training+search systems.
 
-## 9. Applicability Beyond Chess
+## 10. Applicability Beyond Chess
 
 The three-tier decomposition is not chess-specific. The pattern — injecting exact solutions for tractable subproblems as terminal MCTS nodes — applies wherever a domain has classical solvers for subproblems:
 
@@ -543,7 +575,7 @@ The key requirement: exactly resolved nodes must be **terminal** in the MCTS tre
 
 The value function factorization ($V = \tanh(V_{learned} + k \cdot V_{computed})$) also transfers: any domain where part of the evaluation can be computed exactly benefits from separating the learnable residual from the computable component. The learned confidence scalar $k$ provides a global trust level in the exact component, while feeding the computed result as a direct input to the value head enables per-position modulation — in chess, the value head learns to rely more on $\Delta M$ in open tactical positions and less in closed strategic ones; in mathematical reasoning, an analogous architecture could modulate trust in a theorem prover's assessment based on how prover-friendly the current subgoal is.
 
-## 10. Related Work
+## 11. Related Work
 
 Caissawary draws on and extends several lines of prior work:
 
