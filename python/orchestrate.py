@@ -29,6 +29,7 @@ class TrainingConfig:
     # Ablation flags
     enable_tier1: bool = True
     enable_material_value: bool = True
+    qsearch_variant: str = "extended"  # pe, cap1, or extended
     log_games: str = "first"
 
     # Replay buffer (sliding window — old data evicted FIFO)
@@ -114,6 +115,9 @@ class TrainingConfig:
                             help="Disable Tier 1 safety gates (mate search + KOTH)")
         parser.add_argument("--disable-material", action="store_true",
                             help="Disable material value integration (pure AlphaZero)")
+        parser.add_argument("--qsearch", type=str, default="extended",
+                            choices=["pe", "cap1", "extended"],
+                            help="Q-search variant: pe (principal exchange), cap1, extended (default)")
         parser.add_argument("--log-games", type=str, default="first",
                             choices=["all", "first", "none"],
                             help="Which self-play games to log (default: first)")
@@ -140,6 +144,7 @@ class TrainingConfig:
             enable_koth=args.enable_koth,
             enable_tier1=not args.disable_tier1,
             enable_material_value=not args.disable_material,
+            qsearch_variant=args.qsearch,
             buffer_capacity=args.buffer_capacity,
             buffer_dir=args.buffer_dir,
             minibatches_per_generation=args.minibatches_per_gen,
@@ -364,6 +369,8 @@ class Orchestrator:
         if self.config.game_threads > 0:
             cmd.extend(["--threads", str(self.config.game_threads)])
         cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
+        if self.config.qsearch_variant != "extended":
+            cmd.extend(["--qsearch", self.config.qsearch_variant])
 
         print(f"Self-play: {self.config.games_per_generation} games, "
               f"{sims} sims, "
@@ -567,6 +574,8 @@ class Orchestrator:
             cmd.append("--disable-tier1")
         if not self.config.enable_material_value:
             cmd.append("--disable-material")
+        if self.config.qsearch_variant != "extended":
+            cmd.extend(["--qsearch", self.config.qsearch_variant])
         cmd.extend(["--batch-size", str(self.config.inference_batch_size)])
         cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
         if self.config.game_threads > 0:

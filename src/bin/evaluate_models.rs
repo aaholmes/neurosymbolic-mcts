@@ -8,13 +8,13 @@
 use kingfisher::boardstack::BoardStack;
 use kingfisher::mcts::sprt::{SprtConfig, SprtResult, SprtState};
 use kingfisher::mcts::{
-    tactical_mcts_search_with_tt, InferenceServer, MctsNode, TacticalMctsConfig,
+    tactical_mcts_search_with_tt, InferenceServer, MctsNode, QSearchVariant, TacticalMctsConfig,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::eval::PestoEval;
-use kingfisher::search::quiescence::forced_ext_pesto_balance;
+use kingfisher::search::quiescence::{forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
 use kingfisher::transposition::TranspositionTable;
@@ -213,6 +213,7 @@ pub fn play_evaluation_game_koth(
         candidate_enable_material,
         current_enable_tier1,
         current_enable_material,
+        QSearchVariant::Extended,
         game_seed,
         false,
         DEFAULT_EXPLORE_BASE,
@@ -231,6 +232,7 @@ pub fn play_evaluation_game_with_servers(
     candidate_enable_material: bool,
     current_enable_tier1: bool,
     current_enable_material: bool,
+    qsearch_variant: QSearchVariant,
     game_seed: u64,
     collect_training_data: bool,
     explore_base: f64,
@@ -256,6 +258,7 @@ pub fn play_evaluation_game_with_servers(
         enable_material_value: candidate_enable_material,
         enable_tier3_neural: candidate_has_nn,
         randomize_move_order: true,
+        qsearch_variant,
         ..Default::default()
     };
 
@@ -274,6 +277,7 @@ pub fn play_evaluation_game_with_servers(
         enable_material_value: current_enable_material,
         enable_tier3_neural: current_has_nn,
         randomize_move_order: true,
+        qsearch_variant,
         ..Default::default()
     };
 
@@ -334,8 +338,19 @@ pub fn play_evaluation_game_with_servers(
 
                 let mut temp_stack = BoardStack::with_board(board.clone());
                 let pesto = PestoEval::new();
-                let (q_result, qsearch_completed) =
-                    forced_ext_pesto_balance(&mut temp_stack, &move_gen, &pesto);
+                let (q_result, qsearch_completed) = match qsearch_variant {
+                    QSearchVariant::PrincipalExchange => {
+                        let (s, _nodes) = forced_principal_exchange(&mut temp_stack, &move_gen, &pesto);
+                        (s, true)
+                    }
+                    QSearchVariant::Cap1 => {
+                        let (s, completed, _nodes, _depth) = forced_cap1_pesto_balance(&mut temp_stack, &move_gen, &pesto);
+                        (s, completed)
+                    }
+                    QSearchVariant::Extended => {
+                        forced_ext_pesto_balance(&mut temp_stack, &move_gen, &pesto)
+                    }
+                };
                 let material_scalar = q_result;
 
                 let sample = TrainingSample {
@@ -516,6 +531,7 @@ pub fn evaluate_models(
         8,
         0,
         DEFAULT_EXPLORE_BASE,
+        QSearchVariant::Extended,
     )
 }
 
@@ -533,6 +549,7 @@ pub fn evaluate_models_koth(
     inference_batch_size: usize,
     seed_offset: u64,
     explore_base: f64,
+    qsearch_variant: QSearchVariant,
 ) -> EvalResults {
     // Load each model once, create shared InferenceServers
     let candidate_server: Option<Arc<InferenceServer>> = {
@@ -583,6 +600,7 @@ pub fn evaluate_models_koth(
             candidate_enable_material,
             current_enable_tier1,
             current_enable_material,
+            qsearch_variant,
             seed_offset + game_idx as u64,
             false,
             explore_base,
@@ -632,6 +650,7 @@ pub fn evaluate_models_koth_sprt(
     seed_offset: u64,
     save_training_data: Option<&str>,
     explore_base: f64,
+    qsearch_variant: QSearchVariant,
 ) -> (EvalResults, Option<f64>, SprtResult) {
     let collect = save_training_data.is_some();
 
@@ -702,6 +721,7 @@ pub fn evaluate_models_koth_sprt(
             candidate_enable_material,
             current_enable_tier1,
             current_enable_material,
+            qsearch_variant,
             seed_offset + game_idx as u64,
             collect,
             explore_base,
@@ -889,6 +909,13 @@ fn main() {
 
     let explore_base: f64 = parse_arg_f64(&args, "--explore-base", DEFAULT_EXPLORE_BASE);
 
+    let qsearch_variant = args
+        .iter()
+        .position(|a| a == "--qsearch")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| QSearchVariant::from_str(v))
+        .unwrap_or(QSearchVariant::Extended);
+
     let inference_batch_size: usize = args
         .iter()
         .position(|a| a == "--batch-size")
@@ -972,6 +999,7 @@ fn main() {
             seed_offset,
             save_training_data.as_deref(),
             explore_base,
+            qsearch_variant,
         );
 
         let win_rate = results.win_rate();
@@ -1018,6 +1046,7 @@ fn main() {
             inference_batch_size,
             seed_offset,
             explore_base,
+            qsearch_variant,
         );
         let win_rate = results.win_rate();
         let games_played = results.wins + results.losses + results.draws;

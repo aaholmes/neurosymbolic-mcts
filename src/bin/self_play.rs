@@ -6,13 +6,13 @@
 use kingfisher::boardstack::BoardStack;
 use kingfisher::mcts::{
     reuse_subtree, tactical_mcts_search_for_training_with_reuse, InferenceServer,
-    TacticalMctsConfig,
+    QSearchVariant, TacticalMctsConfig,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::search::mate_search;
-use kingfisher::search::quiescence::forced_ext_pesto_balance;
+use kingfisher::search::quiescence::{forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange};
 use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
@@ -85,6 +85,13 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.80);
 
+    let qsearch_variant = args
+        .iter()
+        .position(|a| a == "--qsearch")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| QSearchVariant::from_str(v))
+        .unwrap_or(QSearchVariant::Extended);
+
     println!("Self-Play Generator Starting...");
     println!("   Games: {}", num_games);
     println!("   Simulations/Move: {}", simulations);
@@ -93,6 +100,7 @@ fn main() {
     println!("   KOTH Mode: {}", enable_koth);
     println!("   Tier1 Gate: {}", enable_tier1);
     println!("   Material Value: {}", enable_material);
+    println!("   Q-Search: {}", qsearch_variant.name());
     println!("   Log Games: {}", log_games);
     println!("   Inference Batch Size: {}", inference_batch_size);
     println!("   Explore Base: {}", explore_base);
@@ -146,6 +154,7 @@ fn main() {
             enable_material,
             verbose,
             explore_base,
+            qsearch_variant,
         );
 
         if !samples.is_empty() {
@@ -187,6 +196,7 @@ fn play_game(
     enable_material: bool,
     verbose: bool,
     explore_base: f64,
+    qsearch_variant: QSearchVariant,
 ) -> Vec<TrainingSample> {
     let mut rng = StdRng::seed_from_u64(seed);
     let move_gen = MoveGen::new();
@@ -210,6 +220,7 @@ fn play_game(
         enable_material_value: enable_material,
         enable_tier3_neural: has_nn,
         randomize_move_order: true,
+        qsearch_variant,
         ..Default::default()
     };
     let mut transposition_table = TranspositionTable::new();
@@ -300,8 +311,19 @@ fn play_game(
         }
 
         let mut temp_stack = BoardStack::with_board(board.clone());
-        let (q_result, qsearch_completed) =
-            forced_ext_pesto_balance(&mut temp_stack, &move_gen, &config.pesto);
+        let (q_result, qsearch_completed) = match qsearch_variant {
+            QSearchVariant::PrincipalExchange => {
+                let (s, _nodes) = forced_principal_exchange(&mut temp_stack, &move_gen, &config.pesto);
+                (s, true)
+            }
+            QSearchVariant::Cap1 => {
+                let (s, completed, _nodes, _depth) = forced_cap1_pesto_balance(&mut temp_stack, &move_gen, &config.pesto);
+                (s, completed)
+            }
+            QSearchVariant::Extended => {
+                forced_ext_pesto_balance(&mut temp_stack, &move_gen, &config.pesto)
+            }
+        };
         let material_scalar = q_result;
 
         samples.push(TrainingSample {
