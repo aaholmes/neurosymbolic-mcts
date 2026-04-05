@@ -5,9 +5,11 @@ use kingfisher::board::Board;
 use kingfisher::boardstack::BoardStack;
 use kingfisher::eval::PestoEval;
 use kingfisher::move_generation::MoveGen;
+use kingfisher::mcts::QSearchVariant;
 use kingfisher::search::quiescence::{
     cap1_pesto_qsearch, ext_pesto_qsearch_counted, forced_cap1_pesto_balance,
-    forced_ext_pesto_balance, forced_ext_pesto_balance_counted, forced_pesto_balance,
+    forced_ext_pesto_balance, forced_ext_pesto_balance_counted,
+    forced_material_balance_counted, forced_pesto_balance, forced_pesto_balance_counted,
     forced_principal_exchange, pesto_qsearch_counted, principal_exchange,
 };
 
@@ -432,4 +434,119 @@ fn test_cap1_vs_principal_exchange_comparison() {
 
         println!("{:<15} {:>+8.2} {:>8} {:>+10.2} {:>10}", name, pe_s, pe_n, c1_s, c1_n);
     }
+}
+
+// ======== Counted wrapper tests ========
+
+#[test]
+fn test_forced_pesto_balance_counted_returns_stats() {
+    let (move_gen, pesto) = setup();
+    let mut stack = BoardStack::new();
+    let (score, completed, nodes, depth) =
+        forced_pesto_balance_counted(&mut stack, &move_gen, &pesto);
+
+    assert!(score.abs() < 0.5, "Starting pos: {score}");
+    assert!(completed);
+    assert!(nodes >= 1);
+    assert_eq!(depth, 0, "Quiet position should have depth 0");
+}
+
+#[test]
+fn test_forced_material_balance_counted_returns_stats() {
+    let (move_gen, _pesto) = setup();
+    let mut stack = BoardStack::new();
+    let (score, completed, nodes, depth) =
+        forced_material_balance_counted(&mut stack, &move_gen);
+
+    assert_eq!(score, 0, "Starting material should be 0");
+    assert!(completed);
+    assert!(nodes >= 1);
+    assert_eq!(depth, 0);
+}
+
+#[test]
+fn test_forced_pesto_balance_counted_captures_position() {
+    let (move_gen, pesto) = setup();
+    // White can capture undefended black knight
+    let board = Board::new_from_fen("4k3/8/8/8/4n3/3P4/8/4K3 w - - 0 1");
+    let mut stack = BoardStack::with_board(board);
+    let (score, completed, nodes, depth) =
+        forced_pesto_balance_counted(&mut stack, &move_gen, &pesto);
+
+    assert!(score > 0.5, "Should win material: {score}");
+    assert!(completed);
+    assert!(nodes > 1, "Should search captures");
+    assert!(depth > 0, "Should have depth > 0");
+}
+
+// ======== QSearchVariant enum tests ========
+
+#[test]
+fn test_qsearch_variant_from_str() {
+    assert_eq!(QSearchVariant::from_str("pe"), Some(QSearchVariant::PrincipalExchange));
+    assert_eq!(QSearchVariant::from_str("principal-exchange"), Some(QSearchVariant::PrincipalExchange));
+    assert_eq!(QSearchVariant::from_str("cap1"), Some(QSearchVariant::Cap1));
+    assert_eq!(QSearchVariant::from_str("extended"), Some(QSearchVariant::Extended));
+    assert_eq!(QSearchVariant::from_str("ext"), Some(QSearchVariant::Extended));
+    assert_eq!(QSearchVariant::from_str("invalid"), None);
+    assert_eq!(QSearchVariant::from_str(""), None);
+}
+
+#[test]
+fn test_qsearch_variant_name() {
+    assert_eq!(QSearchVariant::PrincipalExchange.name(), "principal-exchange");
+    assert_eq!(QSearchVariant::Cap1.name(), "cap1");
+    assert_eq!(QSearchVariant::Extended.name(), "extended");
+}
+
+#[test]
+fn test_qsearch_variant_round_trip() {
+    for variant in &[QSearchVariant::PrincipalExchange, QSearchVariant::Cap1, QSearchVariant::Extended] {
+        let name = variant.name();
+        let parsed = QSearchVariant::from_str(name);
+        assert_eq!(parsed, Some(*variant), "Round-trip failed for {name}");
+    }
+}
+
+// ======== Principal exchange edge cases ========
+
+#[test]
+fn test_principal_exchange_no_captures_position() {
+    let (move_gen, pesto) = setup();
+    // Position with no captures available
+    let board = Board::new_from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1");
+    let mut stack = BoardStack::with_board(board);
+    let (score, nodes) = forced_principal_exchange(&mut stack, &move_gen, &pesto);
+    assert_eq!(nodes, 1, "No captures → 1 node: got {nodes}");
+    println!("K vs K: score={score:.2}, nodes={nodes}");
+}
+
+#[test]
+fn test_principal_exchange_promotion() {
+    let (move_gen, pesto) = setup();
+    // White pawn about to promote by capturing undefended knight
+    let board = Board::new_from_fen("1n2k3/2P5/8/8/8/8/8/4K3 w - - 0 1");
+    let mut stack = BoardStack::with_board(board);
+    let (score, nodes) = forced_principal_exchange(&mut stack, &move_gen, &pesto);
+    // cxb8=Q should be found (capture + promote)
+    println!("Promotion capture: score={score:.2}, nodes={nodes}");
+    assert!(score > 2.0, "Should win material via promotion: {score}");
+}
+
+// ======== Cap1 edge cases ========
+
+#[test]
+fn test_cap1_discovered_check() {
+    let (move_gen, pesto) = setup();
+    // White bishop on c1 can move, discovering check from rook on a1
+    // Rook on a1, bishop on c1, Black king on a8
+    // Actually, let's use a simpler discovered check position:
+    // White: Ke1, Rd1, Bc2. Black: Ke8. Bc2 moves → Rd1 discovers no check.
+    // Better: White: Ke1, Ra1, Bb2. Black: Ka8.
+    // Ba3 or Bc3 etc discovers check from Ra1 along a-file to Ka8!
+    let board = Board::new_from_fen("k7/8/8/8/8/8/1B6/R3K3 w - - 0 1");
+    let mut stack = BoardStack::with_board(board);
+    let (score, _, nodes, _) = forced_cap1_pesto_balance(&mut stack, &move_gen, &pesto);
+    println!("Discovered check: score={score:.2}, nodes={nodes}");
+    // Cap1 should find at least checks that win material
 }
