@@ -54,3 +54,7 @@ int read_root_children(
     uint16_t* moves,    // array of size MAX_CHILDREN (GPUMove encoding)
     int max_children
 );
+
+// Get the board state of the best child (for playing sequential games).
+// Returns true if found, false if root has no children.
+bool get_best_child_board(BoardState* out_board, uint16_t* out_move);

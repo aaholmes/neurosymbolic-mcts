@@ -358,3 +358,36 @@ int read_root_children(
     }
     return n;
 }
+
+bool get_best_child_board(BoardState* out_board, uint16_t* out_move) {
+    MCTSNode root;
+    read_root_node(&root);
+
+    if (root.num_children == 0) return false;
+
+    int best_idx = root.first_child_idx;
+    int best_visits = -1;
+
+    for (int i = 0; i < root.num_children; i++) {
+        MCTSNode child;
+        read_node(root.first_child_idx + i, &child);
+        if (child.visit_count > best_visits) {
+            best_visits = child.visit_count;
+            best_idx = root.first_child_idx + i;
+        }
+    }
+
+    MCTSNode best;
+    read_node(best_idx, &best);
+    // Copy board from the node's board section
+    memcpy(out_board->pieces, best.pieces, sizeof(best.pieces));
+    memcpy(out_board->pieces_occ, best.pieces_occ, sizeof(best.pieces_occ));
+    out_board->w_to_move = best.w_to_move;
+    out_board->en_passant = best.en_passant;
+    out_board->castling = best.castling;
+    out_board->halfmove = best.halfmove;
+    memset(out_board->_pad, 0, sizeof(out_board->_pad));
+
+    *out_move = (uint16_t)best.move_from_parent;
+    return true;
+}

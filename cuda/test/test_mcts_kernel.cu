@@ -194,6 +194,118 @@ void test_starting_position_move_quality(bool& test_failed) {
     ASSERT_TRUE(result.root_value > -0.3f && result.root_value < 0.3f); // roughly equal
 }
 
+// Test 7: Visit distribution sanity — no degenerate behavior.
+void test_visit_distribution(bool& test_failed) {
+    BoardState start = make_starting_position();
+    GPUMctsResult result = gpu_mcts_search(start, 1000, false);
+
+    int visits[256];
+    float qvals[256];
+    uint16_t moves[256];
+    int n = read_root_children(visits, qvals, moves, 256);
+
+    ASSERT_EQ(n, 20);
+
+    int max_visits = 0, total_visits = 0;
+    for (int i = 0; i < n; i++) {
+        ASSERT_TRUE(visits[i] >= 0);
+        if (visits[i] > max_visits) max_visits = visits[i];
+        total_visits += visits[i];
+    }
+    ASSERT_EQ(total_visits, 1000);
+
+    // Top move should get significant but not all visits
+    float top_pct = (float)max_visits / total_visits;
+    printf("[top=%.0f%%, nodes=%d] ", top_pct * 100, result.nodes_allocated);
+    ASSERT_TRUE(top_pct > 0.05f);  // at least 5% (not degenerate)
+    ASSERT_TRUE(top_pct < 0.95f);  // not all visits to one move
+}
+
+// Test 8: Q-value sign — winning position should have positive value.
+void test_qvalue_sign(bool& test_failed) {
+    // White has a queen, Black has nothing (besides kings)
+    BoardState bs_win = parse_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1");
+    GPUMctsResult win = gpu_mcts_search(bs_win, 200, false);
+    printf("[win=%.2f] ", win.root_value);
+    ASSERT_TRUE(win.root_value > 0.3f);
+
+    // Black has a queen, White has nothing
+    BoardState bs_lose = parse_fen("3qk3/8/8/8/8/8/8/4K3 w - - 0 1");
+    GPUMctsResult lose = gpu_mcts_search(bs_lose, 200, false);
+    printf("[lose=%.2f] ", lose.root_value);
+    ASSERT_TRUE(lose.root_value < -0.3f);
+}
+
+// Test 9: Higher simulation count — no crashes, reasonable tree size.
+void test_high_simulations(bool& test_failed) {
+    BoardState start = make_starting_position();
+    GPUMctsResult result = gpu_mcts_search(start, 2000, false);
+
+    printf("[sims=%d, nodes=%d, value=%.2f] ",
+           result.total_simulations, result.nodes_allocated, result.root_value);
+    ASSERT_EQ(result.total_simulations, 2000);
+    ASSERT_TRUE(result.nodes_allocated > 100);
+    ASSERT_TRUE(result.nodes_allocated < 60000); // within pool limits
+    ASSERT_TRUE(result.root_value > -0.5f && result.root_value < 0.5f);
+}
+
+// Test 10: Play a complete game — GPU vs itself.
+void test_play_complete_game(bool& test_failed) {
+    BoardState pos = make_starting_position();
+    int half_moves = 0;
+    const int MAX_HALF_MOVES = 200;
+    const int SIMS_PER_MOVE = 100; // fast game
+
+    printf("\n    ");
+    while (half_moves < MAX_HALF_MOVES) {
+        GPUMctsResult result = gpu_mcts_search(pos, SIMS_PER_MOVE, false);
+
+        if (result.total_simulations == 0 || result.nodes_allocated <= 1) {
+            // No legal moves — game over (checkmate or stalemate)
+            break;
+        }
+
+        // Check for terminal at root
+        if (result.root_value > 0.99f || result.root_value < -0.99f) {
+            // Mate detected
+            printf("mate ");
+            break;
+        }
+
+        // Get best child's board for next iteration
+        BoardState next_pos;
+        uint16_t best_move;
+        if (!get_best_child_board(&next_pos, &best_move)) {
+            break; // no children
+        }
+
+        int from = GPU_MOVE_FROM(best_move);
+        int to = GPU_MOVE_TO(best_move);
+
+        // Print move
+        if (half_moves % 2 == 0) {
+            printf("%d.", half_moves / 2 + 1);
+        }
+        printf("%c%c%c%c ",
+               'a' + (from % 8), '1' + (from / 8),
+               'a' + (to % 8), '1' + (to / 8));
+        if ((half_moves + 1) % 10 == 0) printf("\n    ");
+
+        pos = next_pos;
+        half_moves++;
+
+        // 50-move rule
+        if (pos.halfmove >= 100) {
+            printf("50-move ");
+            break;
+        }
+    }
+
+    printf("\n    [%d half-moves played] ", half_moves);
+    ASSERT_TRUE(half_moves > 4); // should play more than 2 full moves
+    ASSERT_TRUE(half_moves <= MAX_HALF_MOVES);
+}
+
 // ============================================================
 // Main
 // ============================================================
@@ -212,6 +324,10 @@ int main() {
     RUN_TEST(test_koth_in_1);
     RUN_TEST(test_hanging_piece);
     RUN_TEST(test_starting_position_move_quality);
+    RUN_TEST(test_visit_distribution);
+    RUN_TEST(test_qvalue_sign);
+    RUN_TEST(test_high_simulations);
+    RUN_TEST(test_play_complete_game);
 
     printf("\n%d/%d tests passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);
