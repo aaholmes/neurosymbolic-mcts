@@ -1,10 +1,39 @@
 #include "../nn_weights.cuh"
 #include "../nn_ops.cuh"
 #include "../nn_forward.cuh"
+#include "../quiescence.cuh"
+#include "../movegen.cuh"
 #include "test_helpers.cuh"
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+
+// FEN parser for test positions
+static int char_to_piece_nn(char c, int* color) {
+    *color = (c >= 'A' && c <= 'Z') ? WHITE : BLACK;
+    switch (c) {
+        case 'P': case 'p': return PAWN; case 'N': case 'n': return KNIGHT;
+        case 'B': case 'b': return BISHOP; case 'R': case 'r': return ROOK;
+        case 'Q': case 'q': return QUEEN; case 'K': case 'k': return KING;
+        default: return -1;
+    }
+}
+static BoardState parse_fen(const char* fen) {
+    BoardState bs; memset(&bs, 0, sizeof(bs)); bs.en_passant = EN_PASSANT_NONE;
+    int rank = 7, file = 0; const char* p = fen;
+    while (*p && *p != ' ') {
+        if (*p == '/') { rank--; file = 0; }
+        else if (*p >= '1' && *p <= '8') { file += (*p - '0'); }
+        else { int color, piece; piece = char_to_piece_nn(*p, &color);
+            if (piece >= 0) { bs.pieces[color * 6 + piece] |= (1ULL << (rank * 8 + file)); file++; } }
+        p++;
+    }
+    if (*p) p++; bs.w_to_move = (*p == 'w') ? 1 : 0;
+    if (*p) p++; if (*p) p++;
+    while (*p && *p != ' ') { switch (*p) { case 'K': bs.castling |= CASTLE_WK; break; case 'Q': bs.castling |= CASTLE_WQ; break; case 'k': bs.castling |= CASTLE_BK; break; case 'q': bs.castling |= CASTLE_BQ; break; } p++; }
+    for (int c = 0; c < 2; c++) { bs.pieces_occ[c] = 0; for (int piece = 0; piece < 6; piece++) bs.pieces_occ[c] |= bs.pieces[c * 6 + piece]; }
+    return bs;
+}
 
 // ============================================================
 // Weight struct tests
@@ -342,11 +371,207 @@ void test_full_forward_dummy_weights(bool& test_failed) {
 }
 
 // ============================================================
+// BatchNorm + ReLU test
+// ============================================================
+
+__global__ void kernel_bn_relu(float* data, const float* g, const float* b,
+                                const float* m, const float* v, int ch, bool relu) {
+    warp_bn_relu(data, g, b, m, v, ch, relu);
+}
+
+void test_bn_relu_identity(bool& test_failed) {
+    // BN with gamma=1, beta=0, mean=0, var=1 → output = input (when positive, with ReLU)
+    const int ch = 2;
+    const int total = ch * 64;
+    float h_data[total];
+    for (int i = 0; i < total; i++) h_data[i] = (float)(i % 7) - 3.0f; // -3 to 3
+
+    float h_gamma[] = {1.0f, 1.0f};
+    float h_beta[] = {0.0f, 0.0f};
+    float h_mean[] = {0.0f, 0.0f};
+    float h_var[] = {1.0f, 1.0f};
+
+    float *d_data, *d_g, *d_b, *d_m, *d_v;
+    cudaMalloc(&d_data, total * 4); cudaMalloc(&d_g, 8); cudaMalloc(&d_b, 8);
+    cudaMalloc(&d_m, 8); cudaMalloc(&d_v, 8);
+    cudaMemcpy(d_data, h_data, total * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_g, h_gamma, 8, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_beta, 8, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_m, h_mean, 8, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, h_var, 8, cudaMemcpyHostToDevice);
+
+    kernel_bn_relu<<<1, 32>>>(d_data, d_g, d_b, d_m, d_v, ch, true);
+    cudaDeviceSynchronize();
+
+    float h_out[total];
+    cudaMemcpy(h_out, d_data, total * 4, cudaMemcpyDeviceToHost);
+
+    // With identity BN + ReLU: output = max(0, input)
+    for (int i = 0; i < 8; i++) {
+        float expected = h_data[i] > 0 ? h_data[i] : 0.0f;
+        ASSERT_NEAR(h_out[i], expected, 0.01f);
+    }
+
+    cudaFree(d_data); cudaFree(d_g); cudaFree(d_b); cudaFree(d_m); cudaFree(d_v);
+}
+
+// ============================================================
+// Add+ReLU test
+// ============================================================
+
+__global__ void kernel_add_relu(const float* a, const float* b, float* out, int size) {
+    warp_add_relu(a, b, out, size);
+}
+
+void test_add_relu(bool& test_failed) {
+    float h_a[] = {1.0f, -2.0f, 3.0f, -4.0f};
+    float h_b[] = {-0.5f, 1.0f, -5.0f, 3.0f};
+    // expected: max(0, a+b) = [0.5, 0, 0, 0]
+    float h_out[4];
+
+    float *d_a, *d_b, *d_out;
+    cudaMalloc(&d_a, 16); cudaMalloc(&d_b, 16); cudaMalloc(&d_out, 16);
+    cudaMemcpy(d_a, h_a, 16, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, 16, cudaMemcpyHostToDevice);
+
+    kernel_add_relu<<<1, 32>>>(d_a, d_b, d_out, 4);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_out, d_out, 16, cudaMemcpyDeviceToHost);
+
+    ASSERT_NEAR(h_out[0], 0.5f, 1e-6f);
+    ASSERT_NEAR(h_out[1], 0.0f, 1e-6f); // -2+1=-1 → relu → 0
+    ASSERT_NEAR(h_out[2], 0.0f, 1e-6f); // 3-5=-2 → relu → 0
+    ASSERT_NEAR(h_out[3], 0.0f, 1e-6f); // -4+3=-1 → relu → 0
+
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_out);
+}
+
+// ============================================================
+// GPU principal exchange test
+// ============================================================
+
+__global__ void kernel_pe(const BoardState* bs, float* result) {
+    *result = gpu_principal_exchange(bs);
+}
+
+void test_gpu_pe_starting_pos(bool& test_failed) {
+    BoardState bs = make_starting_position();
+    BoardState* d_bs; float* d_result; float h_result;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMalloc(&d_result, 4);
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    kernel_pe<<<1, 1>>>(d_bs, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+
+    ASSERT_NEAR(h_result, 0.0f, 0.1f); // starting pos ≈ 0 pawns
+    cudaFree(d_bs); cudaFree(d_result);
+}
+
+void test_gpu_pe_queen_advantage(bool& test_failed) {
+    // White has an extra queen → PE should show large advantage
+    BoardState bs = parse_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1");
+    BoardState* d_bs; float* d_result; float h_result;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMalloc(&d_result, 4);
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    kernel_pe<<<1, 1>>>(d_bs, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+
+    printf("[pe=%.2f] ", h_result);
+    ASSERT_TRUE(h_result > 5.0f); // queen ≈ 9 pawns
+    cudaFree(d_bs); cudaFree(d_result);
+}
+
+void test_gpu_pe_hanging_piece(bool& test_failed) {
+    // White queen can capture undefended rook
+    BoardState bs = parse_fen("4k3/8/8/3r4/8/8/8/3QK3 w - - 0 1");
+    BoardState* d_bs; float* d_result; float h_result;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMalloc(&d_result, 4);
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    kernel_pe<<<1, 1>>>(d_bs, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+
+    printf("[pe=%.2f] ", h_result);
+    ASSERT_TRUE(h_result > 3.0f); // should capture rook
+    cudaFree(d_bs); cudaFree(d_result);
+}
+
+// ============================================================
+// Forward pass with different q_result values
+// ============================================================
+
+void test_forward_pass_q_result_sensitivity(bool& test_failed) {
+    // With dummy weights, value should scale with q_result:
+    // V = tanh(0.326 * q_result)
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    float* d_scratch = alloc_nn_scratch(1);
+    BoardState bs = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float* d_policy; float* d_value; float* d_k;
+    cudaMalloc(&d_policy, NN_POLICY_SIZE * 4);
+    cudaMalloc(&d_value, 4);
+    cudaMalloc(&d_k, 4);
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    float q_values[] = {-3.0f, 0.0f, 3.0f};
+    float h_values[3];
+
+    for (int i = 0; i < 3; i++) {
+        kernel_forward_pass<<<1, 32>>>(d_bs, q_values[i], d_weights, d_scratch,
+                                        d_policy, d_value, d_k);
+        cudaDeviceSynchronize();
+        cudaMemcpy(&h_values[i], d_value, 4, cudaMemcpyDeviceToHost);
+    }
+
+    // V(-3) < V(0) < V(3)
+    printf("[V(-3)=%.2f, V(0)=%.2f, V(3)=%.2f] ", h_values[0], h_values[1], h_values[2]);
+    ASSERT_TRUE(h_values[0] < h_values[1]);
+    ASSERT_TRUE(h_values[1] < h_values[2]);
+    ASSERT_NEAR(h_values[1], 0.0f, 0.05f); // q=0 → V≈0
+    ASSERT_TRUE(h_values[2] > 0.5f);  // q=3 → V > 0.5
+    ASSERT_TRUE(h_values[0] < -0.5f); // q=-3 → V < -0.5
+
+    cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k);
+    free_nn_scratch(d_scratch); free_nn_weights(d_weights);
+}
+
+// ============================================================
+// Scratch allocation test
+// ============================================================
+
+void test_scratch_allocation(bool& test_failed) {
+    float* scratch = alloc_nn_scratch(16);
+    ASSERT_TRUE(scratch != nullptr);
+    printf("[16 warps = %.1f MB] ", 16.0f * SCRATCH_TOTAL_BYTES / (1024.0f * 1024.0f));
+    free_nn_scratch(scratch);
+
+    // Test large allocation
+    float* scratch_big = alloc_nn_scratch(144);
+    ASSERT_TRUE(scratch_big != nullptr);
+    printf("[144 warps = %.1f MB] ", 144.0f * SCRATCH_TOTAL_BYTES / (1024.0f * 1024.0f));
+    free_nn_scratch(scratch_big);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
 int main() {
     printf("=== NN Ops Tests ===\n");
+
+    // Load movegen tables for PE tests
+    init_movegen_tables();
 
     int total = 0, passes = 0, failures = 0;
 
@@ -358,7 +583,14 @@ int main() {
     RUN_TEST(test_im2col_single_channel);
     RUN_TEST(test_board_encoding_starting_pos);
     RUN_TEST(test_log_softmax);
+    RUN_TEST(test_bn_relu_identity);
+    RUN_TEST(test_add_relu);
+    RUN_TEST(test_gpu_pe_starting_pos);
+    RUN_TEST(test_gpu_pe_queen_advantage);
+    RUN_TEST(test_gpu_pe_hanging_piece);
     RUN_TEST(test_full_forward_dummy_weights);
+    RUN_TEST(test_forward_pass_q_result_sensitivity);
+    RUN_TEST(test_scratch_allocation);
 
     printf("\n%d/%d tests passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);
