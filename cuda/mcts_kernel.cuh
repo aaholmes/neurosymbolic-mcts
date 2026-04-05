@@ -1,6 +1,8 @@
 #pragma once
 
 #include "common.cuh"
+#include "nn_weights.cuh"
+#include "nn_forward.cuh"
 
 // ============================================================
 // GPU MCTS Kernel — Single-Explorer Classical Mode
@@ -58,3 +60,20 @@ int read_root_children(
 // Get the board state of the best child (for playing sequential games).
 // Returns true if found, false if root has no children.
 bool get_best_child_board(BoardState* out_board, uint16_t* out_move);
+
+// ============================================================
+// NN-mode search (with neural network forward pass)
+// ============================================================
+
+// Run MCTS with neural network policy and value.
+// Uses warp-cooperative forward pass (32 threads per warp).
+// num_warps: number of explorer warps (each gets its own scratch).
+GPUMctsResult gpu_mcts_search_nn(
+    const BoardState& root_position,
+    int simulations,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,   // GPU-resident weights (shared, read-only)
+    float* d_nn_scratch,            // per-warp scratch (num_warps * SCRATCH_TOTAL_FLOATS)
+    int num_warps
+);

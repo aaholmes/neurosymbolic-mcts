@@ -4,9 +4,14 @@
 #include "apply_move.cuh"
 #include "quiescence.cuh"
 #include "quick_checks.cuh"
+#include "nn_forward.cuh"
+#include "nn_ops.cuh"
 
 #include <cstdio>
 #include <cmath>
+
+// Global simulation counter for multi-warp mode
+__device__ int32_t g_sim_counter;
 
 // ============================================================
 // Device helpers
@@ -390,4 +395,268 @@ bool get_best_child_board(BoardState* out_board, uint16_t* out_move) {
 
     *out_move = (uint16_t)best.move_from_parent;
     return true;
+}
+
+// ============================================================
+// NN-mode kernel: set_child_priors + forward pass
+// ============================================================
+
+// Set child priors from the policy log-probability vector.
+// Called by thread 0 of the warp after oracle_net_forward().
+__device__ void set_child_priors(int parent_idx, const float* log_policy, bool w_to_move) {
+    MCTSNode* parent = &g_node_pool[parent_idx];
+    int n = parent->num_children;
+    if (n == 0) return;
+
+    // Collect raw probabilities for legal moves
+    float probs[256]; // one per child
+    float total = 0.0f;
+
+    for (int i = 0; i < n; i++) {
+        MCTSNode* child = &g_node_pool[parent->first_child_idx + i];
+        GPUMove mv = (GPUMove)child->move_from_parent;
+        int idx = move_to_policy_index(mv, w_to_move);
+        float prob;
+        if (idx >= 0 && idx < NN_POLICY_SIZE) {
+            prob = expf(log_policy[idx]);
+        } else {
+            prob = 1e-8f; // tiny default for unmapped moves
+        }
+        probs[i] = prob;
+        total += prob;
+    }
+
+    // Normalize to sum to 1
+    if (total > 0.0f) {
+        for (int i = 0; i < n; i++) {
+            g_node_pool[parent->first_child_idx + i].prior = probs[i] / total;
+        }
+    } else {
+        float uniform = 1.0f / (float)n;
+        for (int i = 0; i < n; i++) {
+            g_node_pool[parent->first_child_idx + i].prior = uniform;
+        }
+    }
+}
+
+// NN-mode MCTS kernel.
+// One warp (32 threads) per block. Thread 0 handles MCTS logic,
+// all 32 threads cooperate on the NN forward pass.
+__global__ void mcts_kernel_nn(
+    int max_simulations, bool enable_koth, float c_puct,
+    OracleNetWeights* weights, float* nn_scratch, int scratch_stride
+) {
+    int warp_id = blockIdx.x;
+    int lane = threadIdx.x & 31;
+    float* my_scratch = nn_scratch + warp_id * scratch_stride;
+
+    // Policy output buffer (within scratch space)
+    float* policy_buf = my_scratch + SCRATCH_BUF_SIZE * 2 + SCRATCH_COL_SIZE + SCRATCH_PLANES_SIZE;
+
+    while (true) {
+        // Atomic increment to claim a simulation
+        int sim;
+        if (lane == 0) {
+            sim = atomicAdd(&g_sim_counter, 1);
+        }
+        sim = __shfl_sync(0xFFFFFFFF, sim, 0); // broadcast to all lanes
+        if (sim >= max_simulations) break;
+
+        // Only thread 0 does MCTS tree operations
+        int node_idx = 0;
+        int path[256];
+        int path_len = 0;
+        float value = 0.0f;
+        bool evaluated = false;
+
+        if (lane == 0) {
+            path[path_len++] = 0;
+
+            // === SELECT ===
+            while (is_expanded(&g_node_pool[node_idx]) &&
+                   !g_node_pool[node_idx].is_terminal &&
+                   g_node_pool[node_idx].num_children > 0) {
+                node_idx = select_child_puct(node_idx, c_puct);
+                apply_virtual_loss(&g_node_pool[node_idx]);
+                path[path_len++] = node_idx;
+            }
+
+            // === EXPAND ===
+            MCTSNode* leaf = &g_node_pool[node_idx];
+            if (!leaf->is_terminal && try_expand(leaf)) {
+                expand_node(node_idx);
+                finish_expand(leaf);
+
+                // Quick checks on the expanded node
+                if (!leaf->is_terminal && leaf->num_children > 0) {
+                    BoardState bs;
+                    node_to_board(leaf, &bs);
+
+                    if (check_mate_in_1(&bs)) {
+                        leaf->terminal_value = 1.0f;
+                        leaf->is_terminal = 1;
+                        value = 1.0f;
+                        evaluated = true;
+                    } else if (enable_koth && check_koth_in_1(&bs)) {
+                        leaf->terminal_value = 1.0f;
+                        leaf->is_terminal = 1;
+                        value = 1.0f;
+                        evaluated = true;
+                    }
+                }
+
+                // If not terminal, descend to first child
+                if (!evaluated && leaf->num_children > 0 && !leaf->is_terminal) {
+                    node_idx = leaf->first_child_idx;
+                    path[path_len++] = node_idx;
+                }
+            }
+
+            // Handle already-terminal nodes
+            if (!evaluated && g_node_pool[node_idx].is_terminal) {
+                value = g_node_pool[node_idx].terminal_value;
+                evaluated = true;
+            }
+        }
+
+        // Broadcast state to all lanes
+        node_idx = __shfl_sync(0xFFFFFFFF, node_idx, 0);
+        int eval_flag = evaluated ? 1 : 0;
+        eval_flag = __shfl_sync(0xFFFFFFFF, eval_flag, 0);
+        evaluated = (eval_flag != 0);
+
+        // === NN FORWARD PASS (all 32 threads cooperate) ===
+        if (!evaluated) {
+            BoardState bs;
+            if (lane == 0) {
+                node_to_board(&g_node_pool[node_idx], &bs);
+            }
+            // Broadcast board state to all lanes (128 bytes = 16 uint64_t)
+            uint64_t* bs_words = (uint64_t*)&bs;
+            for (int i = 0; i < 16; i++) {
+                bs_words[i] = __shfl_sync(0xFFFFFFFF, bs_words[i], 0);
+            }
+
+            // PE q-search (single-thread, thread 0)
+            float q_result = 0.0f;
+            if (lane == 0) {
+                q_result = gpu_principal_exchange(&bs);
+            }
+            q_result = __shfl_sync(0xFFFFFFFF, q_result, 0);
+
+            // Forward pass (all 32 threads)
+            float nn_value, nn_k;
+            oracle_net_forward(&bs, q_result, weights, my_scratch,
+                              policy_buf, &nn_value, &nn_k);
+            __syncwarp();
+
+            // Thread 0: set child priors and extract value
+            if (lane == 0) {
+                // Find the parent (the node we expanded, which has the children)
+                int parent_idx = (path_len >= 2) ? path[path_len - 2] : node_idx;
+                MCTSNode* parent = &g_node_pool[parent_idx];
+                if (parent->num_children > 0) {
+                    // Read w_to_move from parent's board
+                    set_child_priors(parent_idx, policy_buf, parent->w_to_move);
+                }
+
+                value = nn_value;
+
+                // Terminal checks
+                if (bs.halfmove >= 100 || is_insufficient_material(&bs)) {
+                    value = 0.0f;
+                }
+            }
+        }
+
+        // === BACKUP (thread 0 only) ===
+        if (lane == 0) {
+            float v = value;
+            for (int i = path_len - 1; i >= 0; i--) {
+                backprop_value(&g_node_pool[path[i]], v);
+                v = -v;
+            }
+        }
+        __syncwarp();
+    }
+}
+
+// ============================================================
+// Host-side NN-mode search
+// ============================================================
+
+static void reset_sim_counter() {
+    int32_t zero = 0;
+    cudaMemcpyToSymbol(g_sim_counter, &zero, sizeof(int32_t));
+}
+
+GPUMctsResult gpu_mcts_search_nn(
+    const BoardState& root_position,
+    int simulations,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,
+    float* d_nn_scratch,
+    int num_warps
+) {
+    reset_tree();
+    upload_root_position(root_position);
+    reset_sim_counter();
+
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    // Launch: one warp (32 threads) per block
+    mcts_kernel_nn<<<num_warps, 32>>>(
+        simulations, enable_koth, c_puct,
+        d_weights, d_nn_scratch, SCRATCH_TOTAL_FLOATS
+    );
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA NN kernel error: %s\n", cudaGetErrorString(err));
+    }
+
+    // Read results (same as classical)
+    MCTSNode root;
+    read_root_node(&root);
+
+    GPUMctsResult result = {};
+    result.total_simulations = root.visit_count;
+    result.nodes_allocated = get_allocated_count();
+
+    if (root.num_children == 0 || root.is_terminal) {
+        result.root_value = root.is_terminal ? root.terminal_value : 0.0f;
+        if (root.num_children > 0) {
+            int best_visits = -1;
+            for (int i = 0; i < root.num_children; i++) {
+                MCTSNode child;
+                read_node(root.first_child_idx + i, &child);
+                if (child.visit_count > best_visits) {
+                    best_visits = child.visit_count;
+                    GPUMove mv = (GPUMove)child.move_from_parent;
+                    result.best_move_from = GPU_MOVE_FROM(mv);
+                    result.best_move_to = GPU_MOVE_TO(mv);
+                    result.best_move_promo = GPU_MOVE_PROMO(mv);
+                }
+            }
+        }
+        return result;
+    }
+
+    int best_visits = -1;
+    for (int i = 0; i < root.num_children; i++) {
+        MCTSNode child;
+        read_node(root.first_child_idx + i, &child);
+        if (child.visit_count > best_visits) {
+            best_visits = child.visit_count;
+            GPUMove mv = (GPUMove)child.move_from_parent;
+            result.best_move_from = GPU_MOVE_FROM(mv);
+            result.best_move_to = GPU_MOVE_TO(mv);
+            result.best_move_promo = GPU_MOVE_PROMO(mv);
+            result.root_value = (child.visit_count > 0)
+                ? -(child.total_value / (float)child.visit_count)
+                : 0.0f;
+        }
+    }
+
+    return result;
 }

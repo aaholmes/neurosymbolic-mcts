@@ -1,6 +1,8 @@
 #include "../mcts_kernel.cuh"
 #include "../tree_store.cuh"
 #include "../movegen.cuh"
+#include "../nn_weights.cuh"
+#include "../nn_forward.cuh"
 #include "test_helpers.cuh"
 
 #include <cstdio>
@@ -307,6 +309,86 @@ void test_play_complete_game(bool& test_failed) {
 }
 
 // ============================================================
+// NN mode tests
+// ============================================================
+
+// Test: NN mode with dummy weights should produce same values as classical
+void test_nn_mode_dummy_equals_classical(bool& test_failed) {
+    BoardState start = make_starting_position();
+
+    // Classical mode
+    GPUMctsResult classical = gpu_mcts_search(start, 100, false);
+
+    // NN mode with dummy weights (zeros → uniform policy, V = tanh(0.326*q))
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    float* d_scratch = alloc_nn_scratch(1);
+    GPUMctsResult nn = gpu_mcts_search_nn(start, 100, false, 1.414f, d_weights, d_scratch, 1);
+
+    printf("[classical=%.2f, nn=%.2f] ", classical.root_value, nn.root_value);
+
+    // Values should be similar (both near 0 for starting position)
+    ASSERT_TRUE(nn.root_value > -0.3f && nn.root_value < 0.3f);
+    ASSERT_EQ(nn.total_simulations, 100);
+
+    free_nn_scratch(d_scratch);
+    free_nn_weights(d_weights);
+}
+
+// Test: NN mode mate-in-1 should still detect exact value
+void test_nn_mode_mate_detection(bool& test_failed) {
+    BoardState bs = parse_fen("6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1");
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    float* d_scratch = alloc_nn_scratch(1);
+
+    GPUMctsResult result = gpu_mcts_search_nn(bs, 50, false, 1.414f, d_weights, d_scratch, 1);
+
+    printf("[value=%.2f] ", result.root_value);
+    ASSERT_NEAR(result.root_value, 1.0f, 0.01f); // mate detected
+
+    free_nn_scratch(d_scratch);
+    free_nn_weights(d_weights);
+}
+
+// Test: NN mode plays a complete game
+void test_nn_mode_play_game(bool& test_failed) {
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    float* d_scratch = alloc_nn_scratch(1);
+
+    BoardState pos = make_starting_position();
+    int half_moves = 0;
+
+    printf("\n    ");
+    while (half_moves < 100) {
+        GPUMctsResult result = gpu_mcts_search_nn(pos, 50, false, 1.414f, d_weights, d_scratch, 1);
+
+        if (result.total_simulations == 0 || result.nodes_allocated <= 1) break;
+        if (result.root_value > 0.99f || result.root_value < -0.99f) {
+            printf("mate "); break;
+        }
+
+        BoardState next_pos;
+        uint16_t best_move;
+        if (!get_best_child_board(&next_pos, &best_move)) break;
+
+        int from = GPU_MOVE_FROM(best_move);
+        int to = GPU_MOVE_TO(best_move);
+        if (half_moves % 2 == 0) printf("%d.", half_moves / 2 + 1);
+        printf("%c%c%c%c ", 'a'+(from%8), '1'+(from/8), 'a'+(to%8), '1'+(to/8));
+        if ((half_moves + 1) % 10 == 0) printf("\n    ");
+
+        pos = next_pos;
+        half_moves++;
+        if (pos.halfmove >= 100) { printf("50-move "); break; }
+    }
+
+    printf("\n    [%d half-moves] ", half_moves);
+    ASSERT_TRUE(half_moves > 4);
+
+    free_nn_scratch(d_scratch);
+    free_nn_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -328,6 +410,9 @@ int main() {
     RUN_TEST(test_qvalue_sign);
     RUN_TEST(test_high_simulations);
     RUN_TEST(test_play_complete_game);
+    RUN_TEST(test_nn_mode_dummy_equals_classical);
+    RUN_TEST(test_nn_mode_mate_detection);
+    RUN_TEST(test_nn_mode_play_game);
 
     printf("\n%d/%d tests passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);
