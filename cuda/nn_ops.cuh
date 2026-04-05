@@ -84,4 +84,10 @@ __device__ void warp_board_to_planes(
     float* planes           // [17*64] output
 );
 
+// --- AlphaZero move encoding ---
+// Maps a GPUMove to a policy tensor index (0..4671).
+// Uses 73-plane encoding: 56 queen slides + 8 knight + 9 underpromotions.
+// For Black (w_to_move=false), flips the move vertically before encoding.
+__device__ int move_to_policy_index(GPUMove mv, bool w_to_move);
+
 #endif // __CUDACC__

@@ -201,6 +201,77 @@ __device__ void warp_log_softmax(
     }
 }
 
+__device__ int move_to_policy_index(GPUMove mv, bool w_to_move) {
+    int from = GPU_MOVE_FROM(mv);
+    int to = GPU_MOVE_TO(mv);
+    int promo = GPU_MOVE_PROMO(mv);
+
+    // Flip for Black (STM-relative encoding)
+    if (!w_to_move) {
+        from ^= 56; // flip rank: rank 0↔7, 1↔6, etc.
+        to ^= 56;
+    }
+
+    int src_rank = from / 8;
+    int src_file = from % 8;
+    int dst_rank = to / 8;
+    int dst_file = to % 8;
+
+    int dx = dst_file - src_file;
+    int dy = dst_rank - src_rank;
+
+    int plane;
+
+    // Case A: Underpromotion (N=1, B=2, R=3 — not queen=4 and not 0=none)
+    if (promo >= 1 && promo <= 3) {
+        int direction_offset;
+        if (dx == 0) direction_offset = 0;       // straight
+        else if (dx == -1) direction_offset = 1;  // capture left
+        else direction_offset = 2;                // capture right (dx == 1)
+
+        int piece_offset;
+        if (promo == KNIGHT) piece_offset = 0;      // 1
+        else if (promo == BISHOP) piece_offset = 3;  // 2
+        else piece_offset = 6;                        // ROOK = 3
+
+        plane = 64 + direction_offset + piece_offset;
+    }
+    // Case B: Knight move (|dx*dy| == 2)
+    else if (dx * dy == 2 || dx * dy == -2) {
+        int knight_idx;
+        if (dx == 1 && dy == 2) knight_idx = 0;
+        else if (dx == 2 && dy == 1) knight_idx = 1;
+        else if (dx == 2 && dy == -1) knight_idx = 2;
+        else if (dx == 1 && dy == -2) knight_idx = 3;
+        else if (dx == -1 && dy == -2) knight_idx = 4;
+        else if (dx == -2 && dy == -1) knight_idx = 5;
+        else if (dx == -2 && dy == 1) knight_idx = 6;
+        else knight_idx = 7; // dx == -1, dy == 2
+
+        plane = 56 + knight_idx;
+    }
+    // Case C: Queen slide (includes queen promotion)
+    else {
+        int direction;
+        if (dx == 0 && dy > 0) direction = 0;      // N
+        else if (dx > 0 && dy > 0) direction = 1;   // NE
+        else if (dx > 0 && dy == 0) direction = 2;  // E
+        else if (dx > 0 && dy < 0) direction = 3;   // SE
+        else if (dx == 0 && dy < 0) direction = 4;  // S
+        else if (dx < 0 && dy < 0) direction = 5;   // SW
+        else if (dx < 0 && dy == 0) direction = 6;  // W
+        else direction = 7;                           // NW (dx < 0, dy > 0)
+
+        int abs_dx = dx < 0 ? -dx : dx;
+        int abs_dy = dy < 0 ? -dy : dy;
+        int distance = abs_dx > abs_dy ? abs_dx : abs_dy;
+
+        plane = direction * 7 + (distance - 1);
+    }
+
+    return from * 73 + plane;
+}
+
 __device__ void warp_board_to_planes(
     const BoardState* bs,
     float* planes

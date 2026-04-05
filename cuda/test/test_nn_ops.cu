@@ -564,6 +564,86 @@ void test_scratch_allocation(bool& test_failed) {
 }
 
 // ============================================================
+// Move encoding tests (AlphaZero 73-plane encoding)
+// ============================================================
+
+__global__ void kernel_move_to_index(GPUMove mv, bool w_to_move, int* result) {
+    *result = move_to_policy_index(mv, w_to_move);
+}
+
+void test_move_encoding_queen_slide(bool& test_failed) {
+    int* d_result; int h_result;
+    cudaMalloc(&d_result, 4);
+
+    // e4(28)→e5(36): N, dist 1. Plane = 0*7+0 = 0. Index = 28*73+0 = 2044
+    kernel_move_to_index<<<1,1>>>(MAKE_GPU_MOVE(28, 36, 0), true, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+    ASSERT_EQ(h_result, 28 * 73 + 0);
+
+    // e4(28)→h4(31): E, dist 3. Plane = 2*7+2 = 16. Index = 28*73+16
+    kernel_move_to_index<<<1,1>>>(MAKE_GPU_MOVE(28, 31, 0), true, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+    ASSERT_EQ(h_result, 28 * 73 + 16);
+
+    cudaFree(d_result);
+}
+
+void test_move_encoding_knight(bool& test_failed) {
+    int* d_result; int h_result;
+    cudaMalloc(&d_result, 4);
+
+    // e4(28)→f6(45): dx=1,dy=2 → knight idx 0. Plane = 56. Index = 28*73+56
+    kernel_move_to_index<<<1,1>>>(MAKE_GPU_MOVE(28, 45, 0), true, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+    ASSERT_EQ(h_result, 28 * 73 + 56);
+
+    cudaFree(d_result);
+}
+
+void test_move_encoding_underpromotion(bool& test_failed) {
+    int* d_result; int h_result;
+    cudaMalloc(&d_result, 4);
+
+    // a7(48)→a8(56) promote to Rook(3). dx=0, Plane = 64+0+6 = 70. Index = 48*73+70
+    kernel_move_to_index<<<1,1>>>(MAKE_GPU_MOVE(48, 56, ROOK), true, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+    ASSERT_EQ(h_result, 48 * 73 + 70);
+
+    cudaFree(d_result);
+}
+
+void test_move_encoding_black_flip(bool& test_failed) {
+    int* d_result; int h_result;
+    cudaMalloc(&d_result, 4);
+
+    // Black plays e7(52)→e5(36): flip → e2(12)→e4(28). N, dist 2. Plane = 0*7+1 = 1
+    // Index = 12*73+1 = 877
+    kernel_move_to_index<<<1,1>>>(MAKE_GPU_MOVE(52, 36, 0), false, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+    ASSERT_EQ(h_result, 12 * 73 + 1);
+
+    cudaFree(d_result);
+}
+
+void test_move_encoding_castling(bool& test_failed) {
+    int* d_result; int h_result;
+    cudaMalloc(&d_result, 4);
+
+    // White O-O: e1(4)→g1(6): E, dist 2. Plane = 2*7+1 = 15. Index = 4*73+15 = 307
+    kernel_move_to_index<<<1,1>>>(MAKE_GPU_MOVE(4, 6, 0), true, d_result);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_result, d_result, 4, cudaMemcpyDeviceToHost);
+    ASSERT_EQ(h_result, 4 * 73 + 15);
+
+    cudaFree(d_result);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -591,6 +671,11 @@ int main() {
     RUN_TEST(test_full_forward_dummy_weights);
     RUN_TEST(test_forward_pass_q_result_sensitivity);
     RUN_TEST(test_scratch_allocation);
+    RUN_TEST(test_move_encoding_queen_slide);
+    RUN_TEST(test_move_encoding_knight);
+    RUN_TEST(test_move_encoding_underpromotion);
+    RUN_TEST(test_move_encoding_black_flip);
+    RUN_TEST(test_move_encoding_castling);
 
     printf("\n%d/%d tests passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);
