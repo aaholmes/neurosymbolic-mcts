@@ -22,6 +22,7 @@ add_library(caissawary_cuda STATIC
     mcts_kernel.cu
     nn_weights.cu
     nn_ops.cu
+    nn_forward.cu
 )
 target_include_directories(caissawary_cuda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(caissawary_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

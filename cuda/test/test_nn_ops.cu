@@ -1,5 +1,6 @@
 #include "../nn_weights.cuh"
 #include "../nn_ops.cuh"
+#include "../nn_forward.cuh"
 #include "test_helpers.cuh"
 #include <cstdio>
 #include <cstring>
@@ -255,6 +256,92 @@ void test_log_softmax(bool& test_failed) {
 }
 
 // ============================================================
+// Full forward pass test
+// ============================================================
+
+__global__ void kernel_forward_pass(
+    const BoardState* bs, float q_result,
+    const OracleNetWeights* weights, float* scratch,
+    float* policy_out, float* value_out, float* k_out
+) {
+    oracle_net_forward(bs, q_result, weights, scratch, policy_out, value_out, k_out);
+}
+
+void test_full_forward_dummy_weights(bool& test_failed) {
+    // With zero weights: all convolutions output 0, BN normalizes to 0 (gamma=0),
+    // policy logits are all 0 → log_softmax gives uniform: log(1/4672)
+    // v_logit = 0, k = 0.47 * ln(2) ≈ 0.326
+    // V = tanh(0 + 0.326 * q_result)
+
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    ASSERT_TRUE(d_weights != nullptr);
+
+    float* d_scratch = alloc_nn_scratch(1);
+    ASSERT_TRUE(d_scratch != nullptr);
+
+    BoardState bs = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float* d_policy;
+    float* d_value;
+    float* d_k;
+    cudaMalloc(&d_policy, NN_POLICY_SIZE * sizeof(float));
+    cudaMalloc(&d_value, sizeof(float));
+    cudaMalloc(&d_k, sizeof(float));
+
+    // Set stack size for forward pass (deep call stack)
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    float q_result = 1.5f; // +1.5 pawns
+    kernel_forward_pass<<<1, 32>>>(d_bs, q_result, d_weights, d_scratch,
+                                    d_policy, d_value, d_k);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA error: %s ", cudaGetErrorString(err));
+        test_failed = true;
+        cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k);
+        free_nn_scratch(d_scratch); free_nn_weights(d_weights);
+        return;
+    }
+
+    // Read back results
+    float h_policy[NN_POLICY_SIZE];
+    float h_value, h_k;
+    cudaMemcpy(h_policy, d_policy, NN_POLICY_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_value, d_value, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_k, d_k, sizeof(float), cudaMemcpyDeviceToHost);
+
+    // k should be 0.47 * ln(2) ≈ 0.326
+    float expected_k = 0.47f * logf(2.0f);
+    ASSERT_NEAR(h_k, expected_k, 0.01f);
+
+    // Value should be tanh(0 + 0.326 * 1.5) = tanh(0.489) ≈ 0.453
+    float expected_v = tanhf(expected_k * q_result);
+    ASSERT_NEAR(h_value, expected_v, 0.05f);
+
+    // Policy should be approximately uniform: log(1/4672) ≈ -8.449
+    float expected_log_prob = logf(1.0f / NN_POLICY_SIZE);
+    ASSERT_NEAR(h_policy[0], expected_log_prob, 0.1f);
+    ASSERT_NEAR(h_policy[NN_POLICY_SIZE - 1], expected_log_prob, 0.1f);
+
+    // Verify softmax sums to 1
+    float prob_sum = 0.0f;
+    for (int i = 0; i < NN_POLICY_SIZE; i++) {
+        prob_sum += expf(h_policy[i]);
+    }
+    ASSERT_NEAR(prob_sum, 1.0f, 0.01f);
+
+    printf("[k=%.3f, v=%.3f, policy_uniform=%.2f] ",
+           h_k, h_value, h_policy[0]);
+
+    cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k);
+    free_nn_scratch(d_scratch);
+    free_nn_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -271,6 +358,7 @@ int main() {
     RUN_TEST(test_im2col_single_channel);
     RUN_TEST(test_board_encoding_starting_pos);
     RUN_TEST(test_log_softmax);
+    RUN_TEST(test_full_forward_dummy_weights);
 
     printf("\n%d/%d tests passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);
