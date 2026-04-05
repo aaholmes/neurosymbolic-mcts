@@ -20,6 +20,7 @@ add_library(caissawary_cuda STATIC
     quiescence.cu
     quick_checks.cu
     mcts_kernel.cu
+    nn_weights.cu
 )
 target_include_directories(caissawary_cuda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(caissawary_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -47,3 +48,8 @@ set_target_properties(test_quick_checks PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_executable(test_mcts_kernel test/test_mcts_kernel.cu)
 target_link_libraries(test_mcts_kernel caissawary_cuda)
 set_target_properties(test_mcts_kernel PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# NN ops tests
+add_executable(test_nn_ops test/test_nn_ops.cu)
+target_link_libraries(test_nn_ops caissawary_cuda)
+set_target_properties(test_nn_ops PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
