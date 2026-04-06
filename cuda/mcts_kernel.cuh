@@ -96,3 +96,40 @@ GPUMctsResult gpu_mcts_search_nn_block(
     float* d_policy_bufs,
     int num_blocks
 );
+
+// ============================================================
+// Multi-tree eval mode (N independent trees, 1 block each)
+// ============================================================
+
+// Result of one tree's evaluation.
+struct TreeEvalResult {
+    int best_move_from;
+    int best_move_to;
+    int best_move_promo;
+    float root_value;
+    int total_simulations;
+    int nodes_allocated;
+};
+
+// Run N independent MCTS searches on N different root positions.
+// Each tree gets its own block (256 threads) and partitioned node pool.
+// All trees share the same NN weights and policy buffers.
+//
+// num_trees: number of independent trees (typically 8-16)
+// max_nodes_per_tree: node pool size per tree (e.g. 4096)
+// root_positions: host array of N BoardStates
+// h_results: host array of N TreeEvalResult (written on return)
+// d_policy_bufs: pre-allocated [num_trees × NN_POLICY_SIZE] floats
+//
+// Returns number of trees processed.
+int gpu_mcts_eval_trees(
+    const BoardState* root_positions,
+    int num_trees,
+    int simulations_per_tree,
+    int max_nodes_per_tree,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,
+    float* d_policy_bufs,
+    TreeEvalResult* h_results
+);

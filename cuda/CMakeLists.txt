@@ -67,3 +67,8 @@ set_target_properties(test_block_ops PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_executable(test_profile_latency test/test_profile_latency.cu)
 target_link_libraries(test_profile_latency caissawary_cuda)
 set_target_properties(test_profile_latency PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Multi-tree eval: N independent MCTS trees running in parallel
+add_executable(test_multi_tree_eval test/test_multi_tree_eval.cu)
+target_link_libraries(test_multi_tree_eval caissawary_cuda)
+set_target_properties(test_multi_tree_eval PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
