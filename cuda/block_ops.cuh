@@ -42,10 +42,23 @@ __device__ void block_bn_relu_1ch(
 // weights:     [C_out, C_in, 9] in global memory (OIHW, 3x3 kernel flattened)
 // output_smem: [C_out, 64] in shared memory
 // input_smem and output_smem must NOT alias.
+//
+// Two versions:
+//   block_conv_3x3:       reads weights directly from global memory
+//   block_conv_3x3_smem_w: caches weights in shared memory (smem_weights,
+//     size C_out*9 floats). Faster: each weight read once from global memory.
 __device__ void block_conv_3x3(
     const float* __restrict__ input_smem,
     const float* __restrict__ weights,
     float* __restrict__ output_smem,
+    int C_in, int C_out
+);
+
+__device__ void block_conv_3x3_smem_w(
+    const float* __restrict__ input_smem,
+    const float* __restrict__ weights,
+    float* __restrict__ output_smem,
+    float* __restrict__ smem_weights,
     int C_in, int C_out
 );
 

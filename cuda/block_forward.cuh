@@ -8,27 +8,32 @@
 // ============================================================
 // Shared memory layout for oracle_net_forward_block
 //
-// buf1 (smem+0):       work buffer [128, 64] = 32 KB
+// buf1 (smem+0):          work buffer [128, 64] = 32 KB
 //   — board planes at start, policy conv output, v_feat during value head
-// buf2 (smem+8192):    backbone buffer [128, 64] = 32 KB
+// buf2 (smem+8192):       backbone buffer [128, 64] = 32 KB
 //   — start conv output, kept as backbone through policy head
-// smem_reduce (+16384): 256 floats = 1 KB, multipurpose:
+// smem_reduce (+16384):   256 floats = 1 KB, multipurpose:
 //   — SE avg pool  [0:128]
 //   — SE FC1 out   [128:136]
 //   — log-softmax reduction [0:256]
 //   — value FC1 out [0:256]
-// Total: 16640 floats = 66,560 bytes ≈ 65 KB (fits in 96 KB per SM)
+// smem_weights (+16640):  1152 floats = 4.5 KB
+//   — 3x3 conv weight tile cache: C_out * 9 = 128 * 9 = 1152
+//   — loaded once per input channel, reused by all 256 threads
+// Total: 17792 floats = 71,168 bytes ≈ 69.5 KB (fits in 96 KB per SM)
 // ============================================================
 
 constexpr int BLOCK_BUF_SIZE    = NN_HIDDEN_DIM * 64;   // 8192 floats per buffer
 constexpr int BLOCK_REDUCE_SIZE = 256;                    // reduction workspace
+constexpr int BLOCK_WEIGHTS_SIZE = NN_HIDDEN_DIM * 9;    // 1152 floats for conv weight tile
 
 constexpr int BLOCK_BUF1_OFFSET   = 0;
 constexpr int BLOCK_BUF2_OFFSET   = BLOCK_BUF1_OFFSET + BLOCK_BUF_SIZE;     // 8192
 constexpr int BLOCK_REDUCE_OFFSET = BLOCK_BUF2_OFFSET + BLOCK_BUF_SIZE;     // 16384
+constexpr int BLOCK_WEIGHTS_OFFSET = BLOCK_REDUCE_OFFSET + BLOCK_REDUCE_SIZE; // 16640
 
-constexpr int BLOCK_SMEM_FLOATS = BLOCK_REDUCE_OFFSET + BLOCK_REDUCE_SIZE;  // 16640
-constexpr int BLOCK_SMEM_BYTES  = BLOCK_SMEM_FLOATS * 4;                    // 66,560 bytes
+constexpr int BLOCK_SMEM_FLOATS = BLOCK_WEIGHTS_OFFSET + BLOCK_WEIGHTS_SIZE;  // 17792
+constexpr int BLOCK_SMEM_BYTES  = BLOCK_SMEM_FLOATS * 4;                      // 71,168 bytes
 
 // ============================================================
 // Full SE-ResNet forward pass using 256-thread block cooperation.

@@ -39,6 +39,7 @@ __device__ void oracle_net_forward_block(
     float* buf1        = smem + BLOCK_BUF1_OFFSET;   // work buffer [128, 64]
     float* buf2        = smem + BLOCK_BUF2_OFFSET;   // backbone buffer [128, 64]
     float* smem_reduce = smem + BLOCK_REDUCE_OFFSET; // [256] multipurpose
+    float* smem_weights = smem + BLOCK_WEIGHTS_OFFSET; // [1152] weight tile cache
 
     // SE workspace (within smem_reduce, reused each block)
     float* smem_se_avg = smem_reduce;                // [channels = 128]
@@ -48,7 +49,7 @@ __device__ void oracle_net_forward_block(
     block_board_to_planes(bs, buf1);
 
     // === 2. Input conv(17->128, k=3) + BN + ReLU -> buf2 ===
-    block_conv_3x3(buf1, weights->start_conv_weight, buf2,
+    block_conv_3x3_smem_w(buf1, weights->start_conv_weight, buf2, smem_weights,
                    NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
     block_bn_relu(buf2, weights->start_bn.weight, weights->start_bn.bias,
                   weights->start_bn.running_mean, weights->start_bn.running_var,
@@ -85,13 +86,13 @@ __device__ void oracle_net_forward_block(
         res30 = buf2[tid + 30*256]; res31 = buf2[tid + 31*256];
 
         // conv1: buf2 -> buf1, BN + ReLU
-        block_conv_3x3(buf2, blk.conv1_weight, buf1, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+        block_conv_3x3_smem_w(buf2, blk.conv1_weight, buf1, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
         block_bn_relu(buf1, blk.bn1.weight, blk.bn1.bias,
                       blk.bn1.running_mean, blk.bn1.running_var, NN_HIDDEN_DIM, true);
 
         // conv2: buf1 -> buf2, BN (no ReLU)
         // buf2 is overwritten here; the residual lives in registers above.
-        block_conv_3x3(buf1, blk.conv2_weight, buf2, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+        block_conv_3x3_smem_w(buf1, blk.conv2_weight, buf2, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
         block_bn_relu(buf2, blk.bn2.weight, blk.bn2.bias,
                       blk.bn2.running_mean, blk.bn2.running_var, NN_HIDDEN_DIM, false);
 
@@ -141,7 +142,7 @@ __device__ void oracle_net_forward_block(
     // === 4. Policy head ===
 
     // Policy conv(128->128, k=3) + BN + ReLU: buf2 -> buf1
-    block_conv_3x3(buf2, weights->p_conv_weight, buf1, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+    block_conv_3x3_smem_w(buf2, weights->p_conv_weight, buf1, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
     block_bn_relu(buf1, weights->p_bn.weight, weights->p_bn.bias,
                   weights->p_bn.running_mean, weights->p_bn.running_var,
                   NN_HIDDEN_DIM, true);

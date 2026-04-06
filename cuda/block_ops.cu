@@ -46,32 +46,150 @@ __device__ void block_bn_relu_1ch(
     __syncthreads();
 }
 
+// Shared memory weight buffer for block_conv_3x3.
+// Caller must provide smem_weights pointing to at least C_OUT * 9 floats
+// in shared memory. For C_OUT=128: 1152 floats = 4608 bytes.
+// This is provided by block_forward.cu's shared memory layout.
+__device__ void block_conv_3x3_smem_w(
+    const float* __restrict__ input_smem,
+    const float* __restrict__ weights,
+    float* __restrict__ output_smem,
+    float* __restrict__ smem_weights,
+    int C_in, int C_out
+) {
+    int tid = threadIdx.x;
+
+    // Strategy: iterate over input channels. For each input channel:
+    //   1. All 256 threads cooperatively load C_out*9 weights into shared memory
+    //   2. Each thread computes its output elements using cached weights
+    //   3. Accumulate partial results across input channels
+    //
+    // Weight load: C_out*9 = 1152 floats. 256 threads → 5 passes of 256 = 1280 slots.
+    // We stripe: thread t loads weights[t], weights[t+256], ...
+    //
+    // Each thread owns C_out*64/256 = 32 output elements (for C_out=128).
+    // These are unrolled as 32 scalar accumulators.
+
+    // Precompute output element assignments
+    int spat[32];
+    int oy[32], ox[32];
+    int out_ch[32];
+    #pragma unroll
+    for (int k = 0; k < 32; k++) {
+        int idx = tid + k * 256;
+        out_ch[k] = idx / 64;
+        spat[k] = idx % 64;
+        oy[k] = spat[k] / 8;
+        ox[k] = spat[k] % 8;
+    }
+
+    // 32 accumulators
+    float a[32];
+    #pragma unroll
+    for (int k = 0; k < 32; k++) a[k] = 0.0f;
+
+    // Weight buffer in shared memory: smem_weights[out_ch * 9 + ki]
+    // Total: C_out * 9 floats
+
+    for (int c = 0; c < C_in; c++) {
+        // Step 1: Load this input channel's weights for ALL output channels
+        // weights layout in global: [out_ch][c][ki] → linear offset out_ch*C_in*9 + c*9 + ki
+        // We want: smem_weights[out_ch * 9 + ki]
+        const int W_PER_THREAD = (C_out * 9 + 255) / 256;  // 5 for C_out=128
+        #pragma unroll
+        for (int i = 0; i < W_PER_THREAD; i++) {
+            int wi = tid + i * 256;
+            if (wi < C_out * 9) {
+                int out_ch_w = wi / 9;
+                int ki = wi % 9;
+                smem_weights[wi] = weights[out_ch_w * C_in * 9 + c * 9 + ki];
+            }
+        }
+        __syncthreads();
+
+        // Step 2: Compute convolutions using shared memory weights
+        const float* ic = input_smem + c * 64;
+
+        #pragma unroll
+        for (int k = 0; k < 32; k++) {
+            int oc = out_ch[k];
+            int oy_k = oy[k], ox_k = ox[k];
+            const float* w = smem_weights + oc * 9;
+            // Center always valid
+            float acc = w[4] * ic[oy_k * 8 + ox_k];
+            // Row above
+            if (oy_k > 0) {
+                if (ox_k > 0) acc += w[0] * ic[(oy_k-1)*8 + (ox_k-1)];
+                acc += w[1] * ic[(oy_k-1)*8 +  ox_k     ];
+                if (ox_k < 7) acc += w[2] * ic[(oy_k-1)*8 + (ox_k+1)];
+            }
+            // Same row
+            if (ox_k > 0) acc += w[3] * ic[ oy_k   *8 + (ox_k-1)];
+            if (ox_k < 7) acc += w[5] * ic[ oy_k   *8 + (ox_k+1)];
+            // Row below
+            if (oy_k < 7) {
+                if (ox_k > 0) acc += w[6] * ic[(oy_k+1)*8 + (ox_k-1)];
+                acc += w[7] * ic[(oy_k+1)*8 +  ox_k     ];
+                if (ox_k < 7) acc += w[8] * ic[(oy_k+1)*8 + (ox_k+1)];
+            }
+            a[k] += acc;
+        }
+        __syncthreads();
+    }
+
+    // Write results
+    #pragma unroll
+    for (int k = 0; k < 32; k++) {
+        int idx = tid + k * 256;
+        if (idx < C_out * 64)
+            output_smem[idx] = a[k];
+    }
+    __syncthreads();
+}
+
+// Convenience wrapper: allocates smem_weights from caller's shared memory pool.
+// For use when caller has extra shared memory available.
+// The smem_weights pointer must point to at least C_out * 9 floats.
 __device__ void block_conv_3x3(
     const float* __restrict__ input_smem,
     const float* __restrict__ weights,
     float* __restrict__ output_smem,
     int C_in, int C_out
 ) {
+    // This version reads weights directly from global memory (no smem caching).
+    // Use block_conv_3x3_smem_w() for the optimized version.
     int tid = threadIdx.x;
     int total = C_out * 64;
+
     for (int out_idx = tid; out_idx < total; out_idx += blockDim.x) {
         int out_ch = out_idx / 64;
         int spatial = out_idx % 64;
         int oy = spatial / 8;
         int ox = spatial % 8;
         float acc = 0.0f;
-        // weights layout: [C_out, C_in, 9] = OIHW with 3x3 flattened
-        // ki = ky*3+kx ranges 0..8, matching PyTorch OIHW (ki=0 is top-left)
         const float* w_base = weights + out_ch * C_in * 9;
+
         for (int c = 0; c < C_in; c++) {
-            const float* w_row = w_base + c * 9;
-            const float* in_ch = input_smem + c * 64;
-            for (int ki = 0; ki < 9; ki++) {
-                int iy = oy + ki / 3 - 1;
-                int ix = ox + ki % 3 - 1;
-                if (iy >= 0 && iy < 8 && ix >= 0 && ix < 8) {
-                    acc += w_row[ki] * in_ch[iy * 8 + ix];
-                }
+            float w0 = w_base[c * 9 + 0], w1 = w_base[c * 9 + 1], w2 = w_base[c * 9 + 2];
+            float w3 = w_base[c * 9 + 3], w4 = w_base[c * 9 + 4], w5 = w_base[c * 9 + 5];
+            float w6 = w_base[c * 9 + 6], w7 = w_base[c * 9 + 7], w8 = w_base[c * 9 + 8];
+
+            const float* ic = input_smem + c * 64;
+
+            if (oy > 0) {
+                if (ox > 0) acc += w0 * ic[(oy-1)*8+(ox-1)];
+                              acc += w1 * ic[(oy-1)*8+ox    ];
+                if (ox < 7) acc += w2 * ic[(oy-1)*8+(ox+1)];
+            }
+            {
+                if (ox > 0) acc += w3 * ic[ oy   *8+(ox-1)];
+                              acc += w4 * ic[ oy   *8+ox    ];
+                if (ox < 7) acc += w5 * ic[ oy   *8+(ox+1)];
+            }
+            if (oy < 7) {
+                if (ox > 0) acc += w6 * ic[(oy+1)*8+(ox-1)];
+                              acc += w7 * ic[(oy+1)*8+ox    ];
+                if (ox < 7) acc += w8 * ic[(oy+1)*8+(ox+1)];
             }
         }
         output_smem[out_idx] = acc;
