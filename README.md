@@ -64,6 +64,8 @@ Profiled over 10 self-play games (400 simulations/move, KOTH enabled, gen_18 2M-
 | KOTH-in-3 | CPU | 206,362 | 149 us | 361 us | 780 | 0.19 | 8% |
 | Q-search | CPU | 180,326 | 8 us | 15 us | 15 | 0.53 | <1% |
 
+The GPU-resident MCTS kernel eliminates the CPU/GPU split entirely: 400 simulations in **115 ms** (36 blocks, 7.3× faster) vs 840 ms above. See [GPU MCTS](#gpu-mcts-cuda) for details.
+
 NN inference breaks down into three phases: CPU-to-GPU tensor transfer (49 us), GPU forward pass (1,122 us), and GPU-to-CPU result transfer (41 us). The GPU forward pass dominates at 92% of NN time — transfer overhead is negligible. Mate search uses pure minimax (not alpha-beta) since iterative deepening already finds the shortest mate and within each depth the question is binary: "is there a forced mate?" The solver short-circuits immediately — attacker on first success, defender on first refutation — matching KOTH's `solve_koth` pattern. Five optimizations reduced cost from 1.08 us/node to 0.37 us/node (cumulative 66%): (1) a `gives_check()` pre-filter that skips `make_move` entirely for non-checking moves on attacker plies, (2) converting from stateful `BoardStack` to stateless `&Board` with `apply_move_to_board`, (3) `is_legal_after_move()` before `apply_move_to_board` to avoid cloning the board for illegal pseudo-legal moves, (4) removing atomic node budgets and alpha-beta bookkeeping in favor of a plain counter, and (5) batched per-piece checkmate detection at depth-0 leaves — generating moves by piece type in priority order (king first via direct bitboard, then double-check detection, then knight/bishop/rook/queen/pawn) and aborting as soon as any legal evasion is found, avoiding full movegen in the ~70-80% of leaves where a king move suffices. KOTH-in-3 at 0.19 us/node benefits from direct king-move generation on root-side advancing turns: `k_move_bitboard[king_sq] & target_mask & !friendly_occ` yields exactly the 1-3 valid king destinations without calling `gen_pseudo_legal_moves` at all, skipping the full movegen that would produce ~35 moves only to discard ~30 non-king moves. When the king is already in the target ring, full movegen is used with a post-apply ring check. Q-search is effectively free relative to the other operations, running 220x faster than a single NN call while providing the PeSTO evaluation that grounds every leaf evaluation. Q-search completes naturally 100% of the time with a mean depth of 3.3 (max 20), confirming the depth limit is sufficient.
 
 The `profile_engine` binary reproduces these measurements: `./target/release/profile_engine --model <path> --games 10 --simulations 400 --koth`. Optional `--koth-depth N` (default 3) and `--mate-depth N` (default 5) flags control search depth for profiling deeper configurations.
@@ -233,37 +235,59 @@ The `--qsearch` flag selects the quiescence search variant: `pe` (principal exch
 
 ## GPU MCTS (CUDA)
 
-A fully GPU-resident MCTS implementation in `cuda/`. The entire search loop — tree traversal, node expansion, quick checks, quiescence search, and neural network inference — runs inside a persistent CUDA kernel with no CPU interaction during search.
+A fully GPU-resident MCTS implementation in `cuda/`. The entire search loop — tree traversal, node expansion, quick checks, quiescence search, and neural network inference — runs inside a persistent CUDA kernel with no CPU interaction during search. No cuBLAS, no cuDNN, no host round-trips.
 
-**Current status:**
+### Performance: GPU-Resident vs CPU+PyTorch
+
+Profiled on RTX 5060 Ti with gen_18 OracleNet (6×128, ~2M params), 400 simulations per move:
+
+| Configuration | Per-move time | vs CPU baseline |
+|---|---|---|
+| CPU + PyTorch GPU inference (baseline) | 840 ms | 1.0× |
+| GPU-resident, 1 block (256 threads) | 3,864 ms | 0.2× |
+| GPU-resident, 8 blocks | 484 ms | 1.7× |
+| GPU-resident, 16 blocks | 243 ms | 3.5× |
+| GPU-resident, 36 blocks (1 per SM) | 115 ms | **7.3×** |
+
+The single-block GPU kernel is slower than CPU because each forward pass takes 9.57 ms (vs 1.77 ms amortized for PyTorch's batched cuDNN). The speedup comes from multi-block parallelism: 36 blocks run concurrently on 36 SMs, each doing ~11 sequential simulations. Scaling is near-perfectly linear up to the SM count (36), then plateaus.
+
+The forward pass bottleneck is the scalar FP32 convolution algorithm: 12.7 GFLOPS achieved vs 200 TFLOPS peak (0.006% utilization), dominated by 640 `__syncthreads()` barriers per conv for weight tiling. FP16/FP8 Tensor Core inference is the path to sub-millisecond forward passes.
+
+### Components
 
 | Component | Status | Tests |
 |-----------|--------|-------|
-| Tree store (atomic alloc, expansion locks, backprop) | Complete | 7/7 pass |
-| Move generator (magic bitboards, full legality) | Complete | 30/30 perft pass |
-| Quick checks (mate-in-1, KOTH-in-1) | Complete | 8/8 pass |
-| PeSTO eval + extended q-search + PE | Complete | 11/11 pass |
-| MCTS kernel (classical mode) | Complete | 10/10 pass |
-| NN weight struct + loading | Complete | 2/2 pass |
-| Warp-cooperative GEMM, im2col, BN, SE, softmax | Complete | 14/14 pass |
-| Full OracleNet forward pass (device-side) | Complete | 2/2 pass |
-| AlphaZero move encoding (73-plane) | Complete | 5/5 pass |
-| **NN-mode MCTS kernel (forward pass + policy priors)** | **Complete** | **3/3 pass** |
-| Multi-warp scaling + real model weights | In progress | — |
+| Tree store (atomic alloc, expansion locks, backprop) | Complete | 7/7 |
+| Move generator (magic bitboards, full legality) | Complete | 30/30 |
+| Quick checks (mate-in-1, KOTH-in-1) | Complete | 8/8 |
+| PeSTO eval + extended q-search + PE | Complete | 11/11 |
+| MCTS kernel (classical mode) | Complete | 10/10 |
+| NN weight struct + loading from PyTorch export | Complete | 2/2 |
+| Warp-cooperative NN ops (GEMM, im2col, BN, SE, softmax) | Complete | 14/14 |
+| Block-cooperative NN ops (256-thread, shared memory) | Complete | 9/9 |
+| Full OracleNet forward pass (warp + block mode) | Complete | 2/2 |
+| AlphaZero move encoding (73-plane) | Complete | 5/5 |
+| NN-mode MCTS kernel (warp, 32 threads) | Complete | 3/3 |
+| Block-mode MCTS kernel (256 threads, shared memory) | Complete | 9/9 |
+| Multi-block scaling (N blocks, 1 tree) | Complete | — |
+| Multi-tree eval (N trees, 1 block each) | Complete | — |
 
-The NN-mode kernel runs the complete SE-ResNet forward pass (6 blocks, 128 channels, ~2M parameters) as `__device__` functions — all 32 threads in a warp cooperate on the matrix multiplies. Shared weights (7.6 MB, read-only) + per-warp scratch (374 KB). No cuBLAS, no cuDNN, no host round-trips.
+**Two inference paths:** The warp-cooperative path (32 threads, 374 KB global scratch per warp, 131 ms/forward pass) served as a correctness proof. The block-cooperative path (256 threads, 65 KB shared memory activations, 9.57 ms/forward pass) is 13.7× faster and is used for all search. Direct 3×3 convolution with shared-memory weight tiling eliminates the 288 KB im2col buffer; residual shortcuts are saved in 32 named float registers per thread to stay within the 96 KB shared memory limit.
 
-With dummy weights (zeros), the NN-mode kernel produces identical behavior to classical mode and plays complete games to checkmate. The remaining step is exporting trained model weights from PyTorch and testing with real NN evaluations.
+**Multi-tree eval** (`gpu_mcts_eval_trees`) runs N independent MCTS searches in parallel, one block per tree, with partitioned node pools. Supports both classical and NN modes.
 
 ```bash
-cd cuda && mkdir -p build && cd build && cmake .. && make
+cd cuda && mkdir -p build && cd build && cmake .. -DCMAKE_CUDA_ARCHITECTURES=89 && make
 cd /path/to/neurosymbolic-mcts  # run from project root for table paths
-cuda/build/test_mcts_kernel      # 13/13 tests (classical + NN mode)
-cuda/build/test_nn_ops           # 21/21 tests (GEMM, im2col, BN, forward pass, move encoding)
-cuda/build/test_movegen          # 30/30 perft tests
-cuda/build/test_quick_checks     # 8/8 tests
-cuda/build/test_quiescence       # 11/11 tests
-cuda/build/test_tree_store       # 7/7 tests
+cuda/build/test_block_ops       # 9/9 (block conv, BN, SE, forward pass, MCTS)
+cuda/build/test_mcts_kernel     # 13/13 (classical + NN mode)
+cuda/build/test_nn_ops          # 21/21 (GEMM, im2col, BN, forward pass, move encoding)
+cuda/build/test_multi_tree_eval # multi-tree classical + NN
+cuda/build/test_movegen         # 30/30 perft
+cuda/build/test_quick_checks    # 8/8
+cuda/build/test_quiescence      # 11/11
+cuda/build/test_tree_store      # 7/7
+cuda/build/test_profile_latency /tmp/weights.bin  # forward pass + MCTS benchmarks
 ```
 
 ## Further Reading

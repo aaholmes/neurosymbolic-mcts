@@ -508,19 +508,30 @@ The quiescence search uses the principal exchange (PE) variant: follow the singl
 
 ### Current implementation status
 
-The GPU MCTS kernel runs in both classical mode and NN mode. Classical mode (`V = tanh(0.326 * q_result)` with uniform policy priors) validated the full MCTS loop (PUCT selection, atomic expansion, quick check gates, PE q-search, backpropagation). NN mode runs the complete SE-ResNet forward pass device-side — all 32 threads in a warp cooperate on the matrix multiplies — and initializes child policy priors from the network's policy head output before PUCT selection. All components are tested:
+The GPU MCTS kernel runs in classical mode, NN mode (warp-cooperative, 32 threads), and block mode (256 threads with shared memory activations). All modes validated with trained gen_18 OracleNet weights exported from PyTorch.
 
-- Tree store: atomic allocation, expansion locks, backprop under contention (7 tests)
-- Move generator: full legal movegen via magic bitboards, verified by perft (30 positions)
-- Quick checks: mate-in-1 and KOTH-in-1 as exact-value gates (8 tests)
-- PeSTO evaluation + extended q-search (11 tests)
-- MCTS kernel: 13 tests total — 10 classical mode (single sim, multi sim, mate gate, KOTH gate, hanging piece capture, starting position move quality, visit distribution, Q-value signs, high sim count, complete game) + 3 NN mode (dummy weights equal classical, mate detection, complete game to checkmate)
-- NN weights + ops + forward pass: 21 tests (GEMM, im2col, BN+ReLU, SE block, log-softmax, board encoding, full forward pass)
-- AlphaZero move encoding (73-plane): 5 tests
+**Two inference implementations:**
 
-With dummy weights (zeros), the NN-mode kernel produces identical behavior to classical mode and plays complete games to checkmate. The 32-thread warp-cooperative forward pass covers the full 6-block SE-ResNet (~2M parameters): shared weights (7.6 MB read-only) + per-warp scratch (374 KB). No cuBLAS, no cuDNN, no host round-trips during search.
+The *warp-cooperative* path (32 threads) was the correctness proof: im2col materialization to global scratch (374 KB/warp), warp shuffle reductions for BN/SE. Forward pass: 131 ms — 325× slower than projected, because only 32 threads utilize <0.001% of GPU compute and each thread reads full weight rows independently from global memory.
 
-Next: multi-warp scaling (one warp per block, N blocks) and exporting trained PyTorch model weights for end-to-end evaluation with real NN values.
+The *block-cooperative* path (256 threads) keeps activations in shared memory throughout: two 32 KB buffers (`buf1`, `buf2`) hold the [128, 64] activation tensors, eliminating global memory round-trips between layers. Direct 3×3 convolution reads weights from global memory into a 1,152-float shared memory tile (one input channel at a time), gathering inputs directly from the shared-memory activation buffer — no im2col materialization. Residual shortcuts are saved in 32 named float registers per thread (avoiding a third 32 KB buffer that would exceed the 96 KB shared memory limit). Forward pass: **9.57 ms** — 13.7× faster than warp mode.
+
+**Multi-block scaling:** Multiple blocks share a single tree via atomic simulation counter, virtual loss for path diversity, and atomicCAS expansion locks. Scaling is near-perfectly linear up to the SM count (36 on RTX 5060 Ti): 36 blocks achieve 115 ms for 400 simulations (7.3× faster than the CPU+PyTorch baseline of 840 ms). Node count drops ~17% at 36 blocks from expansion contention — acceptable for the 33.7× wall-clock speedup.
+
+**Multi-tree eval:** `gpu_mcts_eval_trees` runs N independent MCTS trees in parallel, one block per tree, with partitioned node pools and per-tree allocation counters. Supports both classical mode (no weights) and NN mode.
+
+**Forward pass profiling** (layer-by-layer timing with trained weights):
+
+| Layer | Time (ms) | % of Total |
+|---|---|---|
+| 8× conv 3×3 (shared-memory weight tiling) | 5.92 | 61.7% |
+| BN/SE/residual (20 ops) | 0.28 | 2.9% |
+| Other (register save/restore, remaining convs, sync barriers) | 3.38 | 35.2% |
+| **Total** | **9.60** | |
+
+Each conv achieves 12.7 GFLOPS — 0.006% of the RTX 5060 Ti's 200 TFLOPS peak. The bottleneck is algorithmic: 640 `__syncthreads()` barriers per conv (5 per input channel × 128 channels) for weight tiling, stride-9 shared memory bank conflicts, and serial FMA chains. FP16/FP8 Tensor Core inference is the path to sub-millisecond forward passes.
+
+Tests: 7 tree store + 30 perft + 8 quick checks + 11 q-search + 13 MCTS kernel + 21 NN ops + 5 move encoding + 9 block ops = 104 tests.
 
 ## 9. Tournament Design: Adaptive CI-Targeted Pairing
 

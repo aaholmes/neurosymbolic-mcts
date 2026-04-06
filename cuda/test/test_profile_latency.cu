@@ -282,12 +282,41 @@ int main(int argc, char** argv) {
     }
 
     // -----------------------------------------------------------------------
+    // Benchmark 7: Multi-block scalability (same tree, parallel explorers)
+    // -----------------------------------------------------------------------
+    printf("\n--- Multi-Block Scalability (400 sims, starting pos) ---\n");
+
+    // First get 1-block baseline
+    pos = make_starting_position();
+    timer.record_start();
+    GPUMctsResult baseline_result = gpu_mcts_search_nn_block(pos, 400, false, 1.414f, d_weights, d_policy_bufs, 1);
+    float baseline_ms = timer.elapsed_ms();
+    printf("  %2d blocks: %6.1f ms  [%d sims, %d nodes, v=%.3f, speedup=1.0x] [baseline]\n",
+           1, baseline_ms, baseline_result.total_simulations, baseline_result.nodes_allocated,
+           baseline_result.root_value);
+
+    const int BLOCK_COUNTS[] = {4, 8, 16, 20, 24, 28, 32, 36, 40};
+    const int NUM_BLOCK_COUNTS = 9;
+
+    for (int bi = 0; bi < NUM_BLOCK_COUNTS; bi++) {
+        int blocks = BLOCK_COUNTS[bi];
+        timer.record_start();
+        GPUMctsResult result = gpu_mcts_search_nn_block(pos, 400, false, 1.414f, d_weights, d_policy_bufs, blocks);
+        float move_ms = timer.elapsed_ms();
+        printf("  %2d blocks: %6.1f ms  [%d sims, %d nodes, v=%.3f, speedup=%.1fx]\n",
+               blocks, move_ms, result.total_simulations, result.nodes_allocated,
+               result.root_value, baseline_ms / move_ms);
+    }
+
+    printf("  CPU baseline: ~840 ms (from Rust engine profiling)\n");
+
+    // -----------------------------------------------------------------------
     // Summary
     // -----------------------------------------------------------------------
     printf("\n--- Summary ---\n");
     printf("Block forward pass:     %.2f ms\n", bfp_per_call);
     printf("Warp forward pass:      %.2f ms  (%.1fx slower than block)\n", fp_per_call, fp_per_call / bfp_per_call);
-    printf("400 sims block (1 block): [see block MCTS results above]\n");
+    printf("400 sims block (1 block): %.1f ms\n", baseline_ms);
     printf("Warp 400 sims:          [skipped — takes 100+ seconds]\n");
     printf("Projected speedup vs CPU baseline (~840 ms): %.0fx\n",
            840.0f / bfp_per_call / 400.0f * 1000.0f);
