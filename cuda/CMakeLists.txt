@@ -23,6 +23,8 @@ add_library(caissawary_cuda STATIC
     nn_weights.cu
     nn_ops.cu
     nn_forward.cu
+    block_ops.cu
+    block_forward.cu
 )
 target_include_directories(caissawary_cuda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(caissawary_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -55,3 +57,13 @@ set_target_properties(test_mcts_kernel PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_executable(test_nn_ops test/test_nn_ops.cu)
 target_link_libraries(test_nn_ops caissawary_cuda)
 set_target_properties(test_nn_ops PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Block ops tests (256-thread inference)
+add_executable(test_block_ops test/test_block_ops.cu)
+target_link_libraries(test_block_ops caissawary_cuda)
+set_target_properties(test_block_ops PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Profiling: inference latency with real weights
+add_executable(test_profile_latency test/test_profile_latency.cu)
+target_link_libraries(test_profile_latency caissawary_cuda)
+set_target_properties(test_profile_latency PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

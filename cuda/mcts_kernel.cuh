@@ -77,3 +77,22 @@ GPUMctsResult gpu_mcts_search_nn(
     float* d_nn_scratch,            // per-warp scratch (num_warps * SCRATCH_TOTAL_FLOATS)
     int num_warps
 );
+
+// ============================================================
+// Block-mode NN search (256 threads/block, activations in shared memory)
+// ============================================================
+
+// Run MCTS with neural network policy and value.
+// Uses 256-thread block-cooperative forward pass with shared memory activations.
+// num_blocks: number of concurrent explorer blocks (each block = one MCTS stream).
+// d_policy_bufs: per-block global memory policy buffers (num_blocks * NN_POLICY_SIZE floats).
+//   Allocate with cudaMalloc(num_blocks * NN_POLICY_SIZE * sizeof(float)).
+GPUMctsResult gpu_mcts_search_nn_block(
+    const BoardState& root_position,
+    int simulations,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,
+    float* d_policy_bufs,
+    int num_blocks
+);

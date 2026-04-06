@@ -6,6 +6,8 @@
 #include "quick_checks.cuh"
 #include "nn_forward.cuh"
 #include "nn_ops.cuh"
+#include "block_forward.cuh"
+#include "block_ops.cuh"
 
 #include <cstdio>
 #include <cmath>
@@ -651,6 +653,229 @@ GPUMctsResult gpu_mcts_search_nn(
             GPUMove mv = (GPUMove)child.move_from_parent;
             result.best_move_from = GPU_MOVE_FROM(mv);
             result.best_move_to = GPU_MOVE_TO(mv);
+            result.best_move_promo = GPU_MOVE_PROMO(mv);
+            result.root_value = (child.visit_count > 0)
+                ? -(child.total_value / (float)child.visit_count)
+                : 0.0f;
+        }
+    }
+
+    return result;
+}
+
+// ============================================================
+// Block-mode NN MCTS kernel (256 threads/block)
+// ============================================================
+//
+// Each block handles one MCTS simulation stream.
+// Thread 0 runs the tree operations (select, expand, backup).
+// All 256 threads cooperate on the neural network forward pass.
+// Shared memory holds activations throughout the forward pass.
+
+__global__ void mcts_kernel_nn_block(
+    int max_simulations, bool enable_koth, float c_puct,
+    OracleNetWeights* weights, float* global_policy_bufs
+) {
+    // Dynamic shared memory: used exclusively for the forward-pass activations.
+    extern __shared__ float smem[];
+
+    // Static shared memory: MCTS communication state.
+    // Declared statically so the compiler handles alignment (BoardState needs 8-byte align).
+    __shared__ float    sh_comm[8];       // [0]=sim, [1]=node_idx, [2]=eval_flag, [3]=value, [4]=q_result
+    __shared__ BoardState sh_bs;
+    __shared__ int      sh_path[256];
+    __shared__ int      sh_path_len;
+
+    int bid = blockIdx.x;
+    int tid = threadIdx.x;
+
+    // Per-block policy buffer in global memory
+    float* my_policy = global_policy_bufs + (size_t)bid * NN_POLICY_SIZE;
+
+    while (true) {
+        // Claim a simulation slot (thread 0), broadcast via smem
+        if (tid == 0) {
+            sh_comm[0] = (float)atomicAdd(&g_sim_counter, 1);
+        }
+        __syncthreads();
+        if ((int)sh_comm[0] >= max_simulations) break;
+
+        // === SELECT + EXPAND (thread 0 only) ===
+        if (tid == 0) {
+            int node_idx = 0;
+            int path[256];
+            int path_len = 0;
+            float value = 0.0f;
+            bool evaluated = false;
+
+            path[path_len++] = 0;
+
+            while (is_expanded(&g_node_pool[node_idx]) &&
+                   !g_node_pool[node_idx].is_terminal &&
+                   g_node_pool[node_idx].num_children > 0) {
+                node_idx = select_child_puct(node_idx, c_puct);
+                apply_virtual_loss(&g_node_pool[node_idx]);
+                path[path_len++] = node_idx;
+            }
+
+            MCTSNode* leaf = &g_node_pool[node_idx];
+            if (!leaf->is_terminal && try_expand(leaf)) {
+                expand_node(node_idx);
+                finish_expand(leaf);
+
+                if (!leaf->is_terminal && leaf->num_children > 0) {
+                    BoardState bs;
+                    node_to_board(leaf, &bs);
+                    if (check_mate_in_1(&bs)) {
+                        leaf->terminal_value = 1.0f;
+                        leaf->is_terminal = 1;
+                        value = 1.0f;
+                        evaluated = true;
+                    } else if (enable_koth && check_koth_in_1(&bs)) {
+                        leaf->terminal_value = 1.0f;
+                        leaf->is_terminal = 1;
+                        value = 1.0f;
+                        evaluated = true;
+                    }
+                }
+
+                if (!evaluated && leaf->num_children > 0 && !leaf->is_terminal) {
+                    node_idx = leaf->first_child_idx;
+                    path[path_len++] = node_idx;
+                }
+            }
+
+            if (!evaluated && g_node_pool[node_idx].is_terminal) {
+                value = g_node_pool[node_idx].terminal_value;
+                evaluated = true;
+            }
+
+            // Publish state for all threads
+            sh_comm[1] = (float)node_idx;
+            sh_comm[2] = evaluated ? 1.0f : 0.0f;
+            sh_comm[3] = value;
+            for (int i = 0; i < path_len; i++) sh_path[i] = path[i];
+            sh_path_len = path_len;
+
+            if (!evaluated) {
+                node_to_board(&g_node_pool[node_idx], &sh_bs);
+                sh_comm[4] = gpu_principal_exchange(&sh_bs);  // q_result
+            }
+        }
+        __syncthreads();
+
+        bool evaluated = (sh_comm[2] != 0.0f);
+        float value    = sh_comm[3];
+
+        // === NN FORWARD PASS (all 256 threads) ===
+        if (!evaluated) {
+            float nn_value, nn_k;
+            oracle_net_forward_block(&sh_bs, sh_comm[4], weights,
+                                     smem, my_policy, &nn_value, &nn_k);
+            // oracle_net_forward_block ends with __syncthreads()
+
+            if (tid == 0) {
+                int node_idx   = (int)sh_comm[1];
+                int path_len_  = sh_path_len;
+                int parent_idx = (path_len_ >= 2) ? sh_path[path_len_ - 2] : node_idx;
+                MCTSNode* parent = &g_node_pool[parent_idx];
+                if (parent->num_children > 0) {
+                    set_child_priors(parent_idx, my_policy, parent->w_to_move);
+                }
+                value = nn_value;
+                if (sh_bs.halfmove >= 100 || is_insufficient_material(&sh_bs)) {
+                    value = 0.0f;
+                }
+                sh_comm[3] = value;
+            }
+            __syncthreads();
+            value = sh_comm[3];
+        }
+
+        // === BACKUP (thread 0 only) ===
+        if (tid == 0) {
+            int path_len_ = sh_path_len;
+            float v = value;
+            for (int i = path_len_ - 1; i >= 0; i--) {
+                backprop_value(&g_node_pool[sh_path[i]], v);
+                v = -v;
+            }
+        }
+        __syncthreads();
+    }
+}
+
+// ============================================================
+// Host-side block-mode search
+// ============================================================
+
+GPUMctsResult gpu_mcts_search_nn_block(
+    const BoardState& root_position,
+    int simulations,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,
+    float* d_policy_bufs,
+    int num_blocks
+) {
+    reset_tree();
+    upload_root_position(root_position);
+    reset_sim_counter();
+
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    // Dynamic shared memory: only the forward-pass activation buffers.
+    // MCTS state (sh_bs, sh_path, sh_comm) is in static __shared__ variables.
+    size_t smem_bytes = (size_t)BLOCK_SMEM_BYTES;
+
+    // Opt in to extended shared memory (>48 KB requires explicit attribute on sm_89+).
+    cudaFuncSetAttribute(mcts_kernel_nn_block,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         (int)smem_bytes);
+
+    mcts_kernel_nn_block<<<num_blocks, 256, smem_bytes>>>(
+        simulations, enable_koth, c_puct, d_weights, d_policy_bufs
+    );
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA block-mode NN kernel error: %s\n", cudaGetErrorString(err));
+    }
+
+    MCTSNode root;
+    read_root_node(&root);
+
+    GPUMctsResult result = {};
+    result.total_simulations = root.visit_count;
+    result.nodes_allocated   = get_allocated_count();
+
+    if (root.num_children == 0 || root.is_terminal) {
+        result.root_value = root.is_terminal ? root.terminal_value : 0.0f;
+        if (root.num_children > 0) {
+            int best_visits = -1;
+            for (int i = 0; i < root.num_children; i++) {
+                MCTSNode child;
+                read_node(root.first_child_idx + i, &child);
+                if (child.visit_count > best_visits) {
+                    best_visits = child.visit_count;
+                    GPUMove mv = (GPUMove)child.move_from_parent;
+                    result.best_move_from  = GPU_MOVE_FROM(mv);
+                    result.best_move_to    = GPU_MOVE_TO(mv);
+                    result.best_move_promo = GPU_MOVE_PROMO(mv);
+                }
+            }
+        }
+        return result;
+    }
+
+    int best_visits = -1;
+    for (int i = 0; i < root.num_children; i++) {
+        MCTSNode child;
+        read_node(root.first_child_idx + i, &child);
+        if (child.visit_count > best_visits) {
+            best_visits = child.visit_count;
+            GPUMove mv = (GPUMove)child.move_from_parent;
+            result.best_move_from  = GPU_MOVE_FROM(mv);
+            result.best_move_to    = GPU_MOVE_TO(mv);
             result.best_move_promo = GPU_MOVE_PROMO(mv);
             result.root_value = (child.visit_count > 0)
                 ? -(child.total_value / (float)child.visit_count)

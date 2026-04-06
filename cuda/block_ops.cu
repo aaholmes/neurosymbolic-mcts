@@ -1,0 +1,231 @@
+#include "block_ops.cuh"
+#include <cfloat>
+
+// All functions assume blockDim.x == 256 and all 256 threads participate.
+// Work is striped: thread t owns elements t, t+256, t+512, ...
+
+__device__ void block_bn_relu(
+    float* data,
+    const float* gamma,
+    const float* beta,
+    const float* running_mean,
+    const float* running_var,
+    int channels,
+    bool relu
+) {
+    int tid = threadIdx.x;
+    int total = channels * 64;
+    for (int idx = tid; idx < total; idx += blockDim.x) {
+        int ch = idx / 64;
+        float x = data[idx];
+        float norm = (x - running_mean[ch]) * rsqrtf(running_var[ch] + 1e-5f);
+        float result = norm * gamma[ch] + beta[ch];
+        if (relu && result < 0.0f) result = 0.0f;
+        data[idx] = result;
+    }
+    __syncthreads();
+}
+
+__device__ void block_bn_relu_1ch(
+    float* data,
+    const float* gamma,
+    const float* beta,
+    const float* running_mean,
+    const float* running_var,
+    bool relu
+) {
+    int tid = threadIdx.x;
+    float g = gamma[0], b = beta[0], m = running_mean[0];
+    float inv_std = rsqrtf(running_var[0] + 1e-5f);
+    for (int idx = tid; idx < 64; idx += blockDim.x) {
+        float x = data[idx];
+        float result = (x - m) * inv_std * g + b;
+        if (relu && result < 0.0f) result = 0.0f;
+        data[idx] = result;
+    }
+    __syncthreads();
+}
+
+__device__ void block_conv_3x3(
+    const float* __restrict__ input_smem,
+    const float* __restrict__ weights,
+    float* __restrict__ output_smem,
+    int C_in, int C_out
+) {
+    int tid = threadIdx.x;
+    int total = C_out * 64;
+    for (int out_idx = tid; out_idx < total; out_idx += blockDim.x) {
+        int out_ch = out_idx / 64;
+        int spatial = out_idx % 64;
+        int oy = spatial / 8;
+        int ox = spatial % 8;
+        float acc = 0.0f;
+        // weights layout: [C_out, C_in, 9] = OIHW with 3x3 flattened
+        // ki = ky*3+kx ranges 0..8, matching PyTorch OIHW (ki=0 is top-left)
+        const float* w_base = weights + out_ch * C_in * 9;
+        for (int c = 0; c < C_in; c++) {
+            const float* w_row = w_base + c * 9;
+            const float* in_ch = input_smem + c * 64;
+            for (int ki = 0; ki < 9; ki++) {
+                int iy = oy + ki / 3 - 1;
+                int ix = ox + ki % 3 - 1;
+                if (iy >= 0 && iy < 8 && ix >= 0 && ix < 8) {
+                    acc += w_row[ki] * in_ch[iy * 8 + ix];
+                }
+            }
+        }
+        output_smem[out_idx] = acc;
+    }
+    __syncthreads();
+}
+
+__device__ void block_1x1_conv(
+    const float* __restrict__ input_smem,
+    const float* __restrict__ weights,
+    float* __restrict__ output_smem,
+    int C_in, int C_out
+) {
+    int tid = threadIdx.x;
+    int total = C_out * 64;
+    for (int out_idx = tid; out_idx < total; out_idx += blockDim.x) {
+        int out_ch = out_idx / 64;
+        int spatial = out_idx % 64;
+        float acc = 0.0f;
+        const float* w_row = weights + out_ch * C_in;
+        for (int c = 0; c < C_in; c++) {
+            acc += w_row[c] * input_smem[c * 64 + spatial];
+        }
+        output_smem[out_idx] = acc;
+    }
+    __syncthreads();
+}
+
+__device__ void block_se_block(
+    float* data,
+    const float* fc1_w,
+    const float* fc2_w,
+    int channels,
+    int inner,
+    float* smem_avg,
+    float* smem_fc1
+) {
+    int tid = threadIdx.x;
+
+    // 1. Global avg pool: each thread accumulates sums for its channels
+    //    in registers, then writes once to shared memory. No atomics needed.
+    for (int c = tid; c < channels; c += blockDim.x) {
+        float sum = 0.0f;
+        for (int i = 0; i < 64; i++) sum += data[c * 64 + i];
+        smem_avg[c] = sum / 64.0f;
+    }
+    __syncthreads();
+
+    // 2. FC1: smem_fc1[j] = ReLU(sum_c(fc1_w[j,c] * smem_avg[c]))
+    for (int j = tid; j < inner; j += blockDim.x) {
+        float sum = 0.0f;
+        for (int c = 0; c < channels; c++) sum += fc1_w[j * channels + c] * smem_avg[c];
+        smem_fc1[j] = sum > 0.0f ? sum : 0.0f;
+    }
+    __syncthreads();
+
+    // 3. FC2 + sigmoid + channel-wise scale (in-place on data)
+    for (int c = tid; c < channels; c += blockDim.x) {
+        float sum = 0.0f;
+        for (int j = 0; j < inner; j++) sum += fc2_w[c * inner + j] * smem_fc1[j];
+        float scale = 1.0f / (1.0f + expf(-sum));  // sigmoid
+        for (int i = 0; i < 64; i++) data[c * 64 + i] *= scale;
+    }
+    __syncthreads();
+}
+
+__device__ void block_log_softmax(
+    float* data,
+    int size,
+    float* smem_reduce
+) {
+    int tid = threadIdx.x;
+
+    // 1. Find global max (numerical stability)
+    float local_max = -FLT_MAX;
+    for (int i = tid; i < size; i += blockDim.x) {
+        if (data[i] > local_max) local_max = data[i];
+    }
+    smem_reduce[tid] = local_max;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride && smem_reduce[tid + stride] > smem_reduce[tid])
+            smem_reduce[tid] = smem_reduce[tid + stride];
+        __syncthreads();
+    }
+    float global_max = smem_reduce[0];
+    __syncthreads();
+
+    // 2. Sum exp(x - max)
+    float local_sum = 0.0f;
+    for (int i = tid; i < size; i += blockDim.x) local_sum += expf(data[i] - global_max);
+    smem_reduce[tid] = local_sum;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) smem_reduce[tid] += smem_reduce[tid + stride];
+        __syncthreads();
+    }
+    float log_total = logf(smem_reduce[0]);
+    __syncthreads();
+
+    // 3. Write log-softmax values
+    for (int i = tid; i < size; i += blockDim.x) {
+        data[i] = (data[i] - global_max) - log_total;
+    }
+    __syncthreads();
+}
+
+__device__ void block_board_to_planes(
+    const BoardState* bs,
+    float* planes
+) {
+    int tid = threadIdx.x;
+    int stm = bs->w_to_move ? 0 : 1;
+    int opp = 1 - stm;
+    bool flip = !bs->w_to_move;
+
+    // Zero all 17 planes
+    for (int i = tid; i < 17 * 64; i += blockDim.x) planes[i] = 0.0f;
+    __syncthreads();
+
+    // Planes 0-5: STM pieces; planes 6-11: opponent pieces
+    for (int piece = 0; piece < 6; piece++) {
+        uint64_t stm_bb = bs->pieces[stm * 6 + piece];
+        uint64_t opp_bb = bs->pieces[opp * 6 + piece];
+        for (int sq = tid; sq < 64; sq += blockDim.x) {
+            int mapped = flip ? (sq ^ 56) : sq;
+            if ((stm_bb >> sq) & 1) planes[piece * 64 + mapped] = 1.0f;
+            if ((opp_bb >> sq) & 1) planes[(6 + piece) * 64 + mapped] = 1.0f;
+        }
+    }
+    __syncthreads();
+
+    // Planes 12-16: en passant + castling rights (thread 0 only)
+    if (tid == 0) {
+        if (bs->en_passant != EN_PASSANT_NONE) {
+            int mapped = flip ? (bs->en_passant ^ 56) : bs->en_passant;
+            planes[12 * 64 + mapped] = 1.0f;
+        }
+        uint8_t stm_ks, stm_qs, opp_ks, opp_qs;
+        if (bs->w_to_move) {
+            stm_ks = bs->castling & CASTLE_WK;
+            stm_qs = bs->castling & CASTLE_WQ;
+            opp_ks = bs->castling & CASTLE_BK;
+            opp_qs = bs->castling & CASTLE_BQ;
+        } else {
+            stm_ks = bs->castling & CASTLE_BK;
+            stm_qs = bs->castling & CASTLE_BQ;
+            opp_ks = bs->castling & CASTLE_WK;
+            opp_qs = bs->castling & CASTLE_WQ;
+        }
+        if (stm_ks) for (int i = 0; i < 64; i++) planes[13 * 64 + i] = 1.0f;
+        if (stm_qs) for (int i = 0; i < 64; i++) planes[14 * 64 + i] = 1.0f;
+        if (opp_ks) for (int i = 0; i < 64; i++) planes[15 * 64 + i] = 1.0f;
+        if (opp_qs) for (int i = 0; i < 64; i++) planes[16 * 64 + i] = 1.0f;
+    }
+    __syncthreads();
+}
