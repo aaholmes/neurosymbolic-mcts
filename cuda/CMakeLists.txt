@@ -72,3 +72,8 @@ set_target_properties(test_profile_latency PROPERTIES CUDA_SEPARABLE_COMPILATION
 add_executable(test_multi_tree_eval test/test_multi_tree_eval.cu)
 target_link_libraries(test_multi_tree_eval caissawary_cuda)
 set_target_properties(test_multi_tree_eval PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Layer-by-layer timing profile
+add_executable(test_layer_timing test/test_layer_timing.cu)
+target_link_libraries(test_layer_timing caissawary_cuda)
+set_target_properties(test_layer_timing PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
