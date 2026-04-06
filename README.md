@@ -233,7 +233,7 @@ The `--qsearch` flag selects the quiescence search variant: `pe` (principal exch
 
 ## GPU MCTS (CUDA)
 
-A fully GPU-resident MCTS implementation is under development in `cuda/`. The goal is to run the entire search loop — tree traversal, node expansion, quick checks, quiescence search, and (eventually) batched neural inference — inside a single persistent CUDA kernel with no CPU interaction during search.
+A fully GPU-resident MCTS implementation in `cuda/`. The entire search loop — tree traversal, node expansion, quick checks, quiescence search, and neural network inference — runs inside a persistent CUDA kernel with no CPU interaction during search.
 
 **Current status:**
 
@@ -242,16 +242,24 @@ A fully GPU-resident MCTS implementation is under development in `cuda/`. The go
 | Tree store (atomic alloc, expansion locks, backprop) | Complete | 7/7 pass |
 | Move generator (magic bitboards, full legality) | Complete | 30/30 perft pass |
 | Quick checks (mate-in-1, KOTH-in-1) | Complete | 8/8 pass |
-| PeSTO eval + extended q-search | Complete | 11/11 pass |
-| **Single-explorer MCTS kernel (classical mode)** | **Complete** | **6/6 pass** |
-| Multi-explorer + batched NN inference | Not started | — |
+| PeSTO eval + extended q-search + PE | Complete | 11/11 pass |
+| MCTS kernel (classical mode) | Complete | 10/10 pass |
+| NN weight struct + loading | Complete | 2/2 pass |
+| Warp-cooperative GEMM, im2col, BN, SE, softmax | Complete | 14/14 pass |
+| Full OracleNet forward pass (device-side) | Complete | 2/2 pass |
+| AlphaZero move encoding (73-plane) | Complete | 5/5 pass |
+| **NN-mode MCTS kernel (forward pass + policy priors)** | **Complete** | **3/3 pass** |
+| Multi-warp scaling + real model weights | In progress | — |
 
-The kernel currently runs in classical mode: `V = tanh(0.326 * q_result)` using the principal exchange q-search (single best MVV-LVA capture per node, GPU-friendly linear descent). Mate-in-1 and KOTH-in-1 act as exact-value gates. Neural network inference will be added as the next phase.
+The NN-mode kernel runs the complete SE-ResNet forward pass (6 blocks, 128 channels, ~2M parameters) as `__device__` functions — all 32 threads in a warp cooperate on the matrix multiplies. Shared weights (7.6 MB, read-only) + per-warp scratch (374 KB). No cuBLAS, no cuDNN, no host round-trips.
+
+With dummy weights (zeros), the NN-mode kernel produces identical behavior to classical mode and plays complete games to checkmate. The remaining step is exporting trained model weights from PyTorch and testing with real NN evaluations.
 
 ```bash
 cd cuda && mkdir -p build && cd build && cmake .. && make
 cd /path/to/neurosymbolic-mcts  # run from project root for table paths
-cuda/build/test_mcts_kernel      # 6/6 tests
+cuda/build/test_mcts_kernel      # 13/13 tests (classical + NN mode)
+cuda/build/test_nn_ops           # 21/21 tests (GEMM, im2col, BN, forward pass, move encoding)
 cuda/build/test_movegen          # 30/30 perft tests
 cuda/build/test_quick_checks     # 8/8 tests
 cuda/build/test_quiescence       # 11/11 tests
