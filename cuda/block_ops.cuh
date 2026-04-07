@@ -79,6 +79,22 @@ __device__ void block_conv_3x3_tc(
     int C_in, int C_out
 );
 
+// --- 3x3 convolution via shifted-copy GEMM (9 kernel positions) ---
+// Decomposes conv3x3 into 9 dense GEMMs, one per kernel position.
+// For each position, builds a shifted FP16 copy of the input, then
+// runs a contiguous wmma GEMM with no scatter/gather.
+// input_smem:  [C_in, 64] FP32 in shared memory
+// W_s:         9 half* pointers to [C_out, C_in] FP16 in global memory
+// output_smem: [C_out, 64] FP32 in shared memory
+// shifted:     [C_in*64] FP16 workspace in shared memory
+__device__ void block_conv_3x3_shifted(
+    const float* __restrict__ input_smem,
+    half* const* W_s,
+    float* __restrict__ output_smem,
+    half* __restrict__ shifted,
+    int C_in, int C_out
+);
+
 // --- 1x1 convolution (direct) from shared memory ---
 // input_smem:  [C_in, 64] in shared memory
 // weights:     [C_out, C_in] in global memory

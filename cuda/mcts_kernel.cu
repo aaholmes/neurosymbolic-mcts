@@ -675,7 +675,8 @@ GPUMctsResult gpu_mcts_search_nn(
 __global__ void mcts_kernel_nn_block(
     int max_simulations, bool enable_koth, float c_puct,
     OracleNetWeights* weights, float* global_policy_bufs,
-    const ConvWeightsHalf* half_w
+    const ConvWeightsHalf* half_w,
+    const ConvWeightsShifted* shifted_w
 ) {
     // Dynamic shared memory: used exclusively for the forward-pass activations.
     extern __shared__ float smem[];
@@ -772,7 +773,7 @@ __global__ void mcts_kernel_nn_block(
         if (!evaluated) {
             float nn_value, nn_k;
             oracle_net_forward_block(&sh_bs, sh_comm[4], weights,
-                                     smem, my_policy, &nn_value, &nn_k, half_w);
+                                     smem, my_policy, &nn_value, &nn_k, half_w, shifted_w);
             // oracle_net_forward_block ends with __syncthreads()
 
             if (tid == 0) {
@@ -834,12 +835,13 @@ GPUMctsResult gpu_mcts_search_nn_block(
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
                          (int)smem_bytes);
 
-    // Convert weights to FP16 for Tensor Core conv path
+    // Convert weights for shifted-copy Tensor Core conv path
     ConvWeightsHalf* d_half_w = nullptr;
-    if (d_weights) d_half_w = convert_weights_to_half(d_weights);
+    ConvWeightsShifted* d_shifted_w = nullptr;
+    if (d_weights) d_shifted_w = convert_weights_shifted(d_weights);
 
     mcts_kernel_nn_block<<<num_blocks, 256, smem_bytes>>>(
-        simulations, enable_koth, c_puct, d_weights, d_policy_bufs, d_half_w
+        simulations, enable_koth, c_puct, d_weights, d_policy_bufs, d_half_w, d_shifted_w
     );
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -847,6 +849,7 @@ GPUMctsResult gpu_mcts_search_nn_block(
     }
 
     free_half_weights(d_half_w);
+    free_shifted_weights(d_shifted_w);
 
     MCTSNode root;
     read_root_node(&root);
@@ -910,7 +913,8 @@ __global__ void mcts_kernel_eval(
     bool enable_koth, float c_puct,
     OracleNetWeights* weights, float* global_policy_bufs,
     int num_trees, int* d_node_counts,
-    const ConvWeightsHalf* half_w
+    const ConvWeightsHalf* half_w,
+    const ConvWeightsShifted* shifted_w
 ) {
     extern __shared__ float smem[];
     __shared__ float    sh_comm[8];
@@ -1088,7 +1092,7 @@ __global__ void mcts_kernel_eval(
             if (weights != nullptr) {
                 float nn_value, nn_k;
                 oracle_net_forward_block(&sh_bs, sh_comm[4], weights,
-                                         smem, my_policy, &nn_value, &nn_k, half_w);
+                                         smem, my_policy, &nn_value, &nn_k, half_w, shifted_w);
                 if (tid == 0) {
                     int node_idx_ = (int)sh_comm[1];
                     int path_len_ = sh_path_len;
@@ -1208,21 +1212,24 @@ int gpu_mcts_eval_trees(
     cudaFuncSetAttribute(mcts_kernel_eval,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_bytes);
 
-    // Convert weights to FP16 for Tensor Core conv path
+    // Convert weights for shifted-copy Tensor Core conv path
     ConvWeightsHalf* d_half_w = nullptr;
-    if (d_weights) d_half_w = convert_weights_to_half(d_weights);
+    ConvWeightsShifted* d_shifted_w = nullptr;
+    if (d_weights) d_shifted_w = convert_weights_shifted(d_weights);
 
     mcts_kernel_eval<<<num_trees, 256, smem_bytes>>>(
         simulations_per_tree, max_nodes_per_tree, enable_koth, c_puct,
-        d_weights, d_policy_bufs, num_trees, nullptr, d_half_w
+        d_weights, d_policy_bufs, num_trees, nullptr, d_half_w, d_shifted_w
     );
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA multi-tree eval error: %s\n", cudaGetErrorString(err));
         free_half_weights(d_half_w);
+        free_shifted_weights(d_shifted_w);
         return 0;
     }
     free_half_weights(d_half_w);
+    free_shifted_weights(d_shifted_w);
 
     // Read back results
     void* d_pool = nullptr;

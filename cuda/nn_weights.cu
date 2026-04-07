@@ -188,6 +188,83 @@ ConvWeightsHalf* convert_weights_to_half(const OracleNetWeights* d_weights) {
     return d_hw;
 }
 
+// ============================================================
+// Per-kernel-position FP16 weight conversion for shifted-copy conv
+// ============================================================
+
+// Extract one kernel position from [C_out, C_in, 9] FP32 weights → [C_out, C_in] FP16
+// src[oc * C_in * 9 + c * 9 + s] → dst[oc * C_in + c]
+__global__ void kernel_extract_shift_slice(
+    const float* src, half* dst, int C_out, int C_in, int s
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= C_out * C_in) return;
+    int oc = i / C_in;
+    int c  = i % C_in;
+    dst[i] = __float2half(src[oc * C_in * 9 + c * 9 + s]);
+}
+
+static void convert_shifted_layer(const float* d_src, half** d_slices, int C_out, int C_in) {
+    int n = C_out * C_in;
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    for (int s = 0; s < 9; s++) {
+        cudaMalloc(&d_slices[s], n * sizeof(half));
+        kernel_extract_shift_slice<<<blocks, threads>>>(d_src, d_slices[s], C_out, C_in, s);
+    }
+}
+
+ConvWeightsShifted* convert_weights_shifted(const OracleNetWeights* d_weights) {
+    ConvWeightsShifted h_sw;
+
+    // start_conv: [128, 17, 9] → 9 × [128, 17]
+    const float* start_ptr = (const float*)d_weights +
+        offsetof(OracleNetWeights, start_conv_weight) / sizeof(float);
+    convert_shifted_layer(start_ptr, h_sw.start_conv, NN_HIDDEN_DIM, NN_INPUT_CHANNELS);
+
+    // block convs: [128, 128, 9] → 9 × [128, 128]
+    for (int b = 0; b < NN_NUM_BLOCKS; b++) {
+        const float* c1 = (const float*)d_weights +
+            (offsetof(OracleNetWeights, blocks) +
+             b * sizeof(ResBlockParams) +
+             offsetof(ResBlockParams, conv1_weight)) / sizeof(float);
+        convert_shifted_layer(c1, h_sw.block_conv1[b], NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+
+        const float* c2 = (const float*)d_weights +
+            (offsetof(OracleNetWeights, blocks) +
+             b * sizeof(ResBlockParams) +
+             offsetof(ResBlockParams, conv2_weight)) / sizeof(float);
+        convert_shifted_layer(c2, h_sw.block_conv2[b], NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+    }
+
+    // policy conv: [128, 128, 9] → 9 × [128, 128]
+    const float* p_ptr = (const float*)d_weights +
+        offsetof(OracleNetWeights, p_conv_weight) / sizeof(float);
+    convert_shifted_layer(p_ptr, h_sw.p_conv, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+
+    cudaDeviceSynchronize();
+
+    ConvWeightsShifted* d_sw = nullptr;
+    cudaMalloc(&d_sw, sizeof(ConvWeightsShifted));
+    cudaMemcpy(d_sw, &h_sw, sizeof(ConvWeightsShifted), cudaMemcpyHostToDevice);
+    return d_sw;
+}
+
+void free_shifted_weights(ConvWeightsShifted* d_sw) {
+    if (!d_sw) return;
+    ConvWeightsShifted h_sw;
+    cudaMemcpy(&h_sw, d_sw, sizeof(ConvWeightsShifted), cudaMemcpyDeviceToHost);
+    for (int s = 0; s < 9; s++) cudaFree(h_sw.start_conv[s]);
+    for (int b = 0; b < NN_NUM_BLOCKS; b++) {
+        for (int s = 0; s < 9; s++) {
+            cudaFree(h_sw.block_conv1[b][s]);
+            cudaFree(h_sw.block_conv2[b][s]);
+        }
+    }
+    for (int s = 0; s < 9; s++) cudaFree(h_sw.p_conv[s]);
+    cudaFree(d_sw);
+}
+
 void free_half_weights(ConvWeightsHalf* d_hw) {
     if (!d_hw) return;
     // Copy struct back to host to read the device pointers

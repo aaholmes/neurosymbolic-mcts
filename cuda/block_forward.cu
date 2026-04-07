@@ -33,7 +33,8 @@ __device__ void oracle_net_forward_block(
     float* policy_out,
     float* value_out,
     float* k_out,
-    const ConvWeightsHalf* half_w
+    const ConvWeightsHalf* half_w,
+    const ConvWeightsShifted* shifted_w
 ) {
     int tid = threadIdx.x;
 
@@ -41,9 +42,11 @@ __device__ void oracle_net_forward_block(
     float* buf2        = smem + BLOCK_BUF2_OFFSET;   // backbone buffer [128, 64]
     float* smem_reduce = smem + BLOCK_REDUCE_OFFSET; // [256] multipurpose
     float* smem_weights = smem + BLOCK_WEIGHTS_OFFSET; // [1152] weight tile cache (scalar path)
-    half*  smem_staging = (half*)(smem + BLOCK_STAGING_OFFSET); // TC path (overlaps smem_weights)
+    half*  smem_staging = (half*)(smem + BLOCK_STAGING_OFFSET); // TC im2col path
+    half*  smem_shifted = (half*)(smem + BLOCK_SHIFTED_OFFSET); // shifted-copy path (overlaps)
 
-    bool use_tc = (half_w != nullptr);
+    // Dispatch priority: shifted > TC > scalar
+    int conv_mode = shifted_w ? 2 : (half_w ? 1 : 0);
 
     // SE workspace (within smem_reduce, reused each block)
     float* smem_se_avg = smem_reduce;                // [channels = 128]
@@ -53,7 +56,10 @@ __device__ void oracle_net_forward_block(
     block_board_to_planes(bs, buf1);
 
     // === 2. Input conv(17->128, k=3) + BN + ReLU -> buf2 ===
-    if (use_tc)
+    if (conv_mode == 2)
+        block_conv_3x3_shifted(buf1, shifted_w->start_conv, buf2, smem_shifted,
+                               NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
+    else if (conv_mode == 1)
         block_conv_3x3_tc(buf1, half_w->start_conv, buf2, smem_staging,
                           NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
     else
@@ -94,7 +100,9 @@ __device__ void oracle_net_forward_block(
         res30 = buf2[tid + 30*256]; res31 = buf2[tid + 31*256];
 
         // conv1: buf2 -> buf1, BN + ReLU
-        if (use_tc)
+        if (conv_mode == 2)
+            block_conv_3x3_shifted(buf2, shifted_w->block_conv1[b], buf1, smem_shifted, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+        else if (conv_mode == 1)
             block_conv_3x3_tc(buf2, half_w->block_conv1[b], buf1, smem_staging, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
         else
             block_conv_3x3_smem_w(buf2, blk.conv1_weight, buf1, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
@@ -103,7 +111,9 @@ __device__ void oracle_net_forward_block(
 
         // conv2: buf1 -> buf2, BN (no ReLU)
         // buf2 is overwritten here; the residual lives in registers above.
-        if (use_tc)
+        if (conv_mode == 2)
+            block_conv_3x3_shifted(buf1, shifted_w->block_conv2[b], buf2, smem_shifted, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+        else if (conv_mode == 1)
             block_conv_3x3_tc(buf1, half_w->block_conv2[b], buf2, smem_staging, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
         else
             block_conv_3x3_smem_w(buf1, blk.conv2_weight, buf2, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
@@ -156,7 +166,9 @@ __device__ void oracle_net_forward_block(
     // === 4. Policy head ===
 
     // Policy conv(128->128, k=3) + BN + ReLU: buf2 -> buf1
-    if (use_tc)
+    if (conv_mode == 2)
+        block_conv_3x3_shifted(buf2, shifted_w->p_conv, buf1, smem_shifted, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+    else if (conv_mode == 1)
         block_conv_3x3_tc(buf2, half_w->p_conv, buf1, smem_staging, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
     else
         block_conv_3x3_smem_w(buf2, weights->p_conv_weight, buf1, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);

@@ -95,6 +95,16 @@ struct ConvWeightsHalf {
     half* p_conv;                        // [128, 128, 9]
 };
 
+// Pre-converted FP16 conv weights split by kernel position for shifted-copy conv.
+// Each conv layer has 9 weight slices: W_s[C_out, C_in] for s in 0..8.
+// W_s[oc, c] = original[oc * C_in * 9 + c * 9 + s]
+struct ConvWeightsShifted {
+    half* start_conv[9];                       // 9 × [128, 17]
+    half* block_conv1[NN_NUM_BLOCKS][9];       // 6 × 9 × [128, 128]
+    half* block_conv2[NN_NUM_BLOCKS][9];       // 6 × 9 × [128, 128]
+    half* p_conv[9];                           // 9 × [128, 128]
+};
+
 // ============================================================
 // Host-side API
 // ============================================================
@@ -125,3 +135,10 @@ ConvWeightsHalf* convert_weights_to_half(const OracleNetWeights* d_weights);
 
 // Free GPU-resident FP16 conv weights.
 void free_half_weights(ConvWeightsHalf* d_half);
+
+// Convert conv3x3 weights to per-kernel-position FP16 slices for shifted-copy conv.
+// Each conv layer produces 9 × [C_out, C_in] FP16 matrices (one per kernel position).
+ConvWeightsShifted* convert_weights_shifted(const OracleNetWeights* d_weights);
+
+// Free GPU-resident shifted FP16 conv weights.
+void free_shifted_weights(ConvWeightsShifted* d_sw);

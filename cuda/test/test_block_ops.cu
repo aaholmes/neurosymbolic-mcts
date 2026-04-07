@@ -773,6 +773,294 @@ void test_tc_forward_zero_weights(bool& test_failed) {
 }
 
 // ============================================================
+// Shifted-copy conv3x3 tests
+// ============================================================
+
+__global__ void kernel_shifted_conv_128ch(
+    const float* input_global, half* const* W_s, float* output_global
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    float* input_smem = smem;
+    float* output_smem = smem + NN_HIDDEN_DIM * 64;
+    half*  shifted = (half*)(smem + 2 * NN_HIDDEN_DIM * 64);
+
+    for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
+        input_smem[i] = input_global[i];
+    __syncthreads();
+
+    block_conv_3x3_shifted(input_smem, W_s, output_smem, shifted,
+                           NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+
+    for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
+        output_global[i] = output_smem[i];
+}
+
+void test_shifted_conv_vs_scalar(bool& test_failed) {
+    int N = NN_HIDDEN_DIM * 64;
+    int W = NN_HIDDEN_DIM * NN_HIDDEN_DIM * 9;
+
+    float* h_input   = (float*)malloc(N * 4);
+    float* h_weights = (float*)malloc(W * 4);
+    float* h_out_scalar = (float*)malloc(N * 4);
+    float* h_out_shifted = (float*)malloc(N * 4);
+
+    for (int i = 0; i < N; i++) h_input[i]   = ((i * 7 + 3) % 17) / 17.0f - 0.5f;
+    for (int i = 0; i < W; i++) h_weights[i] = ((i * 11 + 5) % 13) / 13.0f - 0.5f;
+
+    float *d_input, *d_weights, *d_out_scalar, *d_out_shifted;
+    cudaMalloc(&d_input,      N * 4);
+    cudaMalloc(&d_weights,    W * 4);
+    cudaMalloc(&d_out_scalar, N * 4);
+    cudaMalloc(&d_out_shifted, N * 4);
+    cudaMemcpy(d_input,   h_input,   N * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, h_weights, W * 4, cudaMemcpyHostToDevice);
+
+    // Scalar reference
+    size_t smem_scalar = 2 * N * 4;
+    cudaFuncSetAttribute(kernel_block_conv_128ch,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_scalar);
+    kernel_block_conv_128ch<<<1, 256, smem_scalar>>>(d_weights, d_input, d_out_scalar);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_out_scalar, d_out_scalar, N * 4, cudaMemcpyDeviceToHost);
+
+    // Convert weights to shifted layout (9 × [128, 128])
+    // Build on host, copy to device
+    half* h_slices[9];
+    half* d_slices[9];
+    int slice_n = NN_HIDDEN_DIM * NN_HIDDEN_DIM;
+    for (int s = 0; s < 9; s++) {
+        h_slices[s] = (half*)malloc(slice_n * sizeof(half));
+        for (int oc = 0; oc < NN_HIDDEN_DIM; oc++)
+            for (int c = 0; c < NN_HIDDEN_DIM; c++)
+                h_slices[s][oc * NN_HIDDEN_DIM + c] =
+                    __float2half(h_weights[oc * NN_HIDDEN_DIM * 9 + c * 9 + s]);
+        cudaMalloc(&d_slices[s], slice_n * sizeof(half));
+        cudaMemcpy(d_slices[s], h_slices[s], slice_n * sizeof(half), cudaMemcpyHostToDevice);
+        free(h_slices[s]);
+    }
+
+    // Copy pointer array to device
+    half** d_W_s;
+    cudaMalloc(&d_W_s, 9 * sizeof(half*));
+    cudaMemcpy(d_W_s, d_slices, 9 * sizeof(half*), cudaMemcpyHostToDevice);
+
+    // Shifted conv: smem = input[8192] + output[8192] + shifted[4096] = 20480 floats
+    size_t smem_shifted = (2 * N + NN_HIDDEN_DIM * 64 / 2) * 4;
+    cudaFuncSetAttribute(kernel_shifted_conv_128ch,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_shifted);
+    kernel_shifted_conv_128ch<<<1, 256, smem_shifted>>>(d_input, d_W_s, d_out_shifted);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[CUDA error: %s] ", cudaGetErrorString(err));
+        test_failed = true;
+    } else {
+        cudaMemcpy(h_out_shifted, d_out_shifted, N * 4, cudaMemcpyDeviceToHost);
+
+        int mismatches = 0;
+        float max_diff = 0.0f;
+        for (int i = 0; i < N; i++) {
+            float diff = fabsf(h_out_scalar[i] - h_out_shifted[i]);
+            if (diff > max_diff) max_diff = diff;
+            float tol = fmaxf(0.5f, 0.02f * fabsf(h_out_scalar[i]));
+            if (diff > tol) mismatches++;
+        }
+        printf("[mismatches=%d/%d, max_diff=%.3f] ", mismatches, N, max_diff);
+        ASSERT_EQ(mismatches, 0);
+    }
+
+    free(h_input); free(h_weights); free(h_out_scalar); free(h_out_shifted);
+    cudaFree(d_input); cudaFree(d_weights); cudaFree(d_out_scalar); cudaFree(d_out_shifted);
+    for (int s = 0; s < 9; s++) cudaFree(d_slices[s]);
+    cudaFree(d_W_s);
+}
+
+// Shifted forward pass test with zero weights
+__global__ void kernel_block_forward_shifted(
+    const BoardState* bs, float q_result, const OracleNetWeights* w,
+    const ConvWeightsShifted* shifted_w,
+    float* policy_out, float* value_out, float* k_out
+) {
+    extern __shared__ float smem[];
+    oracle_net_forward_block(bs, q_result, w, smem, policy_out, value_out, k_out,
+                             nullptr, shifted_w);
+}
+
+// Generic shifted conv kernel for arbitrary C_in/C_out
+__global__ void kernel_shifted_conv_generic(
+    const float* input_global, half* const* W_s, float* output_global,
+    int C_in, int C_out
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int N_in = C_in * 64;
+    int N_out = C_out * 64;
+    float* input_smem  = smem;
+    float* output_smem = smem + N_in;
+    half*  shifted     = (half*)(smem + N_in + N_out);
+
+    for (int i = tid; i < N_in; i += blockDim.x) input_smem[i] = input_global[i];
+    __syncthreads();
+
+    block_conv_3x3_shifted(input_smem, W_s, output_smem, shifted, C_in, C_out);
+
+    for (int i = tid; i < N_out; i += blockDim.x) output_global[i] = output_smem[i];
+}
+
+// Shifted conv for start conv dimensions (C_in=17, C_out=128) — exercises a_staging boundary path
+void test_shifted_conv_start(bool& test_failed) {
+    int C_in = NN_INPUT_CHANNELS;  // 17
+    int C_out = NN_HIDDEN_DIM;     // 128
+    int N_in = C_in * 64;
+    int N_out = C_out * 64;
+    int W_total = C_out * C_in * 9;
+
+    float* h_input   = (float*)malloc(N_in * 4);
+    float* h_weights = (float*)malloc(W_total * 4);
+    float* h_out_scalar = (float*)malloc(N_out * 4);
+    float* h_out_shifted = (float*)malloc(N_out * 4);
+
+    for (int i = 0; i < N_in;    i++) h_input[i]   = ((i * 7 + 3) % 17) / 17.0f - 0.5f;
+    for (int i = 0; i < W_total; i++) h_weights[i]  = ((i * 11 + 5) % 13) / 13.0f - 0.5f;
+
+    float *d_input, *d_weights, *d_out_scalar, *d_out_shifted;
+    cudaMalloc(&d_input,       N_in * 4);
+    cudaMalloc(&d_weights,     W_total * 4);
+    cudaMalloc(&d_out_scalar,  N_out * 4);
+    cudaMalloc(&d_out_shifted, N_out * 4);
+    cudaMemcpy(d_input,   h_input,   N_in * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, h_weights, W_total * 4, cudaMemcpyHostToDevice);
+
+    // Scalar GPU reference
+    size_t smem_scalar = (N_in + N_out) * 4;
+    cudaFuncSetAttribute(kernel_block_conv_generic,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_scalar);
+    kernel_block_conv_generic<<<1, 256, smem_scalar>>>(
+        d_weights, d_input, d_out_scalar, C_in, C_out);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_out_scalar, d_out_scalar, N_out * 4, cudaMemcpyDeviceToHost);
+
+    // Build shifted weight slices: 9 × [128, 17]
+    int slice_n = C_out * C_in;
+    half* d_slices[9];
+    for (int s = 0; s < 9; s++) {
+        half* h_slice = (half*)malloc(slice_n * sizeof(half));
+        for (int oc = 0; oc < C_out; oc++)
+            for (int c = 0; c < C_in; c++)
+                h_slice[oc * C_in + c] =
+                    __float2half(h_weights[oc * C_in * 9 + c * 9 + s]);
+        cudaMalloc(&d_slices[s], slice_n * sizeof(half));
+        cudaMemcpy(d_slices[s], h_slice, slice_n * sizeof(half), cudaMemcpyHostToDevice);
+        free(h_slice);
+    }
+    half** d_W_s;
+    cudaMalloc(&d_W_s, 9 * sizeof(half*));
+    cudaMemcpy(d_W_s, d_slices, 9 * sizeof(half*), cudaMemcpyHostToDevice);
+
+    // Shifted conv: smem = input[17*64] + output[128*64] + shifted[4096 floats]
+    size_t smem_shifted = (N_in + N_out + BLOCK_SHIFTED_SIZE) * 4;
+    cudaFuncSetAttribute(kernel_shifted_conv_generic,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_shifted);
+    kernel_shifted_conv_generic<<<1, 256, smem_shifted>>>(
+        d_input, d_W_s, d_out_shifted, C_in, C_out);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[CUDA error: %s] ", cudaGetErrorString(err));
+        test_failed = true;
+    } else {
+        cudaMemcpy(h_out_shifted, d_out_shifted, N_out * 4, cudaMemcpyDeviceToHost);
+
+        int mismatches = 0;
+        float max_diff = 0.0f;
+        for (int i = 0; i < N_out; i++) {
+            float diff = fabsf(h_out_scalar[i] - h_out_shifted[i]);
+            if (diff > max_diff) max_diff = diff;
+            float tol = fmaxf(0.5f, 0.02f * fabsf(h_out_scalar[i]));
+            if (diff > tol) mismatches++;
+        }
+        printf("[mismatches=%d/%d, max_diff=%.3f] ", mismatches, N_out, max_diff);
+        ASSERT_EQ(mismatches, 0);
+    }
+
+    free(h_input); free(h_weights); free(h_out_scalar); free(h_out_shifted);
+    cudaFree(d_input); cudaFree(d_weights); cudaFree(d_out_scalar); cudaFree(d_out_shifted);
+    for (int s = 0; s < 9; s++) cudaFree(d_slices[s]);
+    cudaFree(d_W_s);
+}
+
+void test_shifted_forward_zero_weights(bool& test_failed) {
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    ConvWeightsShifted* d_shifted = convert_weights_shifted(d_weights);
+
+    BoardState bs = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float *d_policy_s, *d_value_s, *d_k_s;
+    float *d_policy_sh, *d_value_sh, *d_k_sh;
+    cudaMalloc(&d_policy_s,  NN_POLICY_SIZE * 4); cudaMalloc(&d_value_s, 4); cudaMalloc(&d_k_s, 4);
+    cudaMalloc(&d_policy_sh, NN_POLICY_SIZE * 4); cudaMalloc(&d_value_sh, 4); cudaMalloc(&d_k_sh, 4);
+
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    // Scalar forward pass
+    cudaFuncSetAttribute(kernel_block_forward,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, BLOCK_SMEM_BYTES);
+    kernel_block_forward<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        d_bs, 0.0f, d_weights, d_policy_s, d_value_s, d_k_s);
+    cudaDeviceSynchronize();
+
+    // Shifted forward pass
+    cudaFuncSetAttribute(kernel_block_forward_shifted,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, BLOCK_SMEM_BYTES);
+    kernel_block_forward_shifted<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        d_bs, 0.0f, d_weights, d_shifted, d_policy_sh, d_value_sh, d_k_sh);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[CUDA error: %s] ", cudaGetErrorString(err));
+        test_failed = true;
+    } else {
+        float h_val_s, h_val_sh, h_k_s, h_k_sh;
+        cudaMemcpy(&h_val_s,  d_value_s,  4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_val_sh, d_value_sh, 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_k_s,    d_k_s,      4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_k_sh,   d_k_sh,     4, cudaMemcpyDeviceToHost);
+
+        printf("[val: scalar=%.4f shifted=%.4f, k: %.4f vs %.4f] ",
+               h_val_s, h_val_sh, h_k_s, h_k_sh);
+
+        ASSERT_NEAR(h_val_sh, h_val_s, 0.1f);
+        ASSERT_NEAR(h_k_sh,   h_k_s,   0.01f);
+
+        float* h_pol_s  = (float*)malloc(NN_POLICY_SIZE * 4);
+        float* h_pol_sh = (float*)malloc(NN_POLICY_SIZE * 4);
+        cudaMemcpy(h_pol_s,  d_policy_s,  NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_pol_sh, d_policy_sh, NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+
+        int pol_mismatch = 0;
+        for (int i = 0; i < NN_POLICY_SIZE; i++)
+            if (fabsf(h_pol_s[i] - h_pol_sh[i]) > 0.1f) pol_mismatch++;
+        printf("[pol_mismatches=%d] ", pol_mismatch);
+        ASSERT_EQ(pol_mismatch, 0);
+
+        free(h_pol_s); free(h_pol_sh);
+    }
+
+    cudaFree(d_bs);
+    cudaFree(d_policy_s); cudaFree(d_value_s); cudaFree(d_k_s);
+    cudaFree(d_policy_sh); cudaFree(d_value_sh); cudaFree(d_k_sh);
+    free_shifted_weights(d_shifted);
+    free_nn_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -795,6 +1083,9 @@ int main() {
     RUN_TEST(test_tc_conv_vs_scalar);
     RUN_TEST(test_tc_conv_start);
     RUN_TEST(test_tc_forward_zero_weights);
+    RUN_TEST(test_shifted_conv_vs_scalar);
+    RUN_TEST(test_shifted_conv_start);
+    RUN_TEST(test_shifted_forward_zero_weights);
 
     printf("\nResults: %d/%d passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);
