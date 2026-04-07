@@ -475,6 +475,304 @@ void test_block_log_softmax(bool& test_failed) {
 }
 
 // ============================================================
+// Tensor Core conv3x3 tests
+// ============================================================
+
+__global__ void test_fp32_to_fp16(const float* src, half* dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __float2half(src[i]);
+}
+
+// TC conv kernel: loads input into smem, runs TC conv, writes output
+__global__ void kernel_tc_conv_128ch(
+    const float* input_global, const half* weights_h, float* output_global
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+
+    // smem layout: input[128*64] + output[128*64] + staging[1024]
+    float* input_smem  = smem;
+    float* output_smem = smem + NN_HIDDEN_DIM * 64;
+    half*  staging     = (half*)(smem + 2 * NN_HIDDEN_DIM * 64);
+
+    // Load input into smem
+    for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
+        input_smem[i] = input_global[i];
+    __syncthreads();
+
+    block_conv_3x3_tc(input_smem, weights_h, output_smem, staging,
+                      NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+
+    // Write output to global memory
+    for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
+        output_global[i] = output_smem[NN_HIDDEN_DIM * 64 * 0 + i];
+    // Note: output_smem starts at smem + 8192, but output_smem var already points there
+}
+
+// TC conv for start conv: 17->128 channels
+__global__ void kernel_tc_conv_start(
+    const float* input_global, const half* weights_h, float* output_global
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+
+    float* input_smem  = smem;                       // [17, 64]
+    float* output_smem = smem + NN_INPUT_CHANNELS * 64;  // [128, 64]
+    half*  staging     = (half*)(smem + NN_INPUT_CHANNELS * 64 + NN_HIDDEN_DIM * 64);
+
+    for (int i = tid; i < NN_INPUT_CHANNELS * 64; i += blockDim.x)
+        input_smem[i] = input_global[i];
+    __syncthreads();
+
+    block_conv_3x3_tc(input_smem, weights_h, output_smem, staging,
+                      NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
+
+    for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
+        output_global[i] = output_smem[i];
+}
+
+void test_tc_conv_vs_scalar(bool& test_failed) {
+    int N = NN_HIDDEN_DIM * 64;        // 8192
+    int W = NN_HIDDEN_DIM * NN_HIDDEN_DIM * 9; // 147456
+
+    float* h_input   = (float*)malloc(N * 4);
+    float* h_weights = (float*)malloc(W * 4);
+    float* h_out_scalar = (float*)malloc(N * 4);
+    float* h_out_tc     = (float*)malloc(N * 4);
+
+    // Deterministic input and weights (small values to avoid FP16 overflow)
+    for (int i = 0; i < N; i++) h_input[i]   = ((i * 7 + 3) % 17) / 17.0f - 0.5f;
+    for (int i = 0; i < W; i++) h_weights[i] = ((i * 11 + 5) % 13) / 13.0f - 0.5f;
+
+    float *d_input, *d_weights, *d_out_scalar, *d_out_tc;
+    cudaMalloc(&d_input,      N * 4);
+    cudaMalloc(&d_weights,    W * 4);
+    cudaMalloc(&d_out_scalar, N * 4);
+    cudaMalloc(&d_out_tc,     N * 4);
+    cudaMemcpy(d_input,   h_input,   N * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, h_weights, W * 4, cudaMemcpyHostToDevice);
+
+    // Scalar reference
+    size_t smem_scalar = 2 * N * 4;
+    cudaFuncSetAttribute(kernel_block_conv_128ch,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_scalar);
+    kernel_block_conv_128ch<<<1, 256, smem_scalar>>>(d_weights, d_input, d_out_scalar);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_out_scalar, d_out_scalar, N * 4, cudaMemcpyDeviceToHost);
+
+    // Convert weights to FP16
+    half* d_weights_h;
+    cudaMalloc(&d_weights_h, W * sizeof(half));
+    test_fp32_to_fp16<<<(W + 255) / 256, 256>>>(d_weights, d_weights_h, W);
+    cudaDeviceSynchronize();
+
+    // TC version: smem = input[8192] + output[8192] + staging[1024] = 17408 floats
+    size_t smem_tc = (2 * N + 1024) * 4;
+    cudaFuncSetAttribute(kernel_tc_conv_128ch,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_tc);
+    kernel_tc_conv_128ch<<<1, 256, smem_tc>>>(d_input, d_weights_h, d_out_tc);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[CUDA error: %s] ", cudaGetErrorString(err));
+        test_failed = true;
+        free(h_input); free(h_weights); free(h_out_scalar); free(h_out_tc);
+        cudaFree(d_input); cudaFree(d_weights); cudaFree(d_out_scalar);
+        cudaFree(d_out_tc); cudaFree(d_weights_h);
+        return;
+    }
+
+    cudaMemcpy(h_out_tc, d_out_tc, N * 4, cudaMemcpyDeviceToHost);
+
+    // Compare: FP16 inputs mean ~1e-3 relative error per multiply,
+    // accumulated over 128*9=1152 terms. Allow generous tolerance.
+    int mismatches = 0;
+    float max_diff = 0.0f;
+    for (int i = 0; i < N; i++) {
+        float diff = fabsf(h_out_scalar[i] - h_out_tc[i]);
+        if (diff > max_diff) max_diff = diff;
+        // Tolerance: relative or absolute
+        float tol = fmaxf(0.5f, 0.02f * fabsf(h_out_scalar[i]));
+        if (diff > tol) mismatches++;
+    }
+    printf("[mismatches=%d/%d, max_diff=%.3f] ", mismatches, N, max_diff);
+    ASSERT_EQ(mismatches, 0);
+
+    free(h_input); free(h_weights); free(h_out_scalar); free(h_out_tc);
+    cudaFree(d_input); cudaFree(d_weights); cudaFree(d_out_scalar);
+    cudaFree(d_out_tc); cudaFree(d_weights_h);
+}
+
+// Scalar GPU conv for arbitrary C_in -> C_out
+__global__ void kernel_block_conv_generic(
+    const float* weights, const float* input_global, float* output_global,
+    int C_in, int C_out
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int N_in  = C_in * 64;
+    int N_out = C_out * 64;
+
+    for (int i = tid; i < N_in; i += blockDim.x)
+        smem[i] = input_global[i];
+    __syncthreads();
+
+    block_conv_3x3(smem, weights, smem + N_in, C_in, C_out);
+
+    for (int i = tid; i < N_out; i += blockDim.x)
+        output_global[i] = smem[N_in + i];
+    __syncthreads();
+}
+
+void test_tc_conv_start(bool& test_failed) {
+    int N_in = NN_INPUT_CHANNELS * 64;   // 17*64 = 1088
+    int N_out = NN_HIDDEN_DIM * 64;      // 128*64 = 8192
+    int W = NN_HIDDEN_DIM * NN_INPUT_CHANNELS * 9;  // 128*17*9 = 19584
+
+    float* h_input   = (float*)malloc(N_in * 4);
+    float* h_weights = (float*)malloc(W * 4);
+    float* h_out_scalar = (float*)malloc(N_out * 4);
+    float* h_out_tc     = (float*)malloc(N_out * 4);
+
+    for (int i = 0; i < N_in; i++) h_input[i]   = ((i * 7 + 3) % 17) / 17.0f - 0.5f;
+    for (int i = 0; i < W;    i++) h_weights[i]  = ((i * 11 + 5) % 13) / 13.0f - 0.5f;
+
+    float *d_input, *d_weights, *d_out_scalar, *d_out_tc;
+    cudaMalloc(&d_input,      N_in * 4);
+    cudaMalloc(&d_weights,    W * 4);
+    cudaMalloc(&d_out_scalar, N_out * 4);
+    cudaMalloc(&d_out_tc,     N_out * 4);
+    cudaMemcpy(d_input,   h_input,   N_in * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, h_weights, W * 4,    cudaMemcpyHostToDevice);
+
+    // Scalar GPU reference
+    size_t smem_scalar = (N_in + N_out) * 4;
+    cudaFuncSetAttribute(kernel_block_conv_generic,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_scalar);
+    kernel_block_conv_generic<<<1, 256, smem_scalar>>>(
+        d_weights, d_input, d_out_scalar, NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_out_scalar, d_out_scalar, N_out * 4, cudaMemcpyDeviceToHost);
+
+    // TC version
+    half* d_weights_h;
+    cudaMalloc(&d_weights_h, W * sizeof(half));
+    test_fp32_to_fp16<<<(W + 255) / 256, 256>>>(d_weights, d_weights_h, W);
+    cudaDeviceSynchronize();
+
+    // smem = input[17*64] + output[128*64] + staging[1024]
+    size_t smem_tc = (N_in + N_out + 1024) * 4;
+    cudaFuncSetAttribute(kernel_tc_conv_start,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_tc);
+    kernel_tc_conv_start<<<1, 256, smem_tc>>>(d_input, d_weights_h, d_out_tc);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[CUDA error: %s] ", cudaGetErrorString(err));
+        test_failed = true;
+    } else {
+        cudaMemcpy(h_out_tc, d_out_tc, N_out * 4, cudaMemcpyDeviceToHost);
+
+        int mismatches = 0;
+        float max_diff = 0.0f;
+        for (int i = 0; i < N_out; i++) {
+            float diff = fabsf(h_out_scalar[i] - h_out_tc[i]);
+            if (diff > max_diff) max_diff = diff;
+            float tol = fmaxf(0.5f, 0.02f * fabsf(h_out_scalar[i]));
+            if (diff > tol) mismatches++;
+        }
+        printf("[mismatches=%d/%d, max_diff=%.3f] ", mismatches, N_out, max_diff);
+        ASSERT_EQ(mismatches, 0);
+    }
+
+    free(h_input); free(h_weights); free(h_out_scalar); free(h_out_tc);
+    cudaFree(d_input); cudaFree(d_weights); cudaFree(d_out_scalar);
+    cudaFree(d_out_tc); cudaFree(d_weights_h);
+}
+
+// TC forward pass test: compare scalar vs TC forward pass with zero weights
+__global__ void kernel_block_forward_tc(
+    const BoardState* bs, float q_result, const OracleNetWeights* w,
+    const ConvWeightsHalf* half_w,
+    float* policy_out, float* value_out, float* k_out
+) {
+    extern __shared__ float smem[];
+    oracle_net_forward_block(bs, q_result, w, smem, policy_out, value_out, k_out, half_w);
+}
+
+void test_tc_forward_zero_weights(bool& test_failed) {
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    ConvWeightsHalf* d_half = convert_weights_to_half(d_weights);
+
+    BoardState bs = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float *d_policy_s, *d_value_s, *d_k_s;  // scalar
+    float *d_policy_t, *d_value_t, *d_k_t;  // TC
+    cudaMalloc(&d_policy_s, NN_POLICY_SIZE * 4); cudaMalloc(&d_value_s, 4); cudaMalloc(&d_k_s, 4);
+    cudaMalloc(&d_policy_t, NN_POLICY_SIZE * 4); cudaMalloc(&d_value_t, 4); cudaMalloc(&d_k_t, 4);
+
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    // Scalar forward pass
+    cudaFuncSetAttribute(kernel_block_forward,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, BLOCK_SMEM_BYTES);
+    kernel_block_forward<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        d_bs, 0.0f, d_weights, d_policy_s, d_value_s, d_k_s);
+    cudaDeviceSynchronize();
+
+    // TC forward pass
+    cudaFuncSetAttribute(kernel_block_forward_tc,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, BLOCK_SMEM_BYTES);
+    kernel_block_forward_tc<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        d_bs, 0.0f, d_weights, d_half, d_policy_t, d_value_t, d_k_t);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[CUDA error: %s] ", cudaGetErrorString(err));
+        test_failed = true;
+    } else {
+        float h_val_s, h_val_t, h_k_s, h_k_t;
+        cudaMemcpy(&h_val_s, d_value_s, 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_val_t, d_value_t, 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_k_s,   d_k_s,     4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_k_t,   d_k_t,     4, cudaMemcpyDeviceToHost);
+
+        printf("[val: scalar=%.4f tc=%.4f, k: %.4f vs %.4f] ",
+               h_val_s, h_val_t, h_k_s, h_k_t);
+
+        // With zero weights, both should produce value ≈ 0
+        ASSERT_NEAR(h_val_t, h_val_s, 0.1f);
+        ASSERT_NEAR(h_k_t,   h_k_s,   0.01f);
+
+        // Compare policies
+        float* h_pol_s = (float*)malloc(NN_POLICY_SIZE * 4);
+        float* h_pol_t = (float*)malloc(NN_POLICY_SIZE * 4);
+        cudaMemcpy(h_pol_s, d_policy_s, NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_pol_t, d_policy_t, NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+
+        int pol_mismatch = 0;
+        for (int i = 0; i < NN_POLICY_SIZE; i++)
+            if (fabsf(h_pol_s[i] - h_pol_t[i]) > 0.1f) pol_mismatch++;
+        printf("[pol_mismatches=%d] ", pol_mismatch);
+        ASSERT_EQ(pol_mismatch, 0);
+
+        free(h_pol_s); free(h_pol_t);
+    }
+
+    cudaFree(d_bs);
+    cudaFree(d_policy_s); cudaFree(d_value_s); cudaFree(d_k_s);
+    cudaFree(d_policy_t); cudaFree(d_value_t); cudaFree(d_k_t);
+    free_half_weights(d_half);
+    free_nn_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -494,6 +792,9 @@ int main() {
     RUN_TEST(test_block_forward_q_sensitivity);
     RUN_TEST(test_block_mcts_produces_moves);
     RUN_TEST(test_block_mcts_mate_detection);
+    RUN_TEST(test_tc_conv_vs_scalar);
+    RUN_TEST(test_tc_conv_start);
+    RUN_TEST(test_tc_forward_zero_weights);
 
     printf("\nResults: %d/%d passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);

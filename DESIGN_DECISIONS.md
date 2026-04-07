@@ -508,30 +508,33 @@ The quiescence search uses the principal exchange (PE) variant: follow the singl
 
 ### Current implementation status
 
-The GPU MCTS kernel runs in classical mode, NN mode (warp-cooperative, 32 threads), and block mode (256 threads with shared memory activations). All modes validated with trained gen_18 OracleNet weights exported from PyTorch.
+The GPU MCTS kernel runs in classical mode, NN mode (warp-cooperative, 32 threads), and block mode (256 threads with shared memory activations and Tensor Core conv3x3). All modes validated with trained gen_18 OracleNet weights exported from PyTorch.
 
-**Two inference implementations:**
+**Three inference implementations:**
 
 The *warp-cooperative* path (32 threads) was the correctness proof: im2col materialization to global scratch (374 KB/warp), warp shuffle reductions for BN/SE. Forward pass: 131 ms — 325× slower than projected, because only 32 threads utilize <0.001% of GPU compute and each thread reads full weight rows independently from global memory.
 
-The *block-cooperative* path (256 threads) keeps activations in shared memory throughout: two 32 KB buffers (`buf1`, `buf2`) hold the [128, 64] activation tensors, eliminating global memory round-trips between layers. Direct 3×3 convolution reads weights from global memory into a 1,152-float shared memory tile (one input channel at a time), gathering inputs directly from the shared-memory activation buffer — no im2col materialization. Residual shortcuts are saved in 32 named float registers per thread (avoiding a third 32 KB buffer that would exceed the 96 KB shared memory limit). Forward pass: **9.57 ms** — 13.7× faster than warp mode.
+The *block-cooperative scalar* path (256 threads) keeps activations in shared memory throughout: two 32 KB buffers (`buf1`, `buf2`) hold the [128, 64] activation tensors, eliminating global memory round-trips between layers. Direct 3×3 convolution reads weights from global memory into a 1,152-float shared memory tile (one input channel at a time), gathering inputs directly from the shared-memory activation buffer — no im2col materialization. Residual shortcuts are saved in 32 named float registers per thread (avoiding a third 32 KB buffer that would exceed the 96 KB shared memory limit). Forward pass: **9.52 ms** — 13.7× faster than warp mode.
 
-**Multi-block scaling:** Multiple blocks share a single tree via atomic simulation counter, virtual loss for path diversity, and atomicCAS expansion locks. Scaling is near-perfectly linear up to the SM count (36 on RTX 5060 Ti): 36 blocks achieve 115 ms for 400 simulations (7.3× faster than the CPU+PyTorch baseline of 840 ms). Node count drops ~17% at 36 blocks from expansion contention — acceptable for the 33.7× wall-clock speedup.
+The *block-cooperative Tensor Core* path replaces the scalar FP32 conv3x3 with `wmma` 16×16×16 FP16 matrix multiply-accumulate. Conv3x3 is reformulated as GEMM: `C[C_out, 64] = W[C_out, C_in*9] × im2col[C_in*9, 64]`. Weights are pre-converted to FP16 once at search start (`ConvWeightsHalf` struct). The im2col matrix is built on-the-fly per [16, 16] tile: 32 threads in each warp gather from FP32 shared-memory activations, convert to FP16, and stage in per-warp shared memory for `wmma::load_matrix_sync`. Eight warps divide the M dimension (one 16-row tile per warp), each iterating over 4 N_tiles × K_tiles. FP32 accumulator ensures output precision. The wmma leading dimension must be a multiple of 8 for `half`; when K (= C_in × 9) isn't aligned (e.g., 153 for the 17→128 start conv), the A fragment loads through staging with ld=16 instead of directly from global memory. Forward pass: **3.65 ms** — 2.6× faster than scalar block, 35.8× faster than warp mode. BN, SE, 1×1 conv, and policy/value heads remain FP32.
+
+**Multi-block scaling:** Multiple blocks share a single tree via atomic simulation counter, virtual loss for path diversity, and atomicCAS expansion locks. Scaling is near-perfectly linear up to the SM count (36 on RTX 5060 Ti): 36 blocks achieve **45 ms** for 400 simulations (18.7× faster than the CPU+PyTorch baseline of 840 ms). Node count drops ~17% at 36 blocks from expansion contention — acceptable for the 33.6× wall-clock speedup.
 
 **Multi-tree eval:** `gpu_mcts_eval_trees` runs N independent MCTS trees in parallel, one block per tree, with partitioned node pools and per-tree allocation counters. Supports both classical mode (no weights) and NN mode.
 
-**Forward pass profiling** (layer-by-layer timing with trained weights):
+**Forward pass profiling** (layer-by-layer timing with trained weights, scalar path):
 
 | Layer | Time (ms) | % of Total |
 |---|---|---|
 | 8× conv 3×3 (shared-memory weight tiling) | 5.92 | 61.7% |
 | BN/SE/residual (20 ops) | 0.28 | 2.9% |
 | Other (register save/restore, remaining convs, sync barriers) | 3.38 | 35.2% |
-| **Total** | **9.60** | |
+| **Total (scalar)** | **9.52** | |
+| **Total (Tensor Core)** | **3.65** | conv3x3 near-instant |
 
-Each conv achieves 12.7 GFLOPS — 0.006% of the RTX 5060 Ti's 200 TFLOPS peak. The bottleneck is algorithmic: 640 `__syncthreads()` barriers per conv (5 per input channel × 128 channels) for weight tiling, stride-9 shared memory bank conflicts, and serial FMA chains. FP16/FP8 Tensor Core inference is the path to sub-millisecond forward passes.
+The scalar conv achieves 12.7 GFLOPS — 0.006% of the RTX 5060 Ti's 200 TFLOPS peak. The Tensor Core path eliminates the bottleneck: 640 `__syncthreads()` per conv replaced by per-warp `__syncwarp()` with a single `__syncthreads()` at the end. The remaining 3.65 ms is dominated by BN/SE/1×1 conv and the tree operations (select, expand, backup) that run on thread 0 while all 256 threads idle.
 
-Tests: 7 tree store + 30 perft + 8 quick checks + 11 q-search + 13 MCTS kernel + 21 NN ops + 5 move encoding + 9 block ops = 104 tests.
+Tests: 7 tree store + 30 perft + 8 quick checks + 11 q-search + 13 MCTS kernel + 21 NN ops + 5 move encoding + 12 block ops = 107 tests.
 
 ## 9. Tournament Design: Adaptive CI-Targeted Pairing
 

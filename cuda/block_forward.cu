@@ -32,14 +32,18 @@ __device__ void oracle_net_forward_block(
     float* smem,
     float* policy_out,
     float* value_out,
-    float* k_out
+    float* k_out,
+    const ConvWeightsHalf* half_w
 ) {
     int tid = threadIdx.x;
 
     float* buf1        = smem + BLOCK_BUF1_OFFSET;   // work buffer [128, 64]
     float* buf2        = smem + BLOCK_BUF2_OFFSET;   // backbone buffer [128, 64]
     float* smem_reduce = smem + BLOCK_REDUCE_OFFSET; // [256] multipurpose
-    float* smem_weights = smem + BLOCK_WEIGHTS_OFFSET; // [1152] weight tile cache
+    float* smem_weights = smem + BLOCK_WEIGHTS_OFFSET; // [1152] weight tile cache (scalar path)
+    half*  smem_staging = (half*)(smem + BLOCK_STAGING_OFFSET); // TC path (overlaps smem_weights)
+
+    bool use_tc = (half_w != nullptr);
 
     // SE workspace (within smem_reduce, reused each block)
     float* smem_se_avg = smem_reduce;                // [channels = 128]
@@ -49,8 +53,12 @@ __device__ void oracle_net_forward_block(
     block_board_to_planes(bs, buf1);
 
     // === 2. Input conv(17->128, k=3) + BN + ReLU -> buf2 ===
-    block_conv_3x3_smem_w(buf1, weights->start_conv_weight, buf2, smem_weights,
-                   NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
+    if (use_tc)
+        block_conv_3x3_tc(buf1, half_w->start_conv, buf2, smem_staging,
+                          NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
+    else
+        block_conv_3x3_smem_w(buf1, weights->start_conv_weight, buf2, smem_weights,
+                       NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
     block_bn_relu(buf2, weights->start_bn.weight, weights->start_bn.bias,
                   weights->start_bn.running_mean, weights->start_bn.running_var,
                   NN_HIDDEN_DIM, true);
@@ -86,13 +94,19 @@ __device__ void oracle_net_forward_block(
         res30 = buf2[tid + 30*256]; res31 = buf2[tid + 31*256];
 
         // conv1: buf2 -> buf1, BN + ReLU
-        block_conv_3x3_smem_w(buf2, blk.conv1_weight, buf1, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+        if (use_tc)
+            block_conv_3x3_tc(buf2, half_w->block_conv1[b], buf1, smem_staging, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+        else
+            block_conv_3x3_smem_w(buf2, blk.conv1_weight, buf1, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
         block_bn_relu(buf1, blk.bn1.weight, blk.bn1.bias,
                       blk.bn1.running_mean, blk.bn1.running_var, NN_HIDDEN_DIM, true);
 
         // conv2: buf1 -> buf2, BN (no ReLU)
         // buf2 is overwritten here; the residual lives in registers above.
-        block_conv_3x3_smem_w(buf1, blk.conv2_weight, buf2, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+        if (use_tc)
+            block_conv_3x3_tc(buf1, half_w->block_conv2[b], buf2, smem_staging, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+        else
+            block_conv_3x3_smem_w(buf1, blk.conv2_weight, buf2, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
         block_bn_relu(buf2, blk.bn2.weight, blk.bn2.bias,
                       blk.bn2.running_mean, blk.bn2.running_var, NN_HIDDEN_DIM, false);
 
@@ -142,7 +156,10 @@ __device__ void oracle_net_forward_block(
     // === 4. Policy head ===
 
     // Policy conv(128->128, k=3) + BN + ReLU: buf2 -> buf1
-    block_conv_3x3_smem_w(buf2, weights->p_conv_weight, buf1, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+    if (use_tc)
+        block_conv_3x3_tc(buf2, half_w->p_conv, buf1, smem_staging, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+    else
+        block_conv_3x3_smem_w(buf2, weights->p_conv_weight, buf1, smem_weights, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
     block_bn_relu(buf1, weights->p_bn.weight, weights->p_bn.bias,
                   weights->p_bn.running_mean, weights->p_bn.running_var,
                   NN_HIDDEN_DIM, true);

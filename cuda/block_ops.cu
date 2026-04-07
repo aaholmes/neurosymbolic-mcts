@@ -1,5 +1,7 @@
 #include "block_ops.cuh"
 #include <cfloat>
+#include <mma.h>
+using namespace nvcuda;
 
 // All functions assume blockDim.x == 256 and all 256 threads participate.
 // Work is striped: thread t owns elements t, t+256, t+512, ...
@@ -193,6 +195,121 @@ __device__ void block_conv_3x3(
             }
         }
         output_smem[out_idx] = acc;
+    }
+    __syncthreads();
+}
+
+// ============================================================
+// Tensor Core 3x3 convolution using wmma 16×16×16 FP16
+//
+// Reformulates conv3x3 as GEMM:
+//   C[C_out, 64] = W[C_out, C_in*9] × im2col[C_in*9, 64]
+//
+// - Weights pre-converted to FP16 (global memory, read-only)
+// - im2col tile built on-the-fly from FP32 shared-memory activations
+// - FP32 accumulator, results written as FP32 to output_smem
+//
+// Warp mapping: 8 warps (256 threads), warp w owns M rows [w*16, w*16+16).
+// Each warp iterates over 4 N_tiles (covering N=64) and 72 K_tiles (K=1152).
+// smem_staging: 8 * 256 halves, each warp gets its own 256-half region.
+// ============================================================
+__device__ void block_conv_3x3_tc(
+    const float* __restrict__ input_smem,
+    const half* __restrict__ weights_h,
+    float* __restrict__ output_smem,
+    half* __restrict__ smem_staging,
+    int C_in, int C_out
+) {
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+
+    int K = C_in * 9;
+    int K_tiles = (K + 15) / 16;
+
+    // Each warp gets its own staging area: 256 halves
+    half* my_staging = smem_staging + warp_id * 256;
+
+    // Warp w owns output rows [M_start, M_start+16)
+    int M_start = warp_id * 16;
+
+    // Handle C_out not being exactly 128 (e.g., could be less)
+    if (M_start >= C_out) {
+        __syncthreads();
+        return;
+    }
+
+    // wmma::load_matrix_sync requires leading dimension to be a multiple of 8
+    // for half precision. When K % 16 != 0, we must load A through staging.
+    bool a_direct = (K % 16 == 0);
+
+    for (int n_tile = 0; n_tile < 4; n_tile++) {
+        int N_start = n_tile * 16;
+
+        // Initialize FP32 accumulator fragment
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+        wmma::fill_fragment(acc, 0.0f);
+
+        for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
+            int K_start = k_tile * 16;
+
+            // --- Load A fragment (weights) ---
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+            if (a_direct && K_start + 16 <= K) {
+                // Fast path: K is aligned and tile is fully within bounds
+                wmma::load_matrix_sync(a_frag, weights_h + M_start * K + K_start, K);
+            } else {
+                // Slow path: K not aligned or boundary tile. Load via staging with ld=16.
+                for (int i = lane; i < 256; i += 32) {
+                    int r = i / 16;  // row [0,16)
+                    int c = i % 16;  // col [0,16)
+                    int m_idx = M_start + r;
+                    int k_idx = K_start + c;
+                    half val = __float2half(0.0f);
+                    if (m_idx < C_out && k_idx < K)
+                        val = weights_h[m_idx * K + k_idx];
+                    my_staging[i] = val;
+                }
+                __syncwarp();
+                wmma::load_matrix_sync(a_frag, my_staging, 16);
+            }
+
+            // --- Build B tile (im2col gather) into my_staging ---
+            // B[k, n]: k indexes (c_in, kernel_pos), n indexes spatial
+            for (int i = lane; i < 256; i += 32) {
+                int k_local = i / 16;  // row within tile [0,16)
+                int n_local = i % 16;  // col within tile [0,16)
+                int k_idx = K_start + k_local;
+                int n_idx = N_start + n_local;
+                half val = __float2half(0.0f);
+                if (k_idx < K && n_idx < 64) {
+                    int c = k_idx / 9;
+                    int ki = k_idx % 9;
+                    int ky = ki / 3 - 1;
+                    int kx = ki % 3 - 1;
+                    int oy = n_idx / 8;
+                    int ox = n_idx % 8;
+                    int iy = oy + ky;
+                    int ix = ox + kx;
+                    if (iy >= 0 && iy < 8 && ix >= 0 && ix < 8)
+                        val = __float2half(input_smem[c * 64 + iy * 8 + ix]);
+                }
+                my_staging[i] = val;
+            }
+            __syncwarp();
+
+            // Load B fragment from shared memory staging
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+            wmma::load_matrix_sync(b_frag, my_staging, 16);
+
+            // Matrix multiply-accumulate
+            wmma::mma_sync(acc, a_frag, b_frag, acc);
+        }
+
+        // Store accumulator to output shared memory
+        // output_smem is [C_out, 64] row-major, leading dim = 64
+        wmma::store_matrix_sync(output_smem + M_start * 64 + N_start, acc, 64,
+                                wmma::mem_row_major);
     }
     __syncthreads();
 }

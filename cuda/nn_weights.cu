@@ -125,3 +125,79 @@ bool update_nn_weights(OracleNetWeights* d_weights, const char* path) {
 size_t nn_weights_size() {
     return sizeof(OracleNetWeights);
 }
+
+// ============================================================
+// FP16 weight conversion for Tensor Core conv3x3
+// ============================================================
+
+// Guard against struct layout changes (must match export_weights_cuda.py)
+static_assert(sizeof(OracleNetWeights) == 7930688,
+              "OracleNetWeights size changed — update weight export and this assert");
+
+__global__ void kernel_fp32_to_fp16(const float* src, half* dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __float2half(src[i]);
+}
+
+static void convert_array(const float* d_src, half* d_dst, int count) {
+    int threads = 256;
+    int blocks = (count + threads - 1) / threads;
+    kernel_fp32_to_fp16<<<blocks, threads>>>(d_src, d_dst, count);
+}
+
+ConvWeightsHalf* convert_weights_to_half(const OracleNetWeights* d_weights) {
+    ConvWeightsHalf h_hw;  // host copy with device pointers
+
+    // start_conv: [128, 17, 9]
+    int start_n = NN_HIDDEN_DIM * NN_INPUT_CHANNELS * 9;
+    cudaMalloc(&h_hw.start_conv, start_n * sizeof(half));
+    const float* start_ptr = (const float*)d_weights +
+        offsetof(OracleNetWeights, start_conv_weight) / sizeof(float);
+    convert_array(start_ptr, h_hw.start_conv, start_n);
+
+    // block conv weights: [128, 128, 9] each
+    int block_n = NN_HIDDEN_DIM * NN_HIDDEN_DIM * 9;
+    for (int b = 0; b < NN_NUM_BLOCKS; b++) {
+        cudaMalloc(&h_hw.block_conv1[b], block_n * sizeof(half));
+        const float* c1 = (const float*)d_weights +
+            (offsetof(OracleNetWeights, blocks) +
+             b * sizeof(ResBlockParams) +
+             offsetof(ResBlockParams, conv1_weight)) / sizeof(float);
+        convert_array(c1, h_hw.block_conv1[b], block_n);
+
+        cudaMalloc(&h_hw.block_conv2[b], block_n * sizeof(half));
+        const float* c2 = (const float*)d_weights +
+            (offsetof(OracleNetWeights, blocks) +
+             b * sizeof(ResBlockParams) +
+             offsetof(ResBlockParams, conv2_weight)) / sizeof(float);
+        convert_array(c2, h_hw.block_conv2[b], block_n);
+    }
+
+    // policy conv: [128, 128, 9]
+    cudaMalloc(&h_hw.p_conv, block_n * sizeof(half));
+    const float* p_ptr = (const float*)d_weights +
+        offsetof(OracleNetWeights, p_conv_weight) / sizeof(float);
+    convert_array(p_ptr, h_hw.p_conv, block_n);
+
+    cudaDeviceSynchronize();
+
+    // Copy the struct (which contains device pointers) to device memory
+    ConvWeightsHalf* d_hw = nullptr;
+    cudaMalloc(&d_hw, sizeof(ConvWeightsHalf));
+    cudaMemcpy(d_hw, &h_hw, sizeof(ConvWeightsHalf), cudaMemcpyHostToDevice);
+    return d_hw;
+}
+
+void free_half_weights(ConvWeightsHalf* d_hw) {
+    if (!d_hw) return;
+    // Copy struct back to host to read the device pointers
+    ConvWeightsHalf h_hw;
+    cudaMemcpy(&h_hw, d_hw, sizeof(ConvWeightsHalf), cudaMemcpyDeviceToHost);
+    cudaFree(h_hw.start_conv);
+    for (int b = 0; b < NN_NUM_BLOCKS; b++) {
+        cudaFree(h_hw.block_conv1[b]);
+        cudaFree(h_hw.block_conv2[b]);
+    }
+    cudaFree(h_hw.p_conv);
+    cudaFree(d_hw);
+}

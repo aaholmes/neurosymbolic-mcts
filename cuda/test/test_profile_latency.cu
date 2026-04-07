@@ -100,6 +100,16 @@ __global__ void kernel_block_forward_pass(
     oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out);
 }
 
+__global__ void kernel_block_forward_pass_tc(
+    const BoardState* bs, float q_result,
+    const OracleNetWeights* weights,
+    const ConvWeightsHalf* half_w,
+    float* policy_out, float* value_out, float* k_out
+) {
+    extern __shared__ float smem[];
+    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out, half_w);
+}
+
 // CUDA event timer helper
 struct Timer {
     cudaEvent_t start, stop;
@@ -206,6 +216,32 @@ int main(int argc, char** argv) {
     float bfp_per_call = bfp_total_ms / FP_ITERS;
     printf("Single block forward pass: %.2f ms/iter (%.0f iters/sec)\n",
            bfp_per_call, 1000.0f / bfp_per_call);
+
+    // -----------------------------------------------------------------------
+    // Benchmark 2b: Tensor Core block forward pass latency
+    // -----------------------------------------------------------------------
+    printf("\n--- Tensor Core Block-Mode (256 threads, wmma FP16) Forward Pass ---\n");
+    ConvWeightsHalf* d_half_w = convert_weights_to_half(d_weights);
+
+    cudaFuncSetAttribute(kernel_block_forward_pass_tc,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, BLOCK_SMEM_BYTES);
+    // Warmup
+    kernel_block_forward_pass_tc<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        d_bs, q_result, d_weights, d_half_w, d_policy, d_value, d_k);
+    cudaDeviceSynchronize();
+
+    timer.record_start();
+    for (int i = 0; i < FP_ITERS; i++) {
+        kernel_block_forward_pass_tc<<<1, 256, BLOCK_SMEM_BYTES>>>(
+            d_bs, q_result, d_weights, d_half_w, d_policy, d_value, d_k);
+    }
+    float tc_total_ms = timer.elapsed_ms();
+    float tc_per_call = tc_total_ms / FP_ITERS;
+    printf("Single TC block forward pass: %.2f ms/iter (%.0f iters/sec)\n",
+           tc_per_call, 1000.0f / tc_per_call);
+    printf("TC speedup vs scalar block: %.1fx\n", bfp_per_call / tc_per_call);
+
+    free_half_weights(d_half_w);
 
     // -----------------------------------------------------------------------
     // Benchmark 3: Single warp forward pass latency (for comparison)

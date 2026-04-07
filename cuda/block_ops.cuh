@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.cuh"
+#include <cuda_fp16.h>
 
 #ifdef __CUDACC__
 
@@ -59,6 +60,22 @@ __device__ void block_conv_3x3_smem_w(
     const float* __restrict__ weights,
     float* __restrict__ output_smem,
     float* __restrict__ smem_weights,
+    int C_in, int C_out
+);
+
+// --- 3x3 convolution via Tensor Core (wmma FP16) ---
+// input_smem:    [C_in, 64] FP32 in shared memory
+// weights_h:     [C_out, C_in, 9] FP16 in global memory (pre-converted)
+// output_smem:   [C_out, 64] FP32 in shared memory
+// smem_staging:  per-warp FP16 im2col tile workspace
+//                Must be at least 8 * 256 halves (cast to half*).
+// Requires blockDim.x == 256 (8 warps).
+// Uses wmma 16×16×16 tiles with FP32 accumulator.
+__device__ void block_conv_3x3_tc(
+    const float* __restrict__ input_smem,
+    const half* __restrict__ weights_h,
+    float* __restrict__ output_smem,
+    half* __restrict__ smem_staging,
     int C_in, int C_out
 );
 

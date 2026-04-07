@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.cuh"
+#include <cuda_fp16.h>
 
 // ============================================================
 // OracleNet Weight Storage for GPU-Resident Inference
@@ -84,6 +85,16 @@ struct OracleNetWeights {
     float k_logit;  // 0.0 at init → k = 0.47 * ln(2) ≈ 0.326
 };
 
+// Pre-converted FP16 conv weights for Tensor Core path.
+// Allocated alongside OracleNetWeights; freed separately.
+// Only conv3x3 weights are converted (BN, SE, 1x1 stay FP32).
+struct ConvWeightsHalf {
+    half* start_conv;                    // [128, 17, 9]
+    half* block_conv1[NN_NUM_BLOCKS];    // [128, 128, 9] each
+    half* block_conv2[NN_NUM_BLOCKS];    // [128, 128, 9] each
+    half* p_conv;                        // [128, 128, 9]
+};
+
 // ============================================================
 // Host-side API
 // ============================================================
@@ -106,3 +117,11 @@ bool update_nn_weights(OracleNetWeights* d_weights, const char* path);
 
 // Get the size of the weights struct in bytes.
 size_t nn_weights_size();
+
+// Convert conv3x3 weights from FP32 OracleNetWeights to FP16 for Tensor Core path.
+// Returns heap-allocated ConvWeightsHalf with GPU-resident half arrays.
+// d_weights must be GPU-resident.
+ConvWeightsHalf* convert_weights_to_half(const OracleNetWeights* d_weights);
+
+// Free GPU-resident FP16 conv weights.
+void free_half_weights(ConvWeightsHalf* d_half);
