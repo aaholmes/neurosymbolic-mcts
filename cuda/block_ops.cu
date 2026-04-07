@@ -348,58 +348,53 @@ __device__ void block_conv_3x3_shifted(
     int M_start = warp_id * 16;
     if (M_start >= C_out) {
         // This warp has no work — must still participate in __syncthreads
-        for (int n_tile = 0; n_tile < 4; n_tile++) {
-            for (int s = 0; s < 9; s++) {
-                __syncthreads();
-                __syncthreads();
-            }
+        for (int s = 0; s < 9; s++) {
+            __syncthreads();
+            __syncthreads();
         }
         __syncthreads();
         return;
     }
 
     // Per-warp staging for A fragment boundary loads (when C_in % 16 != 0)
-    // Reuse a portion of the shifted buffer that the current warp isn't reading
-    // (shifted is only read during B loads, which happen after A loads)
-    half* a_staging = shifted + total_in + warp_id * 256;  // 256 halves past the shifted data
+    half* a_staging = shifted + total_in + warp_id * 256;
 
-    for (int n_tile = 0; n_tile < 4; n_tile++) {
-        int N_start = n_tile * 16;
+    // 4 accumulators — one per N_tile, kept live across all 9 shifts
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[4];
+    for (int t = 0; t < 4; t++) wmma::fill_fragment(acc[t], 0.0f);
 
-        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
-        wmma::fill_fragment(acc, 0.0f);
+    for (int s = 0; s < 9; s++) {
+        int ky = KY_TABLE[s];
+        int kx = KX_TABLE[s];
+        const half* W_slice = W_s[s];
 
-        for (int s = 0; s < 9; s++) {
-            int ky = KY_TABLE[s];
-            int kx = KX_TABLE[s];
-            const half* W_slice = W_s[s];
+        // --- Build shifted FP16 copy ONCE per kernel position (all 256 threads) ---
+        __syncthreads();
+        for (int i = tid; i < total_in; i += 256) {
+            int c = i >> 6;
+            int n = i & 63;
+            int oy = n >> 3;
+            int ox = n & 7;
+            int iy = oy + ky;
+            int ix = ox + kx;
+            half val = __float2half(0.0f);
+            if ((unsigned)iy < 8u && (unsigned)ix < 8u)
+                val = __float2half(input_smem[c * 64 + iy * 8 + ix]);
+            shifted[i] = val;
+        }
+        __syncthreads();
 
-            // --- Build shifted FP16 copy (all 256 threads) ---
-            __syncthreads();
-            for (int i = tid; i < total_in; i += 256) {
-                int c = i >> 6;       // i / 64
-                int n = i & 63;       // i % 64
-                int oy = n >> 3;      // n / 8
-                int ox = n & 7;       // n % 8
-                int iy = oy + ky;
-                int ix = ox + kx;
-                half val = __float2half(0.0f);
-                if ((unsigned)iy < 8u && (unsigned)ix < 8u)
-                    val = __float2half(input_smem[c * 64 + iy * 8 + ix]);
-                shifted[i] = val;
-            }
-            __syncthreads();
+        // --- Process ALL 4 N_tiles from the same shifted buffer ---
+        for (int n_tile = 0; n_tile < 4; n_tile++) {
+            int N_start = n_tile * 16;
 
-            // --- Dense GEMM: acc += W_slice[C_out, C_in] × shifted[C_in, 64] ---
             for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
                 int K_start = k_tile * 16;
 
-                // Load A fragment (weights) from contiguous global FP16
                 wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
                 if (a_direct && K_start + 16 <= C_in) {
                     wmma::load_matrix_sync(a_frag, W_slice + M_start * C_in + K_start, C_in);
                 } else {
-                    // Boundary: load via staging with ld=16
                     for (int i = lane; i < 256; i += 32) {
                         int r = i / 16, c = i % 16;
                         int m_idx = M_start + r, k_idx = K_start + c;
@@ -412,17 +407,18 @@ __device__ void block_conv_3x3_shifted(
                     wmma::load_matrix_sync(a_frag, a_staging, 16);
                 }
 
-                // Load B fragment (shifted activations) from contiguous shared FP16
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
                 wmma::load_matrix_sync(b_frag, shifted + K_start * 64 + N_start, 64);
 
-                wmma::mma_sync(acc, a_frag, b_frag, acc);
+                wmma::mma_sync(acc[n_tile], a_frag, b_frag, acc[n_tile]);
             }
         }
+    }
 
-        // Store accumulated result
-        wmma::store_matrix_sync(output_smem + M_start * 64 + N_start, acc, 64,
-                                wmma::mem_row_major);
+    // Store all 4 accumulators
+    for (int n_tile = 0; n_tile < 4; n_tile++) {
+        wmma::store_matrix_sync(output_smem + M_start * 64 + n_tile * 16,
+                                acc[n_tile], 64, wmma::mem_row_major);
     }
     __syncthreads();
 }

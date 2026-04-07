@@ -11,11 +11,43 @@
 #include "../nn_weights.cuh"
 #include "../nn_forward.cuh"
 #include "../block_forward.cuh"
+#include "../block_ops.cuh"
 #include "test_helpers.cuh"
 
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <functional>
+
+// Forward declarations for weight conversion
+ConvWeightsShifted* convert_weights_shifted(const OracleNetWeights* d_weights);
+void free_shifted_weights(ConvWeightsShifted* d_sw);
+
+// Max input channels for staging buffer allocation
+constexpr int C_IN_MAX = 128;
+
+// Wrapper kernels for individual op timing
+__global__ void k_board_to_planes(const BoardState* bs, float* planes) {
+    block_board_to_planes(bs, planes);
+}
+__global__ void k_conv_3x3_shifted(const float* in, half* const* W_s, float* out, half* staging, int ci, int co) {
+    block_conv_3x3_shifted(in, W_s, out, staging, ci, co);
+}
+__global__ void k_bn_relu(float* data, const float* g, const float* b, const float* m, const float* v, int ch, bool r) {
+    block_bn_relu(data, g, b, m, v, ch, r);
+}
+__global__ void k_bn_relu_1ch(float* data, const float* g, const float* b, const float* m, const float* v, bool r) {
+    block_bn_relu_1ch(data, g, b, m, v, r);
+}
+__global__ void k_se(float* data, const float* fc1, const float* fc2, int ch, int inner, float* avg, float* fc1_out) {
+    block_se_block(data, fc1, fc2, ch, inner, avg, fc1_out);
+}
+__global__ void k_log_softmax(float* data, int size, float* smem) {
+    block_log_softmax(data, size, smem);
+}
+__global__ void k_1x1_conv(const float* in, const float* w, float* out, int ci, int co) {
+    block_1x1_conv(in, w, out, ci, co);
+}
 
 // FEN parser
 static int char_to_piece(char c, int* color) {
@@ -90,7 +122,7 @@ __global__ void kernel_forward_pass(
     oracle_net_forward(bs, q_result, weights, scratch, policy_out, value_out, k_out);
 }
 
-// Wrapper kernel for block forward pass (oracle_net_forward_block is __device__)
+// Wrapper kernels for forward pass timing
 __global__ void kernel_block_forward_pass(
     const BoardState* bs, float q_result,
     const OracleNetWeights* weights,
@@ -99,7 +131,6 @@ __global__ void kernel_block_forward_pass(
     extern __shared__ float smem[];
     oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out);
 }
-
 __global__ void kernel_block_forward_pass_tc(
     const BoardState* bs, float q_result,
     const OracleNetWeights* weights,
@@ -107,7 +138,16 @@ __global__ void kernel_block_forward_pass_tc(
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out, half_w);
+    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out, half_w, nullptr);
+}
+__global__ void kernel_block_forward_pass_shifted(
+    const BoardState* bs, float q_result,
+    const OracleNetWeights* weights,
+    const ConvWeightsShifted* shifted_w,
+    float* policy_out, float* value_out, float* k_out
+) {
+    extern __shared__ float smem[];
+    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out, nullptr, shifted_w);
 }
 
 // CUDA event timer helper
@@ -242,6 +282,129 @@ int main(int argc, char** argv) {
     printf("TC speedup vs scalar block: %.1fx\n", bfp_per_call / tc_per_call);
 
     free_half_weights(d_half_w);
+
+    // -----------------------------------------------------------------------
+    // Benchmark 2c: Shifted-copy block forward pass latency
+    // -----------------------------------------------------------------------
+    printf("\n--- Shifted-Copy Block-Mode (256 threads, wmma FP16) Forward Pass ---\n");
+    ConvWeightsShifted* d_shifted_w = convert_weights_shifted(d_weights);
+
+    cudaFuncSetAttribute(kernel_block_forward_pass_shifted,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, BLOCK_SMEM_BYTES);
+    // Warmup
+    kernel_block_forward_pass_shifted<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        d_bs, q_result, d_weights, d_shifted_w, d_policy, d_value, d_k);
+    cudaDeviceSynchronize();
+
+    timer.record_start();
+    for (int i = 0; i < FP_ITERS; i++) {
+        kernel_block_forward_pass_shifted<<<1, 256, BLOCK_SMEM_BYTES>>>(
+            d_bs, q_result, d_weights, d_shifted_w, d_policy, d_value, d_k);
+    }
+    float shifted_total_ms = timer.elapsed_ms();
+    float shifted_per_call = shifted_total_ms / FP_ITERS;
+    printf("Single shifted block forward pass: %.2f ms/iter (%.0f iters/sec)\n",
+           shifted_per_call, 1000.0f / shifted_per_call);
+    printf("Shifted speedup vs scalar block: %.1fx\n", bfp_per_call / shifted_per_call);
+    printf("Shifted speedup vs TC im2col:    %.1fx\n", tc_per_call / shifted_per_call);
+
+    // -----------------------------------------------------------------------
+    // Benchmark 2d: Shifted path layer-by-layer breakdown
+    // -----------------------------------------------------------------------
+    printf("\n=== Shifted Path Layer Breakdown ===\n");
+
+    // CUDA events for per-op timing
+    cudaEvent_t ev_start, ev_end;
+    cudaEventCreate(&ev_start);
+    cudaEventCreate(&ev_end);
+
+    // Allocate shared memory buffers for timing individual ops
+    float *d_buf1, *d_buf2, *d_planes, *d_reduce;
+    cudaMalloc(&d_buf1, BLOCK_BUF_SIZE * sizeof(float));
+    cudaMalloc(&d_buf2, BLOCK_BUF_SIZE * sizeof(float));
+    cudaMalloc(&d_planes, NN_INPUT_CHANNELS * 64 * sizeof(float));
+    cudaMalloc(&d_reduce, BLOCK_REDUCE_SIZE * sizeof(float));
+    half *d_shifted_staging;
+    cudaMalloc(&d_shifted_staging, C_IN_MAX * 64 * sizeof(half) + 8 * 256 * sizeof(half));  // shifted + a_staging
+
+    auto time_op = [&](const char* name, std::function<void()> fn, int iters = 50) -> float {
+        cudaEventRecord(ev_start);
+        for (int i = 0; i < iters; i++) fn();
+        cudaEventRecord(ev_end);
+        cudaEventSynchronize(ev_end);
+        float ms;
+        cudaEventElapsedTime(&ms, ev_start, ev_end);
+        float avg = ms / iters;
+        printf("  %-38s %8.3f ms\n", name, avg);
+        return avg;
+    };
+
+    // Shifted conv kernels: 9 × [C_out, C_in] FP16 GEMMs
+    float t_s_start = time_op("shifted start_conv [17→128]", [&]() {
+        k_conv_3x3_shifted<<<1, 256>>>(d_planes, d_shifted_w->start_conv, d_buf2,
+                                       d_shifted_staging, NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
+    });
+    float t_s_res = time_op("shifted res_conv [128→128]", [&]() {
+        const ResBlockParams* blk = &d_weights->blocks[0];
+        k_conv_3x3_shifted<<<1, 256>>>(d_buf2, d_shifted_w->block_conv1[0], d_buf1,
+                                       d_shifted_staging, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+    });
+    float t_s_pconv = time_op("shifted policy_conv [128→128]", [&]() {
+        k_conv_3x3_shifted<<<1, 256>>>(d_buf2, d_shifted_w->p_conv, d_buf1,
+                                       d_shifted_staging, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
+    });
+
+    float t_bn = time_op("BN+ReLU [128]", [&]() {
+        k_bn_relu<<<1, 256>>>(d_buf2, d_weights->start_bn.weight, d_weights->start_bn.bias,
+                              d_weights->start_bn.running_mean, d_weights->start_bn.running_var,
+                              NN_HIDDEN_DIM, true);
+    });
+    float t_bn2 = time_op("BN2 (no ReLU) [128]", [&]() {
+        const ResBlockParams* blk = &d_weights->blocks[0];
+        k_bn_relu<<<1, 256>>>(d_buf2, blk->bn2.weight, blk->bn2.bias,
+                              blk->bn2.running_mean, blk->bn2.running_var,
+                              NN_HIDDEN_DIM, false);
+    });
+    float t_se = time_op("SE block [128]", [&]() {
+        const ResBlockParams* blk = &d_weights->blocks[0];
+        k_se<<<1, 256>>>(d_buf2, blk->se.fc1_weight, blk->se.fc2_weight,
+                         NN_HIDDEN_DIM, NN_SE_INNER, d_reduce, d_reduce + NN_HIDDEN_DIM);
+    });
+    float t_softmax = time_op("log_softmax [4672]", [&]() {
+        k_log_softmax<<<1, 256>>>(d_policy, NN_POLICY_SIZE, d_reduce);
+    });
+    float t_vconv = time_op("value 1x1 conv [128→1]", [&]() {
+        k_1x1_conv<<<1, 256>>>(d_buf2, d_weights->v_conv_weight, d_buf1,
+                               NN_HIDDEN_DIM, 1);
+    });
+    float t_vbn = time_op("value BN+ReLU [1]", [&]() {
+        k_bn_relu_1ch<<<1, 256>>>(d_buf1, d_weights->v_bn.weight, d_weights->v_bn.bias,
+                                  d_weights->v_bn.running_mean, d_weights->v_bn.running_var, true);
+    });
+
+    // Sum up the shifted path components
+    // 8 conv layers total: 1 start + 6 res × 2 (conv1+conv2) + 1 policy
+    float shifted_conv_total = t_s_start + 12 * t_s_res + t_s_pconv;  // ~0.5ms per conv × 14
+    float shifted_bn_total = t_bn + 12 * t_bn2 + t_bn;  // ~0.01ms × 14
+    float shifted_se_total = 6 * t_se;
+    float shifted_other = t_softmax + t_vconv + t_vbn;
+    float shifted_sync = shifted_per_call - shifted_conv_total - shifted_bn_total - shifted_se_total - shifted_other;
+
+    printf("\n  %-38s %8.3f ms (%.1f%%)\n", "Total shifted conv_3x3 (14×)", shifted_conv_total, 100*shifted_conv_total/shifted_per_call);
+    printf("  %-38s %8.3f ms (%.1f%%)\n", "Total BN+ReLU (14×)", shifted_bn_total, 100*shifted_bn_total/shifted_per_call);
+    printf("  %-38s %8.3f ms (%.1f%%)\n", "Total SE (6×)", shifted_se_total, 100*shifted_se_total/shifted_per_call);
+    printf("  %-38s %8.3f ms (%.1f%%)\n", "Other (softmax, value head)", shifted_other, 100*shifted_other/shifted_per_call);
+    printf("  %-38s %8.3f ms (%.1f%%)\n", "Sync/kernel overhead", shifted_sync, 100*shifted_sync/shifted_per_call);
+    printf("  %-38s %8.3f ms\n", "TOTAL shifted forward pass", shifted_per_call);
+
+    // Compare with scalar and TC
+    printf("\n  %-38s Scalar: %6.2f ms | TC: %6.2f ms | Shifted: %6.2f ms\n", "Forward pass:", bfp_per_call, tc_per_call, shifted_per_call);
+    printf("  %-38s Scalar: %6.2f ms | TC: %6.2f ms | Shifted: %6.2f ms\n", "Convs only:", bfp_per_call * 0.62, tc_per_call * 0.40, shifted_conv_total);
+
+    free_half_weights(d_half_w);
+    free_shifted_weights(d_shifted_w);
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_end);
 
     // -----------------------------------------------------------------------
     // Benchmark 3: Single warp forward pass latency (for comparison)
