@@ -67,17 +67,27 @@ struct EvalConfig {
     float c_puct;
     int max_concurrent;
     int seed;
+    // SPRT early stopping
+    float sprt_elo0;              // H0 Elo difference (typically 0)
+    float sprt_elo1;              // H1 Elo difference (typically 10)
+    float sprt_alpha;             // false positive rate (typically 0.05)
+    float sprt_beta;              // false negative rate (typically 0.05)
+    // Training data output (nullptr = don't save)
+    const char* training_data_dir;
 };
 
 struct EvalResult {
     int wins_a;       // games won by player A
     int wins_b;       // games won by player B
     int draws;
+    int games_played; // may be < num_games if SPRT stopped early
+    float llr;        // log-likelihood ratio at termination
+    const char* sprt_result;  // "H1", "H0", or "inconclusive"
 };
 
-// Play num_games evaluation games between two networks.
+// Play evaluation games between two networks with SPRT early stopping.
 // Half the games have A=white, half have A=black.
-// Returns wins/losses/draws from A's perspective.
+// Optionally saves training data from both players.
 EvalResult run_eval_games(
     TransformerWeights* d_weights_a,
     TransformerWeights* d_weights_b,

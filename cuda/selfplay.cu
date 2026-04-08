@@ -625,6 +625,27 @@ int run_selfplay(
 // Eval mode: two networks play against each other
 // ============================================================
 
+// SPRT log-likelihood ratio computation
+static float compute_llr(int wins, int losses, int draws, float elo0, float elo1) {
+    int total = wins + losses + draws;
+    if (total == 0) return 0.0f;
+    float score = ((float)wins + 0.5f * (float)draws) / (float)total;
+    if (score <= 0.0f || score >= 1.0f) return score >= 1.0f ? 100.0f : -100.0f;
+    float p0 = 1.0f / (1.0f + powf(10.0f, -elo0 / 400.0f));
+    float p1 = 1.0f / (1.0f + powf(10.0f, -elo1 / 400.0f));
+    float l0 = (float)total * (score * logf(score / p0) + (1.0f - score) * logf((1.0f - score) / (1.0f - p0)));
+    float l1 = (float)total * (score * logf(score / p1) + (1.0f - score) * logf((1.0f - score) / (1.0f - p1)));
+    return l1 - l0;
+}
+
+static const char* check_sprt(float llr, float alpha, float beta) {
+    float lower = logf(beta / (1.0f - alpha));
+    float upper = logf((1.0f - beta) / alpha);
+    if (llr >= upper) return "H1";
+    if (llr <= lower) return "H0";
+    return nullptr;  // inconclusive
+}
+
 EvalResult run_eval_games(
     TransformerWeights* d_weights_a,
     TransformerWeights* d_weights_b,
@@ -632,24 +653,34 @@ EvalResult run_eval_games(
 ) {
     init_zobrist();
 
-    EvalResult result = {0, 0, 0};
+    EvalResult result = {0, 0, 0, 0, 0.0f, "inconclusive"};
+    bool save_data = (config.training_data_dir != nullptr);
+    bool do_sprt = (config.sprt_elo1 > config.sprt_elo0);
+    bool sprt_decided = false;
 
     int concurrent = config.max_concurrent;
     if (concurrent > config.num_games) concurrent = config.num_games;
     if (concurrent > SP_MAX_CONCURRENT) concurrent = SP_MAX_CONCURRENT;
 
-    // GPU resources
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, concurrent * NN_POLICY_SIZE * sizeof(float));
+    BoardState* d_bs = nullptr; cudaMalloc(&d_bs, sizeof(BoardState));
+    GPUMove* d_moves = nullptr; cudaMalloc(&d_moves, 256 * sizeof(GPUMove));
+    int* d_count = nullptr; cudaMalloc(&d_count, sizeof(int));
+    int* d_check = nullptr; cudaMalloc(&d_check, sizeof(int));
+    float* d_pe = nullptr; cudaMalloc(&d_pe, sizeof(float));
 
-    BoardState* d_bs = nullptr;
-    cudaMalloc(&d_bs, sizeof(BoardState));
-    GPUMove* d_moves = nullptr;
-    cudaMalloc(&d_moves, 256 * sizeof(GPUMove));
-    int* d_count = nullptr;
-    cudaMalloc(&d_count, sizeof(int));
-    int* d_check = nullptr;
-    cudaMalloc(&d_check, sizeof(int));
+    // Training data: one record per game (only if saving)
+    GameRecord* records_a = nullptr;  // games where A played (from A's perspective)
+    GameRecord* records_b = nullptr;  // games where B played (from B's perspective)
+    if (save_data) {
+        records_a = new GameRecord[config.num_games];
+        records_b = new GameRecord[config.num_games];
+        for (int i = 0; i < config.num_games; i++) {
+            records_a[i].samples = nullptr; records_a[i].num_samples = 0; records_a[i].result = 0;
+            records_b[i].samples = nullptr; records_b[i].num_samples = 0; records_b[i].result = 0;
+        }
+    }
 
     struct EvalGame {
         BoardState board;
@@ -657,23 +688,27 @@ EvalResult run_eval_games(
         int hash_count;
         int move_number;
         int game_idx;
-        bool a_is_white;   // true: A plays white, B plays black
+        bool a_is_white;
         GameRng rng;
     };
 
     EvalGame* games = new EvalGame[concurrent];
     int games_started = 0;
-    int games_completed = 0;
 
     auto init_eval_game = [&](EvalGame& g, int game_idx) {
         g.board = make_start_pos();
         g.hash_count = 0;
         g.move_number = 1;
         g.game_idx = game_idx;
-        g.a_is_white = (game_idx % 2 == 0);  // alternate colors for fairness
+        g.a_is_white = (game_idx % 2 == 0);
         g.rng.seed(game_idx, config.seed);
-        uint64_t h = compute_hash(g.board);
-        g.hash_history[g.hash_count++] = h;
+        g.hash_history[g.hash_count++] = compute_hash(g.board);
+        if (save_data) {
+            if (!records_a[game_idx].samples) records_a[game_idx].alloc();
+            if (!records_b[game_idx].samples) records_b[game_idx].alloc();
+            records_a[game_idx].num_samples = 0; records_a[game_idx].result = 0;
+            records_b[game_idx].num_samples = 0; records_b[game_idx].result = 0;
+        }
     };
 
     int active_count = 0;
@@ -682,54 +717,35 @@ EvalResult run_eval_games(
         active_count++;
     }
 
-    // Temp arrays for partitioning
     BoardState positions_a[SP_MAX_CONCURRENT], positions_b[SP_MAX_CONCURRENT];
-    int idx_a[SP_MAX_CONCURRENT], idx_b[SP_MAX_CONCURRENT];  // map back to games[]
-    TreeEvalResult results_a[SP_MAX_CONCURRENT], results_b[SP_MAX_CONCURRENT];
+    int idx_a[SP_MAX_CONCURRENT], idx_b[SP_MAX_CONCURRENT];
+    TreeEvalResult mcts_a[SP_MAX_CONCURRENT], mcts_b[SP_MAX_CONCURRENT];
 
-    while (active_count > 0) {
-        // Partition active games by which player is to move
+    while (active_count > 0 && !sprt_decided) {
         int count_a = 0, count_b = 0;
         for (int i = 0; i < active_count; i++) {
-            bool stm_is_white = games[i].board.w_to_move;
-            bool a_to_move = (stm_is_white == games[i].a_is_white);
-            if (a_to_move) {
-                positions_a[count_a] = games[i].board;
-                idx_a[count_a] = i;
-                count_a++;
-            } else {
-                positions_b[count_b] = games[i].board;
-                idx_b[count_b] = i;
-                count_b++;
-            }
+            bool a_to_move = (games[i].board.w_to_move != 0) == games[i].a_is_white;
+            if (a_to_move) { positions_a[count_a] = games[i].board; idx_a[count_a++] = i; }
+            else           { positions_b[count_b] = games[i].board; idx_b[count_b++] = i; }
         }
 
-        // MCTS for group A (using weights_a)
         if (count_a > 0) {
-            memset(results_a, 0, count_a * sizeof(TreeEvalResult));
-            gpu_mcts_eval_trees_transformer(
-                positions_a, count_a, config.sims_per_move,
+            memset(mcts_a, 0, count_a * sizeof(TreeEvalResult));
+            gpu_mcts_eval_trees_transformer(positions_a, count_a, config.sims_per_move,
                 config.max_nodes_per_tree, config.enable_koth, config.c_puct,
-                d_weights_a, d_policy_bufs, results_a
-            );
+                d_weights_a, d_policy_bufs, mcts_a);
         }
-
-        // MCTS for group B (using weights_b)
         if (count_b > 0) {
-            memset(results_b, 0, count_b * sizeof(TreeEvalResult));
-            gpu_mcts_eval_trees_transformer(
-                positions_b, count_b, config.sims_per_move,
+            memset(mcts_b, 0, count_b * sizeof(TreeEvalResult));
+            gpu_mcts_eval_trees_transformer(positions_b, count_b, config.sims_per_move,
                 config.max_nodes_per_tree, config.enable_koth, config.c_puct,
-                d_weights_b, d_policy_bufs, results_b
-            );
+                d_weights_b, d_policy_bufs, mcts_b);
         }
 
-        // Merge results back: for each group, find best move and apply
-        // Process in reverse so we can swap-remove
-        auto process_game = [&](int game_slot, TreeEvalResult& res, int tree_idx) {
-            EvalGame& g = games[game_slot];
+        auto process_game = [&](int slot, TreeEvalResult& res, int tree_idx) {
+            EvalGame& g = games[slot];
+            bool a_to_move = (g.board.w_to_move != 0) == g.a_is_white;
 
-            // Read children to get visit counts for move selection
             void* d_pool_ptr = nullptr;
             cudaGetSymbolAddress(&d_pool_ptr, g_node_pool);
             int tree_offset = tree_idx * config.max_nodes_per_tree;
@@ -739,9 +755,7 @@ EvalResult run_eval_games(
 
             int num_children = h_root.num_children;
             if (num_children > 256) num_children = 256;
-            int h_visits[256];
-            GPUMove h_moves[256];
-            int total_visits = 0;
+            int h_visits[256]; GPUMove h_moves[256]; int total_visits = 0;
             for (int c = 0; c < num_children; c++) {
                 MCTSNode h_child;
                 cudaMemcpy(&h_child, (char*)d_pool_ptr + (h_root.first_child_idx + c) * sizeof(MCTSNode),
@@ -751,88 +765,144 @@ EvalResult run_eval_games(
                 total_visits += h_child.visit_count;
             }
 
-            // Select move (eval uses explore_base for slight randomness)
-            GPUMove chosen = 0;
-            if (num_children > 0 && total_visits > 0) {
-                chosen = sample_move(res, g.board, g.move_number, config.explore_base,
-                                     h_visits, h_moves, num_children, g.rng);
+            // Record training data for the STM's player
+            if (save_data) {
+                GameRecord& rec = a_to_move ? records_a[g.game_idx] : records_b[g.game_idx];
+                if (rec.num_samples < SP_MAX_MOVES_PER_GAME) {
+                    float* sample = rec.samples + rec.num_samples * SP_SAMPLE_FLOATS;
+                    board_to_planes_host(g.board, sample);
+                    // PE
+                    cudaMemcpy(d_bs, &g.board, sizeof(BoardState), cudaMemcpyHostToDevice);
+                    kernel_pe<<<1, 1>>>(d_bs, d_pe);
+                    float pe_val; cudaMemcpy(&pe_val, d_pe, sizeof(float), cudaMemcpyDeviceToHost);
+                    sample[SP_BOARD_FLOATS] = pe_val;
+                    sample[SP_BOARD_FLOATS + 1] = 1.0f;
+                    sample[SP_BOARD_FLOATS + 2] = 0.0f;  // backfill later
+                    float* policy = sample + SP_BOARD_FLOATS + 3;
+                    memset(policy, 0, NN_POLICY_SIZE * sizeof(float));
+                    if (total_visits > 0) {
+                        for (int c = 0; c < num_children; c++) {
+                            int idx = move_to_policy_index_host(h_moves[c], g.board.w_to_move);
+                            if (idx >= 0 && idx < NN_POLICY_SIZE)
+                                policy[idx] = (float)h_visits[c] / (float)total_visits;
+                        }
+                    }
+                    rec.num_samples++;
+                }
             }
 
-            int game_result = 0;  // 0=ongoing
+            GPUMove chosen = 0;
+            if (num_children > 0 && total_visits > 0)
+                chosen = sample_move(res, g.board, g.move_number, config.explore_base,
+                                     h_visits, h_moves, num_children, g.rng);
 
+            int game_result = 0;
             if (chosen != 0 && num_children > 0) {
-                // Apply move
                 cudaMemcpy(d_bs, &g.board, sizeof(BoardState), cudaMemcpyHostToDevice);
                 kernel_apply_move<<<1, 1>>>(d_bs, chosen);
                 cudaMemcpy(&g.board, d_bs, sizeof(BoardState), cudaMemcpyDeviceToHost);
                 g.move_number++;
-
                 uint64_t h = compute_hash(g.board);
-                if (g.hash_count < SP_MAX_MOVES_PER_GAME)
-                    g.hash_history[g.hash_count++] = h;
+                if (g.hash_count < SP_MAX_MOVES_PER_GAME) g.hash_history[g.hash_count++] = h;
 
-                // Check game end
                 cudaMemcpy(d_bs, &g.board, sizeof(BoardState), cudaMemcpyHostToDevice);
                 kernel_gen_legal_moves<<<1, 1>>>(d_bs, d_moves, d_count);
-                int legal_count;
-                cudaMemcpy(&legal_count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
+                int legal_count; cudaMemcpy(&legal_count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
 
                 if (legal_count == 0) {
                     kernel_is_in_check<<<1, 1>>>(d_bs, d_check);
-                    int in_check;
-                    cudaMemcpy(&in_check, d_check, sizeof(int), cudaMemcpyDeviceToHost);
+                    int in_check; cudaMemcpy(&in_check, d_check, sizeof(int), cudaMemcpyDeviceToHost);
                     game_result = in_check ? (g.board.w_to_move ? 2 : 1) : 3;
-                } else if (g.board.halfmove >= 100) {
-                    game_result = 3;
-                } else if (is_threefold(g.hash_history, g.hash_count, h)) {
-                    game_result = 3;
-                } else if (g.move_number > SP_MAX_MOVES_PER_GAME) {
-                    game_result = 3;
-                }
+                } else if (g.board.halfmove >= 100) game_result = 3;
+                else if (is_threefold(g.hash_history, g.hash_count, h)) game_result = 3;
+                else if (g.move_number > SP_MAX_MOVES_PER_GAME) game_result = 3;
             } else {
-                game_result = 3;  // no legal moves or no visits
+                game_result = 3;
             }
 
             if (game_result != 0) {
-                // Classify result from A's perspective
-                if (game_result == 3) {
-                    result.draws++;
-                } else if (game_result == 1) {
-                    // White wins
-                    if (g.a_is_white) result.wins_a++;
-                    else result.wins_b++;
-                } else {
-                    // Black wins
-                    if (!g.a_is_white) result.wins_a++;
-                    else result.wins_b++;
-                }
-                games_completed++;
+                if (game_result == 3) result.draws++;
+                else if (game_result == 1) { if (g.a_is_white) result.wins_a++; else result.wins_b++; }
+                else { if (!g.a_is_white) result.wins_a++; else result.wins_b++; }
+                result.games_played++;
 
-                // Replace with new game
-                if (games_started < config.num_games) {
-                    init_eval_game(games[game_slot], games_started++);
+                // Backfill training data values
+                if (save_data) {
+                    float white_value = (game_result == 1) ? 1.0f : (game_result == 2) ? -1.0f : 0.0f;
+                    // A's samples: A's perspective
+                    float a_value = g.a_is_white ? white_value : -white_value;
+                    for (int s = 0; s < records_a[g.game_idx].num_samples; s++)
+                        records_a[g.game_idx].samples[s * SP_SAMPLE_FLOATS + SP_BOARD_FLOATS + 2] = a_value;
+                    // B's samples: B's perspective
+                    float b_value = -a_value;
+                    for (int s = 0; s < records_b[g.game_idx].num_samples; s++)
+                        records_b[g.game_idx].samples[s * SP_SAMPLE_FLOATS + SP_BOARD_FLOATS + 2] = b_value;
+                }
+
+                // SPRT check
+                if (do_sprt) {
+                    result.llr = compute_llr(result.wins_a, result.wins_b, result.draws,
+                                             config.sprt_elo0, config.sprt_elo1);
+                    const char* decision = check_sprt(result.llr, config.sprt_alpha, config.sprt_beta);
+                    if (decision) {
+                        result.sprt_result = decision;
+                        sprt_decided = true;
+                    }
+                }
+
+                if (!sprt_decided && games_started < config.num_games) {
+                    init_eval_game(games[slot], games_started++);
                 } else {
-                    if (game_slot < active_count - 1)
-                        games[game_slot] = games[active_count - 1];
+                    if (slot < active_count - 1) games[slot] = games[active_count - 1];
                     active_count--;
                 }
             }
         };
 
-        // Process group A results (in reverse for safe swap-remove)
-        for (int i = count_a - 1; i >= 0; i--)
-            process_game(idx_a[i], results_a[i], i);
-
-        // Process group B results
-        for (int i = count_b - 1; i >= 0; i--)
-            process_game(idx_b[i], results_b[i], i);
+        for (int i = count_a - 1; i >= 0; i--) process_game(idx_a[i], mcts_a[i], i);
+        for (int i = count_b - 1; i >= 0; i--) process_game(idx_b[i], mcts_b[i], i);
     }
 
-    cudaFree(d_policy_bufs);
-    cudaFree(d_bs);
-    cudaFree(d_moves);
-    cudaFree(d_count);
-    cudaFree(d_check);
+    // Final SPRT if not decided
+    if (!sprt_decided && result.games_played > 0) {
+        result.llr = compute_llr(result.wins_a, result.wins_b, result.draws,
+                                 config.sprt_elo0, config.sprt_elo1);
+        const char* decision = check_sprt(result.llr, config.sprt_alpha, config.sprt_beta);
+        result.sprt_result = decision ? decision : "inconclusive";
+    }
+
+    // Write training data
+    if (save_data && config.training_data_dir) {
+        char dir_a[512], dir_b[512];
+        snprintf(dir_a, sizeof(dir_a), "%s/candidate", config.training_data_dir);
+        snprintf(dir_b, sizeof(dir_b), "%s/current", config.training_data_dir);
+        mkdir(config.training_data_dir, 0755);
+        mkdir(dir_a, 0755);
+        mkdir(dir_b, 0755);
+
+        auto write_records = [](const char* dir, GameRecord* recs, int n) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/eval_%ld.bin", dir, (long)time(nullptr));
+            FILE* f = fopen(path, "wb");
+            if (!f) return;
+            int total = 0;
+            for (int i = 0; i < n; i++) {
+                if (recs[i].num_samples > 0 && recs[i].samples)
+                    fwrite(recs[i].samples, sizeof(float), recs[i].num_samples * SP_SAMPLE_FLOATS, f);
+                total += recs[i].num_samples;
+            }
+            fclose(f);
+            printf("Wrote %d eval samples to %s\n", total, path);
+        };
+        write_records(dir_a, records_a, config.num_games);
+        write_records(dir_b, records_b, config.num_games);
+    }
+
+    if (records_a) { for (int i = 0; i < config.num_games; i++) records_a[i].free_buf(); delete[] records_a; }
+    if (records_b) { for (int i = 0; i < config.num_games; i++) records_b[i].free_buf(); delete[] records_b; }
+
+    cudaFree(d_policy_bufs); cudaFree(d_bs); cudaFree(d_moves);
+    cudaFree(d_count); cudaFree(d_check); cudaFree(d_pe);
     delete[] games;
 
     return result;

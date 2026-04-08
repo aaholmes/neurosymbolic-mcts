@@ -671,11 +671,20 @@ class Orchestrator:
                 str(self.config.eval_max_games),
                 str(eval_sims),
                 "--seed", str(eval_seed),
+                "--sprt-elo0", str(self.config.sprt_elo0),
+                "--sprt-elo1", str(self.config.sprt_elo1),
+                "--sprt-alpha", str(self.config.sprt_alpha),
+                "--sprt-beta", str(self.config.sprt_beta),
             ]
             if self.config.enable_koth:
                 cmd.append("--koth")
 
-            print(f"GPU Eval: {self.config.eval_max_games} games, CUDA transformer...")
+            # Save training data from eval games
+            eval_data_dir = os.path.join(self.config.data_dir,
+                f"gen_{self._current_generation}", "eval_data")
+            cmd.extend(["--save-training-data", eval_data_dir])
+
+            print(f"GPU Eval: up to {self.config.eval_max_games} games, CUDA transformer (SPRT early stopping)...")
             result = subprocess.run(cmd, capture_output=True, text=True)
         else:
             # Rust + LibTorch eval
