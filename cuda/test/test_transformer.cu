@@ -344,6 +344,114 @@ void test_transformer_forward_timing(bool& test_failed) {
 }
 
 // ============================================================
+// TC vs Scalar comparison
+// ============================================================
+
+__global__ void kernel_transformer_forward_tc(
+    const BoardState* bs, float q_result,
+    const TransformerWeights* weights,
+    const TransformerWeightsHalf* half_w,
+    float* policy_out, float* value_out, float* k_out
+) {
+    extern __shared__ float smem[];
+    transformer_forward(bs, q_result, weights, half_w, smem, policy_out, value_out, k_out);
+}
+
+void test_transformer_tc_forward(bool& test_failed) {
+    TransformerWeights* d_weights = init_transformer_weights_zeros();
+    TransformerWeightsHalf* d_half = convert_transformer_to_half(d_weights);
+
+    BoardState bs = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float *d_pol_s, *d_val_s, *d_k_s;  // scalar
+    float *d_pol_t, *d_val_t, *d_k_t;  // TC
+    cudaMalloc(&d_pol_s, NN_POLICY_SIZE * sizeof(float)); cudaMalloc(&d_val_s, 4); cudaMalloc(&d_k_s, 4);
+    cudaMalloc(&d_pol_t, NN_POLICY_SIZE * sizeof(float)); cudaMalloc(&d_val_t, 4); cudaMalloc(&d_k_t, 4);
+
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+    cudaFuncSetAttribute(kernel_transformer_forward, cudaFuncAttributeMaxDynamicSharedMemorySize, TF_SMEM_BYTES);
+    cudaFuncSetAttribute(kernel_transformer_forward_tc, cudaFuncAttributeMaxDynamicSharedMemorySize, TF_SMEM_BYTES);
+
+    // Scalar
+    kernel_transformer_forward<<<1, 256, TF_SMEM_BYTES>>>(d_bs, 1.5f, d_weights, d_pol_s, d_val_s, d_k_s);
+    cudaDeviceSynchronize();
+
+    // TC
+    kernel_transformer_forward_tc<<<1, 256, TF_SMEM_BYTES>>>(d_bs, 1.5f, d_weights, d_half, d_pol_t, d_val_t, d_k_t);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[CUDA error: %s] ", cudaGetErrorString(err));
+        test_failed = true;
+    } else {
+        float vs, vt, ks, kt;
+        cudaMemcpy(&vs, d_val_s, 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&vt, d_val_t, 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&ks, d_k_s, 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(&kt, d_k_t, 4, cudaMemcpyDeviceToHost);
+        printf("[val: scalar=%.4f tc=%.4f, k: %.4f vs %.4f] ", vs, vt, ks, kt);
+        ASSERT_NEAR(vt, vs, 0.1f);
+        ASSERT_NEAR(kt, ks, 0.01f);
+
+        float* ps = (float*)malloc(NN_POLICY_SIZE * 4);
+        float* pt = (float*)malloc(NN_POLICY_SIZE * 4);
+        cudaMemcpy(ps, d_pol_s, NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(pt, d_pol_t, NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+        int bad = 0;
+        for (int i = 0; i < NN_POLICY_SIZE; i++)
+            if (fabsf(ps[i] - pt[i]) > 0.1f) bad++;
+        printf("[pol_bad=%d] ", bad);
+        ASSERT_EQ(bad, 0);
+        free(ps); free(pt);
+    }
+
+    cudaFree(d_bs);
+    cudaFree(d_pol_s); cudaFree(d_val_s); cudaFree(d_k_s);
+    cudaFree(d_pol_t); cudaFree(d_val_t); cudaFree(d_k_t);
+    free_transformer_half(d_half);
+    free_transformer_weights(d_weights);
+}
+
+void test_transformer_tc_timing(bool& test_failed) {
+    TransformerWeights* d_weights = init_transformer_weights_zeros();
+    TransformerWeightsHalf* d_half = convert_transformer_to_half(d_weights);
+    BoardState bs = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float *d_policy, *d_value, *d_k;
+    cudaMalloc(&d_policy, NN_POLICY_SIZE * sizeof(float));
+    cudaMalloc(&d_value, sizeof(float));
+    cudaMalloc(&d_k, sizeof(float));
+
+    cudaFuncSetAttribute(kernel_transformer_forward_tc, cudaFuncAttributeMaxDynamicSharedMemorySize, TF_SMEM_BYTES);
+    kernel_transformer_forward_tc<<<1, 256, TF_SMEM_BYTES>>>(d_bs, 0.0f, d_weights, d_half, d_policy, d_value, d_k);
+    cudaDeviceSynchronize();
+
+    const int ITERS = 50;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start); cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    for (int i = 0; i < ITERS; i++)
+        kernel_transformer_forward_tc<<<1, 256, TF_SMEM_BYTES>>>(d_bs, 0.0f, d_weights, d_half, d_policy, d_value, d_k);
+    cudaEventRecord(stop); cudaEventSynchronize(stop);
+    float ms; cudaEventElapsedTime(&ms, start, stop);
+    float per_call = ms / ITERS;
+    printf("[TC: %.2f ms/iter, %.0f iters/sec] ", per_call, 1000.0f / per_call);
+    ASSERT_TRUE(per_call > 0.0f);
+
+    cudaEventDestroy(start); cudaEventDestroy(stop);
+    cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k);
+    free_transformer_half(d_half);
+    free_transformer_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -362,6 +470,8 @@ int main() {
     RUN_TEST(test_transformer_mcts_mate_detection);
     RUN_TEST(test_transformer_eval_trees);
     RUN_TEST(test_transformer_forward_timing);
+    RUN_TEST(test_transformer_tc_forward);
+    RUN_TEST(test_transformer_tc_timing);
 
     printf("\nResults: %d/%d passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);

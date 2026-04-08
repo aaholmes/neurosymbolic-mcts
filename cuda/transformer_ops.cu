@@ -107,6 +107,121 @@ __device__ void tf_gemm(
 }
 
 // ============================================================
+// Linear layer: output[M,N] = input[M,K] × weight^T[K,N] + bias[N]
+//
+// Reformulated as: C_T[N,M] = W[N,K] × input_T[K,M]
+//   where input_T is input transposed (handled during B staging)
+//   and C_T is stored transposed to get output[M,N]
+//
+// A = W[N,K] in global FP16 with ld=K
+// B = input^T[K,M] created by transposed read from input[M,K] in smem FP32
+// C = output transposed [N,M] → stored as output[M,N]
+// ============================================================
+__device__ void tf_linear(
+    const float* __restrict__ input_smem,
+    const half* __restrict__ weight_fp16,
+    float* __restrict__ output_smem,
+    const float* __restrict__ bias,
+    half* __restrict__ workspace,
+    int M, int N, int K,
+    bool accumulate
+) {
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+
+    // GEMM dimensions: C_T[N, M] = A[N, K] × B_T[K, M]
+    int M_tiles = (N + 15) / 16;   // N is the "M" dimension of the GEMM
+    int N_tiles = (M + 15) / 16;   // M is the "N" dimension of the GEMM
+    int K_tiles = (K + 15) / 16;
+    int total_tiles = M_tiles * N_tiles;
+    bool a_aligned = (K % 16 == 0);
+
+    half* a_staging = workspace + warp_id * 256;
+    half* b_staging = workspace + 8 * 256 + warp_id * 256;
+
+    // Zero output if not accumulating
+    if (!accumulate) {
+        for (int i = tid; i < M * N; i += blockDim.x) output_smem[i] = 0.0f;
+        __syncthreads();
+    }
+
+    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += 8) {
+        int n_tile = tile_idx / N_tiles;  // output row tile (in N dimension)
+        int m_tile = tile_idx % N_tiles;  // output col tile (in M dimension)
+        int N_start = n_tile * 16;  // row start in W (= output feature)
+        int M_start = m_tile * 16;  // col start (= token index)
+
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+        wmma::fill_fragment(acc, 0.0f);
+
+        for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
+            int K_start = k_tile * 16;
+
+            // A fragment: W[N, K] with ld=K
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+            if (a_aligned && K_start + 16 <= K && N_start + 16 <= N) {
+                wmma::load_matrix_sync(a_frag, weight_fp16 + N_start * K + K_start, K);
+            } else {
+                for (int i = lane; i < 256; i += 32) {
+                    int r = i / 16, c = i % 16;
+                    int n = N_start + r, k = K_start + c;
+                    a_staging[i] = (n < N && k < K) ? weight_fp16[n * K + k] : __float2half(0.0f);
+                }
+                __syncwarp();
+                wmma::load_matrix_sync(a_frag, a_staging, 16);
+            }
+
+            // B fragment: input^T[K, M] — transposed read from input[M, K]
+            // B[k, m] = input[m, k] → staging[k_local * 16 + m_local] = input[(M_start+m_local)*K + (K_start+k_local)]
+            for (int i = lane; i < 256; i += 32) {
+                int r = i / 16, c = i % 16;  // r = k_local, c = m_local
+                int k = K_start + r, m = M_start + c;
+                b_staging[i] = (k < K && m < M) ? __float2half(input_smem[m * K + k]) : __float2half(0.0f);
+            }
+            __syncwarp();
+
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+            wmma::load_matrix_sync(b_frag, b_staging, 16);
+
+            wmma::mma_sync(acc, a_frag, b_frag, acc);
+        }
+
+        // acc holds C_T[N_start:N_start+16, M_start:M_start+16]
+        // We need output[M_start:M_start+16, N_start:N_start+16] = C_T^T
+        // Store to temp, then transpose into output
+        // Use b_staging (256 floats reinterpreted) as temp for the 16×16 tile
+        float* temp = (float*)b_staging;  // 256 halves = 128 floats... not enough for 256 floats
+
+        // Actually: store to a_staging + b_staging = 512 halves = 256 floats = 1 tile
+        float* tile_temp = (float*)a_staging;  // 512 halves = 256 floats across a+b staging
+        wmma::store_matrix_sync(tile_temp, acc, 16, wmma::mem_row_major);
+
+        // Transpose tile_temp[16, 16] → output[M_start+c, N_start+r]
+        // tile_temp[r * 16 + c] = C_T[N_start+r, M_start+c] → output[(M_start+c) * N + (N_start+r)]
+        for (int i = lane; i < 256; i += 32) {
+            int r = i / 16, c = i % 16;
+            int out_m = M_start + c, out_n = N_start + r;
+            if (out_m < M && out_n < N) {
+                if (accumulate)
+                    output_smem[out_m * N + out_n] += tile_temp[i];
+                else
+                    output_smem[out_m * N + out_n] = tile_temp[i];
+            }
+        }
+        __syncwarp();
+    }
+
+    // Add bias if provided
+    if (bias) {
+        __syncthreads();
+        for (int i = tid; i < M * N; i += blockDim.x)
+            output_smem[i] += bias[i % N];
+    }
+    __syncthreads();
+}
+
+// ============================================================
 // LayerNorm: per-token normalization
 // ============================================================
 __device__ void tf_layer_norm(

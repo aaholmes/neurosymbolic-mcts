@@ -71,6 +71,23 @@ __device__ void tf_residual_add(
 // ReLU in-place
 __device__ void tf_relu(float* data, int count);
 
+// Linear layer: output[M, N] = input[M, K] × weight^T[K, N] + bias[N]
+// weight_fp16: [N, K] row-major in global FP16 (PyTorch convention)
+// input_smem: [M, K] row-major in shared FP32
+// output_smem: [M, N] row-major in shared FP32 (zeroed then written)
+// bias: [N] global FP32 or nullptr
+// workspace: FP16 staging for wmma (needs 2 * 8 * 256 halves = 4096 halves)
+// accumulate: if true, ADD to output_smem instead of overwriting
+__device__ void tf_linear(
+    const float* __restrict__ input_smem,
+    const half* __restrict__ weight_fp16,
+    float* __restrict__ output_smem,
+    const float* __restrict__ bias,
+    half* __restrict__ workspace,
+    int M, int N, int K,
+    bool accumulate = false
+);
+
 // Board encoding to [64, 17] FP32 (token-major: each token is one square's 17 features)
 // Different from block_board_to_planes which outputs [17, 64] (channel-major)
 __device__ void tf_board_to_tokens(

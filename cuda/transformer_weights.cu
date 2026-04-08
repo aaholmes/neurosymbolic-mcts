@@ -73,6 +73,19 @@ static void convert_tf(const float* d_src, half* d_dst, int count) {
     kernel_fp32_to_fp16_tf<<<(count + 255) / 256, 256>>>(d_src, d_dst, count);
 }
 
+// Extract per-head QKV slice: dst[head_dim, d_model] from src[d_model, 3*d_model]
+// dst[d * d_model + k] = __float2half(src[k * (3*d_model) + col_offset + d])
+__global__ void kernel_extract_qkv_head(
+    const float* src, half* dst, int d_model, int head_dim, int col_offset
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = head_dim * d_model;
+    if (i >= total) return;
+    int d = i / d_model;        // output row [0, head_dim)
+    int k = i % d_model;        // output col [0, d_model)
+    dst[i] = __float2half(src[k * (3 * d_model) + col_offset + d]);
+}
+
 TransformerWeightsHalf* convert_transformer_to_half(const TransformerWeights* d_w) {
     TransformerWeightsHalf h_half;
 
@@ -90,6 +103,26 @@ TransformerWeightsHalf* convert_transformer_to_half(const TransformerWeights* d_
             (offsetof(TransformerWeights, blocks) + b * sizeof(TransformerBlock) +
              offsetof(TransformerBlock, qkv_weight)) / sizeof(float),
             h_half.blocks[b].qkv, qkv_n);
+
+        // Extract per-head Q/K/V slices: [head_dim, d_model] = [32, 128] each
+        const float* qkv_src = (const float*)d_w +
+            (offsetof(TransformerWeights, blocks) + b * sizeof(TransformerBlock) +
+             offsetof(TransformerBlock, qkv_weight)) / sizeof(float);
+        int head_slice_n = TF_HEAD_DIM * NN_HIDDEN_DIM;  // 32 * 128 = 4096
+        int head_blocks = (head_slice_n + 255) / 256;
+        for (int h = 0; h < TF_NUM_HEADS; h++) {
+            cudaMalloc(&h_half.blocks[b].q_head[h], head_slice_n * sizeof(half));
+            kernel_extract_qkv_head<<<head_blocks, 256>>>(
+                qkv_src, h_half.blocks[b].q_head[h], NN_HIDDEN_DIM, TF_HEAD_DIM, h * TF_HEAD_DIM);
+
+            cudaMalloc(&h_half.blocks[b].k_head[h], head_slice_n * sizeof(half));
+            kernel_extract_qkv_head<<<head_blocks, 256>>>(
+                qkv_src, h_half.blocks[b].k_head[h], NN_HIDDEN_DIM, TF_HEAD_DIM, NN_HIDDEN_DIM + h * TF_HEAD_DIM);
+
+            cudaMalloc(&h_half.blocks[b].v_head[h], head_slice_n * sizeof(half));
+            kernel_extract_qkv_head<<<head_blocks, 256>>>(
+                qkv_src, h_half.blocks[b].v_head[h], NN_HIDDEN_DIM, TF_HEAD_DIM, 2 * NN_HIDDEN_DIM + h * TF_HEAD_DIM);
+        }
 
         int op_n = NN_HIDDEN_DIM * NN_HIDDEN_DIM;
         cudaMalloc(&h_half.blocks[b].out_proj, op_n * sizeof(half));
@@ -135,6 +168,11 @@ void free_transformer_half(TransformerWeightsHalf* d_half) {
     cudaFree(h.p_head);
     for (int b = 0; b < TF_NUM_LAYERS; b++) {
         cudaFree(h.blocks[b].qkv);
+        for (int hh = 0; hh < TF_NUM_HEADS; hh++) {
+            cudaFree(h.blocks[b].q_head[hh]);
+            cudaFree(h.blocks[b].k_head[hh]);
+            cudaFree(h.blocks[b].v_head[hh]);
+        }
         cudaFree(h.blocks[b].out_proj);
         cudaFree(h.blocks[b].ffn1);
         cudaFree(h.blocks[b].ffn2);

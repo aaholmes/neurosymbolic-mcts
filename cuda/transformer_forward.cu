@@ -48,35 +48,20 @@ __device__ void transformer_forward(
     float* tokens = workspace;
     tf_board_to_tokens(bs, tokens);
 
-    // === 2. Input projection: tokens[64, 17] × W[17, 128] → buf_out[64, 128] ===
-    // Use tf_gemm with A = W^T[128, 17] from global, B = tokens[64, 17]^T...
-    // Actually our GEMM does C[M,N] = A[M,K] × B[K,N].
-    // We want: buf_out[64, 128] = tokens[64, 17] × W^T[17, 128]
-    // = A[64, 17] × B[17, 128] where A=tokens (smem), B=W^T (global)
-    // But our GEMM has A in global FP16 and B in shared FP32.
-    // Rearrange: buf_out^T[128, 64] = W[128, 17] × tokens^T[17, 64]
-    // No, that transposes the output.
-    //
-    // Simpler: input_proj_weight is stored as [128, 17] (out_features × in_features).
-    // PyTorch linear: output = input @ weight^T + bias
-    // So: buf_out[t, d] = Σ_c tokens[t, c] * weight[d, c] + bias[d]
-    // = tokens[64, 17] × weight^T[17, 128]
-    //
-    // Our GEMM: C[M,N] = A_global[M,K] × B_smem[K,N]
-    // We need: C[64, 128] = ??? × ???
-    // If A = weight[128, 17] and B = tokens[17, 64], then C = A × B = [128, 64]
-    // That gives us C transposed. We'd need to transpose.
-    //
-    // Alternative: do it scalar. Input is tiny (17 channels × 64 tokens × 128 dims).
-    for (int i = tid; i < T * D; i += blockDim.x) {
-        int tok = i / D;
-        int d = i % D;
-        float sum = 0.0f;
-        for (int c = 0; c < NN_INPUT_CHANNELS; c++)
-            sum += tokens[tok * NN_INPUT_CHANNELS + c] * weights->input_proj_weight[d * NN_INPUT_CHANNELS + c];
-        buf_out[i] = sum + weights->input_proj_bias[d];
+    // === 2. Input projection: tokens[64, 17] × W^T → buf_out[64, 128] ===
+    if (half_w) {
+        tf_linear(tokens, half_w->input_proj, buf_out, weights->input_proj_bias,
+                  ws_half, T, D, NN_INPUT_CHANNELS);
+    } else {
+        for (int i = tid; i < T * D; i += blockDim.x) {
+            int tok = i / D; int d = i % D;
+            float sum = 0.0f;
+            for (int c = 0; c < NN_INPUT_CHANNELS; c++)
+                sum += tokens[tok * NN_INPUT_CHANNELS + c] * weights->input_proj_weight[d * NN_INPUT_CHANNELS + c];
+            buf_out[i] = sum + weights->input_proj_bias[d];
+        }
+        __syncthreads();
     }
-    __syncthreads();
 
     // Add positional embeddings: buf_x = buf_out + pos_embedding
     for (int i = tid; i < T * D; i += blockDim.x)
@@ -177,29 +162,36 @@ __device__ void transformer_forward(
         for (int h = 0; h < TF_NUM_HEADS; h++) {
             int qkv_offset = h * TF_HEAD_DIM;  // column offset within Q/K/V sections
 
-            // Q_h[64, 32] = buf_out[64, 128] × W_q[128, 32] (scalar — small GEMM)
-            // W_q is part of qkv_weight[128, 384], columns [h*32:(h+1)*32]
-            for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
-                int tok = i / TF_HEAD_DIM;
-                int d = i % TF_HEAD_DIM;
-                float sum = 0.0f;
-                for (int k = 0; k < D; k++)
-                    sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + qkv_offset + d];
-                ws_q[i] = sum + block.qkv_bias[qkv_offset + d];
+            // Q_h[64, 32] = buf_out[64, 128] × W_q_h^T
+            if (half_w) {
+                tf_linear(buf_out, half_w->blocks[blk].q_head[h], ws_q,
+                          block.qkv_bias + qkv_offset, ws_half, T, TF_HEAD_DIM, D);
+            } else {
+                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
+                    int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                    float sum = 0.0f;
+                    for (int k = 0; k < D; k++)
+                        sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + qkv_offset + d];
+                    ws_q[i] = sum + block.qkv_bias[qkv_offset + d];
+                }
+                __syncthreads();
             }
-            __syncthreads();
 
-            // K_h[64, 32] — same, columns [D + h*32 : D + (h+1)*32]
+            // K_h[64, 32]
             int k_offset = D + qkv_offset;
-            for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
-                int tok = i / TF_HEAD_DIM;
-                int d = i % TF_HEAD_DIM;
-                float sum = 0.0f;
-                for (int k = 0; k < D; k++)
-                    sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + k_offset + d];
-                ws_k[i] = sum + block.qkv_bias[k_offset + d];
+            if (half_w) {
+                tf_linear(buf_out, half_w->blocks[blk].k_head[h], ws_k,
+                          block.qkv_bias + k_offset, ws_half, T, TF_HEAD_DIM, D);
+            } else {
+                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
+                    int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                    float sum = 0.0f;
+                    for (int k = 0; k < D; k++)
+                        sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + k_offset + d];
+                    ws_k[i] = sum + block.qkv_bias[k_offset + d];
+                }
+                __syncthreads();
             }
-            __syncthreads();
 
             // attn[64, 64] = Q_h × K_h^T / sqrt(head_dim)
             // Reuses Q/K space (4096 floats for [64,64], Q/K were 2×2048)
@@ -219,15 +211,19 @@ __device__ void transformer_forward(
 
             // V_h[64, 32]
             int v_offset = 2 * D + qkv_offset;
-            for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
-                int tok = i / TF_HEAD_DIM;
-                int d = i % TF_HEAD_DIM;
-                float sum = 0.0f;
-                for (int k = 0; k < D; k++)
-                    sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + v_offset + d];
-                ws_v[i] = sum + block.qkv_bias[v_offset + d];
+            if (half_w) {
+                tf_linear(buf_out, half_w->blocks[blk].v_head[h], ws_v,
+                          block.qkv_bias + v_offset, ws_half, T, TF_HEAD_DIM, D);
+            } else {
+                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
+                    int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                    float sum = 0.0f;
+                    for (int k = 0; k < D; k++)
+                        sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + v_offset + d];
+                    ws_v[i] = sum + block.qkv_bias[v_offset + d];
+                }
+                __syncthreads();
             }
-            __syncthreads();
 
             // head_out[64, 32] = attn[64, 64] × V_h[64, 32]
             for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
@@ -240,19 +236,23 @@ __device__ void transformer_forward(
             }
             __syncthreads();
 
-            // Output projection: buf_x += head_out[64, 32] × W_o[32, 128]
-            // W_o is out_proj_weight[128, 128], but for this head we use rows [h*32:(h+1)*32]
-            // Actually: out_proj_weight[d_model, d_model] maps concatenated heads to output.
-            // For per-head output: output[tok, d] += Σ_j head_out[tok, j] * W_o[h*head_dim + j, d]
-            for (int i = tid; i < T * D; i += blockDim.x) {
-                int tok = i / D;
-                int d = i % D;
-                float sum = 0.0f;
-                for (int j = 0; j < TF_HEAD_DIM; j++)
-                    sum += ws_head[tok * TF_HEAD_DIM + j] * block.out_proj_weight[(h * TF_HEAD_DIM + j) * D + d];
-                buf_x[i] += sum;
+            // Output projection: buf_x += head_out[64, 32] × W_o_h^T[32, 128]
+            // W_o rows [h*32:(h+1)*32] of [128, 128] = contiguous [32, 128]
+            if (half_w) {
+                // out_proj_weight is [128, 128], per-head slice at row h*32 = [32, 128]
+                // out_proj FP16 pointer + h*32*128 halves
+                tf_linear(ws_head, half_w->blocks[blk].out_proj + h * TF_HEAD_DIM * D,
+                          buf_x, nullptr, ws_half, T, D, TF_HEAD_DIM, true);
+            } else {
+                for (int i = tid; i < T * D; i += blockDim.x) {
+                    int tok = i / D; int d = i % D;
+                    float sum = 0.0f;
+                    for (int j = 0; j < TF_HEAD_DIM; j++)
+                        sum += ws_head[tok * TF_HEAD_DIM + j] * block.out_proj_weight[(h * TF_HEAD_DIM + j) * D + d];
+                    buf_x[i] += sum;
+                }
+                __syncthreads();
             }
-            __syncthreads();
         }
 
         // Add output projection bias
@@ -317,10 +317,12 @@ __device__ void transformer_forward(
     // LayerNorm → per-token linear [128 → 73] → flatten to [4672] → log_softmax
     tf_layer_norm(buf_x, buf_out, weights->p_ln.weight, weights->p_ln.bias, T, D, reduce);
 
-    // Per-token linear: policy_out[tok * 73 + plane] = buf_out[tok, :] × W_p[plane, :] + bias[plane]
+    // Per-token linear: policy_out = buf_out × W_p^T + bias
+    // policy_out is [64, 73] flattened to [4672] in global memory
+    // tf_linear writes to shared memory, but policy_out is global. Use scalar for now.
     for (int i = tid; i < NN_POLICY_SIZE; i += blockDim.x) {
-        int tok = i / NN_POLICY_PLANES;     // spatial position [0, 64)
-        int plane = i % NN_POLICY_PLANES;   // move plane [0, 73)
+        int tok = i / NN_POLICY_PLANES;
+        int plane = i % NN_POLICY_PLANES;
         float sum = 0.0f;
         for (int d = 0; d < D; d++)
             sum += buf_out[tok * D + d] * weights->p_head_weight[plane * D + d];
