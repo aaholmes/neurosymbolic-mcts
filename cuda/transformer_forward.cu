@@ -255,14 +255,44 @@ __device__ void transformer_forward(
                 }
                 __syncthreads();
 
-                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
-                    int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
-                    float sum = 0.0f;
-                    for (int k = 0; k < T; k++)
-                        sum += ws_attn[tok * T + k] * ws_v[k * TF_HEAD_DIM + d];
-                    ws_head[i] = sum;
+                // attn×V: read ws_attn and ws_v, write to ws_q (safe: ws_q at workspace+0,
+                // ws_attn also at workspace+0 but attn is read per-row before ws_q overwrite)
+                // Actually ws_q and ws_attn alias too. Need a truly separate destination.
+                // Use buf_x temporarily (it was zeroed for accumulation, head outputs will be
+                // projected and added back to buf_x for each head)
+                // For this head, compute attn×V into ws_q (workspace+0) which is safe because
+                // ws_attn spans workspace[0:4096] but each thread reads one full row then writes.
+                // Wait — multiple threads write to ws_q[0..2047] while others read ws_attn[0..4095].
+                // ws_q[i] = workspace[i], ws_attn[tok*64 + k] = workspace[tok*64 + k].
+                // Thread writing ws_q[0] affects ws_attn[0,0]. Thread reading ws_attn[1,0] reads
+                // workspace[64] which is unaffected. But thread reading ws_attn[0, k] for k>0
+                // reads workspace[k] which might be overwritten by ws_q[k].
+                //
+                // SAFE APPROACH: compute into a temp on the stack per thread, then write.
+                // Each thread handles ~8 elements (2048/256). Accumulate into local array.
+                {
+                    // Each thread computes its assigned elements of head_out[64, 32]
+                    // Store results to ws_q (which is safe after attn is fully consumed per-element)
+                    float local_results[8];  // max 2048/256 = 8
+                    int n_elems = (T * TF_HEAD_DIM + blockDim.x - 1) / blockDim.x;
+                    for (int e = 0; e < n_elems; e++) {
+                        int i = tid + e * blockDim.x;
+                        if (i >= T * TF_HEAD_DIM) break;
+                        int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                        float sum = 0.0f;
+                        for (int k = 0; k < T; k++)
+                            sum += ws_attn[tok * T + k] * ws_v[k * TF_HEAD_DIM + d];
+                        local_results[e] = sum;
+                    }
+                    __syncthreads();  // ensure all reads from ws_attn/ws_v are done
+                    // Now safe to write to workspace
+                    for (int e = 0; e < n_elems; e++) {
+                        int i = tid + e * blockDim.x;
+                        if (i >= T * TF_HEAD_DIM) break;
+                        ws_q[i] = local_results[e];  // ws_q = workspace+0, safe now
+                    }
+                    __syncthreads();
                 }
-                __syncthreads();
             }
 
             // Output projection (scalar path only — TC path handles it above)
@@ -271,7 +301,7 @@ __device__ void transformer_forward(
                     int tok = i / D; int d = i % D;
                     float sum = 0.0f;
                     for (int j = 0; j < TF_HEAD_DIM; j++)
-                        sum += ws_head[tok * TF_HEAD_DIM + j] * block.out_proj_weight[d * D + h * TF_HEAD_DIM + j];
+                        sum += ws_q[tok * TF_HEAD_DIM + j] * block.out_proj_weight[d * D + h * TF_HEAD_DIM + j];
                     buf_x[i] += sum;
                 }
                 __syncthreads();

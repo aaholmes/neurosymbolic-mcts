@@ -8,6 +8,7 @@
 #include "../transformer_forward.cuh"
 #include "../mcts_kernel.cuh"
 #include "../selfplay.cuh"
+#include "../block_ops.cuh"
 #include "../movegen.cuh"
 #include "test_helpers.cuh"
 
@@ -615,16 +616,252 @@ void test_board_encoding_consistency(bool& test_failed) {
 // Dump CUDA forward pass output for comparison with PyTorch
 // ============================================================
 
+// Debug kernel: runs scalar forward pass and dumps intermediates to global memory
+// debug_out layout: [stage][64*128] where stage 0=after_input_proj, 1=after_pos_emb,
+//                   2=after_block0, ..., 8=after_block5, 9=policy_pre_softmax
+__global__ void kernel_debug_forward(
+    const BoardState* bs, float q_result,
+    const TransformerWeights* weights,
+    float* policy_out, float* value_out, float* k_out,
+    float* debug_out  // [10 * 64 * 128] = 81920 floats
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    const int D = NN_HIDDEN_DIM;
+    const int T = TF_NUM_TOKENS;
+
+    float* buf_x     = smem + TF_BUF_X_OFFSET;
+    float* buf_out   = smem + TF_BUF_OUT_OFFSET;
+    float* workspace = smem + TF_WORKSPACE_OFFSET;
+    float* reduce    = smem + TF_REDUCE_OFFSET;
+
+    // 1. Board encoding
+    float* tokens = workspace;
+    tf_board_to_tokens(bs, tokens);
+
+    // Dump tokens
+    for (int i = tid; i < T * NN_INPUT_CHANNELS; i += blockDim.x)
+        debug_out[i] = tokens[i];  // stage -1: tokens [64*17 = 1088]
+    __syncthreads();
+
+    // 2. Input projection (scalar)
+    for (int i = tid; i < T * D; i += blockDim.x) {
+        int tok = i / D; int d = i % D;
+        float sum = 0.0f;
+        for (int c = 0; c < NN_INPUT_CHANNELS; c++)
+            sum += tokens[tok * NN_INPUT_CHANNELS + c] * weights->input_proj_weight[d * NN_INPUT_CHANNELS + c];
+        buf_out[i] = sum + weights->input_proj_bias[d];
+    }
+    __syncthreads();
+
+    // Stage 0: after input_proj (before pos_emb)
+    for (int i = tid; i < T * D; i += blockDim.x)
+        debug_out[0 * T * D + i] = buf_out[i];
+    __syncthreads();
+
+    // 3. Add pos_embedding
+    for (int i = tid; i < T * D; i += blockDim.x)
+        buf_x[i] = buf_out[i] + weights->pos_embedding[i];
+    __syncthreads();
+
+    // Stage 1: after pos_emb
+    for (int i = tid; i < T * D; i += blockDim.x)
+        debug_out[1 * T * D + i] = buf_x[i];
+    __syncthreads();
+
+    // 4. Transformer blocks (scalar path — copy from transformer_forward.cu scalar code)
+    for (int blk = 0; blk < TF_NUM_LAYERS; blk++) {
+        const TransformerBlock& block = weights->blocks[blk];
+
+        // Save residual
+        float res[32];
+        for (int k = 0; k < 32; k++) res[k] = buf_x[tid + k * 256];
+
+        // Zero buf_x for attention accumulation
+        for (int i = tid; i < T * D; i += blockDim.x) buf_x[i] = 0.0f;
+        __syncthreads();
+
+        // LN(buf_x_saved) → buf_out (but buf_x was zeroed; need to use res)
+        // Actually: the scalar path in transformer_forward.cu does LN before zeroing.
+        // Let me re-read the flow: LN(buf_x) → buf_out, then save res from buf_x,
+        // then zero buf_x. But I zeroed buf_x before LN. Need to fix order.
+
+        // Restore buf_x from res for LN
+        for (int k = 0; k < 32; k++) buf_x[tid + k * 256] = res[k];
+        __syncthreads();
+
+        tf_layer_norm(buf_x, buf_out, block.ln1.weight, block.ln1.bias, T, D, reduce);
+
+        // Now zero buf_x for attention output accumulation
+        for (int i = tid; i < T * D; i += blockDim.x) buf_x[i] = 0.0f;
+        __syncthreads();
+
+        // Attention (scalar per-head)
+        float* ws_q = workspace;
+        float* ws_k = workspace + T * TF_HEAD_DIM;
+        float* ws_attn = workspace;
+        float* ws_v = workspace + T * T;
+        float* ws_head = workspace + T * T;
+
+        for (int h = 0; h < TF_NUM_HEADS; h++) {
+            int qkv_offset = h * TF_HEAD_DIM;
+
+            // Q
+            for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
+                int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                float sum = 0.0f;
+                for (int k = 0; k < D; k++)
+                    sum += buf_out[tok * D + k] * block.qkv_weight[(qkv_offset + d) * D + k];
+                ws_q[i] = sum + block.qkv_bias[qkv_offset + d];
+            }
+            __syncthreads();
+
+            // K
+            int k_off = D + qkv_offset;
+            for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
+                int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                float sum = 0.0f;
+                for (int k = 0; k < D; k++)
+                    sum += buf_out[tok * D + k] * block.qkv_weight[(k_off + d) * D + k];
+                ws_k[i] = sum + block.qkv_bias[k_off + d];
+            }
+            __syncthreads();
+
+            // QK^T
+            float scale = rsqrtf((float)TF_HEAD_DIM);
+            for (int i = tid; i < T * T; i += blockDim.x) {
+                int row = i / T; int col = i % T;
+                float sum = 0.0f;
+                for (int d = 0; d < TF_HEAD_DIM; d++)
+                    sum += ws_q[row * TF_HEAD_DIM + d] * ws_k[col * TF_HEAD_DIM + d];
+                ws_attn[i] = sum * scale;
+            }
+            __syncthreads();
+
+            tf_softmax_rows(ws_attn, T, T, reduce);
+
+            // V
+            int v_off = 2 * D + qkv_offset;
+            for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
+                int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                float sum = 0.0f;
+                for (int k = 0; k < D; k++)
+                    sum += buf_out[tok * D + k] * block.qkv_weight[(v_off + d) * D + k];
+                ws_v[i] = sum + block.qkv_bias[v_off + d];
+            }
+            __syncthreads();
+
+            // attn×V — use local array to avoid ws_v/ws_head aliasing race
+            {
+                float local_results[8];
+                int n_elems = (T * TF_HEAD_DIM + blockDim.x - 1) / blockDim.x;
+                for (int e = 0; e < n_elems; e++) {
+                    int i = tid + e * blockDim.x;
+                    if (i >= T * TF_HEAD_DIM) break;
+                    int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                    float sum = 0.0f;
+                    for (int k = 0; k < T; k++)
+                        sum += ws_attn[tok * T + k] * ws_v[k * TF_HEAD_DIM + d];
+                    local_results[e] = sum;
+                }
+                __syncthreads();
+                for (int e = 0; e < n_elems; e++) {
+                    int i = tid + e * blockDim.x;
+                    if (i >= T * TF_HEAD_DIM) break;
+                    ws_q[i] = local_results[e];
+                }
+                __syncthreads();
+            }
+
+            // Output proj: buf_x += head_out × W_o^T
+            for (int i = tid; i < T * D; i += blockDim.x) {
+                int tok = i / D; int d = i % D;
+                float sum = 0.0f;
+                for (int j = 0; j < TF_HEAD_DIM; j++)
+                    sum += ws_q[tok * TF_HEAD_DIM + j] * block.out_proj_weight[d * D + h * TF_HEAD_DIM + j];
+                buf_x[i] += sum;
+            }
+            __syncthreads();
+        }
+
+        // Add bias + residual
+        tf_add_bias(buf_x, block.out_proj_bias, T, D);
+        for (int k = 0; k < 32; k++) buf_x[tid + k * 256] += res[k];
+        __syncthreads();
+
+        // FFN
+        for (int k = 0; k < 32; k++) res[k] = buf_x[tid + k * 256];
+        tf_layer_norm(buf_x, buf_out, block.ln2.weight, block.ln2.bias, T, D, reduce);
+
+        for (int i = tid; i < T * D; i += blockDim.x) buf_x[i] = 0.0f;
+        __syncthreads();
+
+        float* ws_tile = workspace;
+        for (int tile = 0; tile < TF_FFN_DIM / TF_FFN_TILE; tile++) {
+            int ts = tile * TF_FFN_TILE;
+            for (int i = tid; i < T * TF_FFN_TILE; i += blockDim.x) {
+                int tok = i / TF_FFN_TILE; int d = i % TF_FFN_TILE;
+                float sum = 0.0f;
+                for (int k = 0; k < D; k++)
+                    sum += buf_out[tok * D + k] * block.ffn1_weight[(ts + d) * D + k];
+                float val = sum + block.ffn1_bias[ts + d];
+                ws_tile[i] = val > 0.0f ? val : 0.0f;
+            }
+            __syncthreads();
+
+            for (int i = tid; i < T * D; i += blockDim.x) {
+                int tok = i / D; int d = i % D;
+                float sum = 0.0f;
+                for (int j = 0; j < TF_FFN_TILE; j++)
+                    sum += ws_tile[tok * TF_FFN_TILE + j] * block.ffn2_weight[d * TF_FFN_DIM + ts + j];
+                buf_x[i] += sum;
+            }
+            __syncthreads();
+        }
+
+        tf_add_bias(buf_x, block.ffn2_bias, T, D);
+        for (int k = 0; k < 32; k++) buf_x[tid + k * 256] += res[k];
+        __syncthreads();
+
+        // Stage 2+blk: after block
+        for (int i = tid; i < T * D; i += blockDim.x)
+            debug_out[(2 + blk) * T * D + i] = buf_x[i];
+        __syncthreads();
+    }
+
+    // Policy head
+    tf_layer_norm(buf_x, buf_out, weights->p_ln.weight, weights->p_ln.bias, T, D, reduce);
+    for (int i = tid; i < NN_POLICY_SIZE; i += blockDim.x) {
+        int tok = i / NN_POLICY_PLANES;
+        int plane = i % NN_POLICY_PLANES;
+        float sum = 0.0f;
+        for (int d = 0; d < D; d++)
+            sum += buf_out[tok * D + d] * weights->p_head_weight[plane * D + d];
+        policy_out[i] = sum + weights->p_head_bias[plane];
+    }
+    __syncthreads();
+
+    // Stage 8: policy pre-softmax (first 4672 values)
+    // Store in debug_out[8 * T * D] but only 4672 floats (fits in T*D=8192)
+    for (int i = tid; i < NN_POLICY_SIZE; i += blockDim.x)
+        debug_out[8 * T * D + i] = policy_out[i];
+    __syncthreads();
+
+    block_log_softmax(policy_out, NN_POLICY_SIZE, reduce);
+
+    // Value head — just write placeholder (we're debugging policy)
+    if (tid == 0) { *value_out = 0.0f; *k_out = 0.47f * logf(1.0f + expf(weights->k_logit)); }
+    __syncthreads();
+}
+
 void test_transformer_dump_policy(bool& test_failed) {
-    // Load trained weights if available, otherwise use zeros
     const char* weights_path = "weights/transformer4/candidate_1.bin";
     TransformerWeights* d_weights = load_transformer_weights(weights_path);
     if (!d_weights) {
         printf("[no weights at %s, skipping] ", weights_path);
-        ASSERT_TRUE(true);  // skip gracefully
+        ASSERT_TRUE(true);
         return;
     }
-    TransformerWeightsHalf* d_half = convert_transformer_to_half(d_weights);
 
     BoardState bs = make_starting_position();
     BoardState* d_bs;
@@ -635,42 +872,69 @@ void test_transformer_dump_policy(bool& test_failed) {
     cudaMalloc(&d_policy, NN_POLICY_SIZE * sizeof(float));
     cudaMalloc(&d_value, sizeof(float)); cudaMalloc(&d_k, sizeof(float));
 
-    // Test BOTH scalar and TC paths
-    // Scalar first
-    cudaFuncSetAttribute(kernel_transformer_forward,
+    // Debug output: 9 stages × [64, 128] = 73728 floats + policy pre-softmax
+    int debug_size = 9 * TF_NUM_TOKENS * NN_HIDDEN_DIM;
+    float* d_debug;
+    cudaMalloc(&d_debug, debug_size * sizeof(float));
+    cudaMemset(d_debug, 0, debug_size * sizeof(float));
+
+    cudaFuncSetAttribute(kernel_debug_forward,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, TF_SMEM_BYTES);
-    kernel_transformer_forward<<<1, 256, TF_SMEM_BYTES>>>(
-        d_bs, 0.0f, d_weights, d_policy, d_value, d_k);
+    kernel_debug_forward<<<1, 256, TF_SMEM_BYTES>>>(
+        d_bs, 0.0f, d_weights, d_policy, d_value, d_k, d_debug);
     cudaDeviceSynchronize();
 
-    float h_value, h_k;
-    cudaMemcpy(&h_value, d_value, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_k, d_k, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[CUDA error: %s] ", cudaGetErrorString(err));
+        test_failed = true;
+        cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k); cudaFree(d_debug);
+        free_transformer_weights(d_weights);
+        return;
+    }
+
+    // Read back debug data
+    float* h_debug = (float*)malloc(debug_size * sizeof(float));
+    cudaMemcpy(h_debug, d_debug, debug_size * sizeof(float), cudaMemcpyDeviceToHost);
 
     float* h_policy = (float*)malloc(NN_POLICY_SIZE * sizeof(float));
     cudaMemcpy(h_policy, d_policy, NN_POLICY_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Find top move
+    // Save all intermediates for Python comparison
+    FILE* f = fopen("/tmp/cuda_debug_intermediates.bin", "wb");
+    if (f) { fwrite(h_debug, sizeof(float), debug_size, f); fclose(f); }
+
+    FILE* fp = fopen("/tmp/cuda_debug_policy.bin", "wb");
+    if (fp) { fwrite(h_policy, sizeof(float), NN_POLICY_SIZE, fp); fclose(fp); }
+
+    // Print summary
+    const int TD = TF_NUM_TOKENS * NN_HIDDEN_DIM;
+    const char* stage_names[] = {"input_proj", "pos_emb", "block0", "block1", "block2",
+                                  "block3", "block4", "block5"};
+    for (int s = 0; s < 8; s++) {
+        float* stage = h_debug + s * TD;
+        float mn = stage[0], mx = stage[0];
+        int nan_count = 0;
+        for (int i = 0; i < TD; i++) {
+            if (isnan(stage[i])) nan_count++;
+            if (stage[i] < mn) mn = stage[i];
+            if (stage[i] > mx) mx = stage[i];
+        }
+        printf("\n    %s: [%.4f, %.4f] nan=%d first5=[%.4f,%.4f,%.4f,%.4f,%.4f]",
+               stage_names[s], mn, mx, nan_count,
+               stage[0], stage[1], stage[2], stage[3], stage[4]);
+    }
+
+    // Policy top
     int top_idx = 0;
     for (int i = 1; i < NN_POLICY_SIZE; i++)
         if (h_policy[i] > h_policy[top_idx]) top_idx = i;
+    printf("\n    policy: top=%d(%.4f) [PyTorch=494(-2.54)] ", top_idx, h_policy[top_idx]);
 
-    printf("[val=%.4f k=%.4f top=%d(%.4f)] ", h_value, h_k, top_idx, h_policy[top_idx]);
+    ASSERT_TRUE(true);  // informational
 
-    // Save to file for Python comparison
-    FILE* f = fopen("/tmp/cuda_policy_dump.bin", "wb");
-    if (f) { fwrite(h_policy, sizeof(float), NN_POLICY_SIZE, f); fclose(f); }
-    FILE* f2 = fopen("/tmp/cuda_vk_dump.txt", "w");
-    if (f2) { fprintf(f2, "%.6f %.6f\n", h_value, h_k); fclose(f2); }
-
-    // PyTorch reference: top=494 (Nf3), value=-0.033369
-    // If CUDA matches: top should be 494
-    printf("[PyTorch expects top=494] ");
-    ASSERT_TRUE(true);  // informational, not hard failure
-
-    free(h_policy);
-    cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k);
-    free_transformer_half(d_half);
+    free(h_debug); free(h_policy);
+    cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k); cudaFree(d_debug);
     free_transformer_weights(d_weights);
 }
 
