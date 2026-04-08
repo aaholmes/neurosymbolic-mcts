@@ -520,7 +520,10 @@ def train_with_config(
                         values = values.to(DEVICE)
                         policies = policies.to(DEVICE)
 
-                        pred_policy, pred_value, k_val = model(boards, scalars)
+                        pred_policy, pred_value_raw, k_val = model(boards, scalars)
+                        # model.eval() returns raw v_logit; apply tanh + k*q for loss
+                        q_result = scalars[:, 0:1]
+                        pred_value = torch.tanh(pred_value_raw + k_val * q_result)
                         p_loss = F.kl_div(pred_policy, policies, reduction='none').sum(dim=1).mean()
                         v_loss = F.mse_loss(pred_value, values)
                         val_policy_total += p_loss.item()
