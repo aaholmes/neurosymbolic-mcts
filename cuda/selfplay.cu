@@ -158,6 +158,41 @@ static bool is_threefold(const uint64_t* history, int count, uint64_t current) {
 }
 
 // ============================================================
+// Per-game deterministic RNG (xorshift64)
+// ============================================================
+
+struct GameRng {
+    uint64_t state;
+
+    void seed(int game_idx, int generation) {
+        // Deterministic seed from game index and generation
+        // Mixing via hash to avoid correlated sequences between nearby indices
+        uint64_t s = (uint64_t)game_idx * 2654435761ULL + (uint64_t)generation * 6364136223846793005ULL;
+        s ^= s >> 33;
+        s *= 0xff51afd7ed558ccdULL;
+        s ^= s >> 33;
+        state = s ? s : 1;  // must be nonzero
+    }
+
+    uint64_t next() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    }
+
+    // Uniform float in [0, 1)
+    float uniform() {
+        return (float)(next() >> 11) / (float)(1ULL << 53);
+    }
+
+    // Uniform int in [0, n)
+    int randint(int n) {
+        return (int)(next() % (uint64_t)n);
+    }
+};
+
+// ============================================================
 // Move sampling
 // ============================================================
 
@@ -166,16 +201,16 @@ static GPUMove sample_move(
     const BoardState& bs,
     int move_number,
     float explore_base,
-    // Need to read child visit counts from GPU
     int* h_visits,
     GPUMove* h_moves,
-    int num_children
+    int num_children,
+    GameRng& rng
 ) {
     if (num_children == 0) return 0;
 
-    // Proportional probability
+    // Proportional probability decays with move number
     float p = powf(explore_base, (float)(move_number - 1));
-    bool use_proportional = ((float)rand() / RAND_MAX) < p;
+    bool use_proportional = rng.uniform() < p;
 
     if (!use_proportional || num_children == 1) {
         // Greedy: return most-visited move
@@ -196,10 +231,10 @@ static GPUMove sample_move(
     }
     if (total == 0) {
         // All moves visited ≤1, pick random
-        return h_moves[rand() % num_children];
+        return h_moves[rng.randint(num_children)];
     }
 
-    int r = rand() % total;
+    int r = rng.randint(total);
     int cumul = 0;
     for (int i = 0; i < num_children; i++) {
         int v = h_visits[i] > 1 ? h_visits[i] - 1 : 0;
@@ -285,7 +320,6 @@ int run_selfplay_games(
     int num_games
 ) {
     init_zobrist();
-    srand((unsigned)time(nullptr));
 
     int concurrent = config.max_concurrent;
     if (concurrent > num_games) concurrent = num_games;
@@ -315,6 +349,7 @@ int run_selfplay_games(
         int move_number;  // 1-based (for explore_base decay)
         int game_idx;     // index into records[]
         bool white_started;  // for value assignment
+        GameRng rng;       // per-game deterministic RNG
     };
 
     ActiveGame* games = new ActiveGame[concurrent];
@@ -329,6 +364,7 @@ int run_selfplay_games(
         g.move_number = 1;
         g.game_idx = game_idx;
         g.white_started = true;
+        g.rng.seed(game_idx, config.seed);
         uint64_t h = compute_hash(g.board);
         g.hash_history[g.hash_count++] = h;
         if (!records[game_idx].samples) records[game_idx].alloc();
@@ -443,7 +479,7 @@ int run_selfplay_games(
                     chosen = 0;
                 } else {
                     chosen = sample_move(res, g.board, g.move_number, config.explore_base,
-                                         h_visits, h_moves, num_children);
+                                         h_visits, h_moves, num_children, g.rng);
                 }
 
                 if (chosen != 0 && num_children > 0) {

@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
     config.enable_koth = false;
     config.c_puct = 1.414f;
     config.max_concurrent = SP_MAX_CONCURRENT;
+    config.seed = 0;  // deterministic; pass --seed N for different runs
 
     int actual_concurrent = config.num_games < config.max_concurrent ? config.num_games : config.max_concurrent;
     printf("Self-play: %d games, %d sims/move, %d concurrent\n",

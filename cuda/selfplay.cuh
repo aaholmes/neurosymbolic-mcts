@@ -26,6 +26,7 @@ struct SelfPlayConfig {
     bool enable_koth;             // King of the Hill
     float c_puct;                 // PUCT exploration constant
     int max_concurrent;           // max concurrent games (default 36)
+    int seed;                     // base RNG seed (each game gets seed derived from game_idx + this)
 };
 
 struct GameRecord {
