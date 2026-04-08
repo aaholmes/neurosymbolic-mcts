@@ -290,6 +290,16 @@ class Orchestrator:
                 "global_minibatch": 0,
             }, gen0_pth)
 
+            # Export CUDA weights for transformer
+            if self.config.arch == "transformer":
+                gen0_bin = gen0_pth.replace(".pth", ".bin")
+                subprocess.run([
+                    "python3", "python/export_transformer_weights_cuda.py",
+                    gen0_pth, gen0_bin,
+                    "--num-blocks", str(self.config.num_blocks),
+                    "--hidden-dim", str(self.config.hidden_dim),
+                ], check=True)
+
         self.state.current_best_pt = gen0_pt
         self.state.current_best_pth = gen0_pth
         self.state.latest_pth = gen0_pth
@@ -366,45 +376,66 @@ class Orchestrator:
 
         sims = self._get_sims_for_gen(generation)
         seed_offset = (generation - 1) * self.config.games_per_generation
-        cmd = [
-            "cargo", "run", "--release", "--features", "neural", "--bin", "self_play", "--",
-            str(self.config.games_per_generation),
-            str(sims),
-            data_dir,
-            self.state.current_best_pt,
-            "true" if self.config.enable_koth else "false",
-            str(self.config.enable_tier1).lower(),
-            str(self.config.enable_material_value).lower(),
-            self.config.log_games,
-            "--batch-size", str(self.config.inference_batch_size),
-            "--seed-offset", str(seed_offset),
-        ]
-        if self.config.game_threads > 0:
-            cmd.extend(["--threads", str(self.config.game_threads)])
-        cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
-        if self.config.qsearch_variant != "extended":
-            cmd.extend(["--qsearch", self.config.qsearch_variant])
 
-        print(f"Self-play: {self.config.games_per_generation} games, "
-              f"{sims} sims, "
-              f"batch_size={self.config.inference_batch_size}...")
-        result = subprocess.run(
-            cmd, env=get_libtorch_env(),
-            capture_output=True, text=True, check=True,
-        )
+        if self.config.arch == "transformer":
+            # GPU MCTS self-play via CUDA binary
+            weights_bin = self.state.current_best_pth.replace(".pth", ".bin")
+            cmd = [
+                "cuda/build/selfplay", "selfplay",
+                weights_bin,
+                str(self.config.games_per_generation),
+                str(sims),
+                data_dir,
+                "--seed", str(seed_offset),
+            ]
+            if self.config.enable_koth:
+                cmd.append("--koth")
 
-        # Save game logs (stdout = moves/results, stderr = training sample details)
-        log_path = os.path.join(data_dir, "self_play_games.txt")
-        with open(log_path, "w") as f:
-            f.write(result.stdout)
+            print(f"GPU Self-play: {self.config.games_per_generation} games, "
+                  f"{sims} sims, CUDA transformer...")
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            if result.stdout:
+                print(result.stdout.strip())
+        else:
+            # Rust + LibTorch self-play
+            cmd = [
+                "cargo", "run", "--release", "--features", "neural", "--bin", "self_play", "--",
+                str(self.config.games_per_generation),
+                str(sims),
+                data_dir,
+                self.state.current_best_pt,
+                "true" if self.config.enable_koth else "false",
+                str(self.config.enable_tier1).lower(),
+                str(self.config.enable_material_value).lower(),
+                self.config.log_games,
+                "--batch-size", str(self.config.inference_batch_size),
+                "--seed-offset", str(seed_offset),
+            ]
+            if self.config.game_threads > 0:
+                cmd.extend(["--threads", str(self.config.game_threads)])
+            cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
+            if self.config.qsearch_variant != "extended":
+                cmd.extend(["--qsearch", self.config.qsearch_variant])
+
+            print(f"Self-play: {self.config.games_per_generation} games, "
+                  f"{sims} sims, "
+                  f"batch_size={self.config.inference_batch_size}...")
+            result = subprocess.run(
+                cmd, env=get_libtorch_env(),
+                capture_output=True, text=True, check=True,
+            )
+
+            log_path = os.path.join(data_dir, "self_play_games.txt")
+            with open(log_path, "w") as f:
+                f.write(result.stdout)
+                if result.stderr:
+                    f.write("\n--- Training Sample Details (stderr) ---\n")
+                    f.write(result.stderr)
+            if result.stdout:
+                print(result.stdout[-1000:] if len(result.stdout) > 1000 else result.stdout)
             if result.stderr:
-                f.write("\n--- Training Sample Details (stderr) ---\n")
-                f.write(result.stderr)
-        if result.stdout:
-            print(result.stdout[-1000:] if len(result.stdout) > 1000 else result.stdout)
-        if result.stderr:
-            print(result.stderr[-500:] if len(result.stderr) > 500 else result.stderr,
-                  file=sys.stderr)
+                print(result.stderr[-500:] if len(result.stderr) > 500 else result.stderr,
+                      file=sys.stderr)
 
         return data_dir
 
@@ -562,55 +593,128 @@ class Orchestrator:
         model = model.to(device)
         export_model_for_rust(model, candidate_pt)
 
+        # Export CUDA weights for transformer
+        if self.config.arch == "transformer":
+            candidate_bin = candidate_pth.replace(".pth", ".bin")
+            subprocess.run([
+                "python3", "python/export_transformer_weights_cuda.py",
+                candidate_pth, candidate_bin,
+                "--num-blocks", str(self.config.num_blocks),
+                "--hidden-dim", str(self.config.hidden_dim),
+            ], check=True)
+
         return candidate_pth, candidate_pt
+
+    def _compute_sprt(self, wins, losses, draws):
+        """Compute SPRT log-likelihood ratio and decision from W/L/D counts."""
+        import math
+        total = wins + losses + draws
+        if total == 0:
+            return 0.0, "inconclusive"
+
+        # Convert Elo thresholds to win probabilities (BayesElo model)
+        def elo_to_prob(elo):
+            return 1.0 / (1.0 + 10.0 ** (-elo / 400.0))
+
+        p0 = elo_to_prob(self.config.sprt_elo0)
+        p1 = elo_to_prob(self.config.sprt_elo1)
+
+        # Trinomial LLR: treat draws as 0.5 each
+        w = wins / total
+        l = losses / total
+        d = draws / total
+        score = w + 0.5 * d  # observed score
+
+        # Log-likelihood ratio
+        # Under H0: expected score = p0. Under H1: expected score = p1.
+        # Simple approximation: use binomial LLR on the score
+        if score <= 0.0 or score >= 1.0:
+            # Degenerate case
+            if score >= 1.0:
+                return 100.0, "H1"
+            else:
+                return -100.0, "H0"
+
+        llr0 = total * (score * math.log(score / p0) + (1 - score) * math.log((1 - score) / (1 - p0)))
+        llr1 = total * (score * math.log(score / p1) + (1 - score) * math.log((1 - score) / (1 - p1)))
+        llr = llr1 - llr0
+
+        # SPRT bounds
+        lower = math.log(self.config.sprt_beta / (1 - self.config.sprt_alpha))
+        upper = math.log((1 - self.config.sprt_beta) / self.config.sprt_alpha)
+
+        if llr >= upper:
+            return llr, "H1"
+        elif llr <= lower:
+            return llr, "H0"
+        else:
+            return llr, "inconclusive"
 
     def run_evaluation(self, candidate_pt, generation=None, suffix=""):
         """Evaluate candidate vs current best using SPRT. Returns (accepted, results_dict)."""
         eval_sims = self.config.eval_simulations
         if generation is not None and self.config.sims_schedule:
             eval_sims = self._get_sims_for_gen(generation)
-        cmd = [
-            "cargo", "run", "--release", "--features", "neural",
-            "--bin", "evaluate_models", "--",
-            candidate_pt,
-            self.state.current_best_pt,
-            str(self.config.eval_max_games),
-            str(eval_sims),
-            "--sprt",
-            "--elo0", str(self.config.sprt_elo0),
-            "--elo1", str(self.config.sprt_elo1),
-            "--sprt-alpha", str(self.config.sprt_alpha),
-            "--sprt-beta", str(self.config.sprt_beta),
-        ]
-        if self.config.enable_koth:
-            cmd.append("--enable-koth")
-        if not self.config.enable_tier1:
-            cmd.append("--disable-tier1")
-        if not self.config.enable_material_value:
-            cmd.append("--disable-material")
-        if self.config.qsearch_variant != "extended":
-            cmd.extend(["--qsearch", self.config.qsearch_variant])
-        cmd.extend(["--batch-size", str(self.config.inference_batch_size)])
-        cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
-        if self.config.game_threads > 0:
-            cmd.extend(["--threads", str(self.config.game_threads)])
-        if generation is not None:
-            # Same seed offset for all variants so games are directly comparable
-            eval_seed_offset = generation * self.config.eval_max_games
-            cmd.extend(["--seed-offset", str(eval_seed_offset)])
-
-        # Save training data from eval games for buffer ingestion
-        eval_data_dir = os.path.join(self.config.data_dir, f"gen_{self._current_generation}", "eval_data")
-        cmd.extend(["--save-training-data", eval_data_dir])
 
         print(f"Evaluating: up to {self.config.eval_max_games} games @ {eval_sims} sims (SPRT "
               f"elo0={self.config.sprt_elo0}, elo1={self.config.sprt_elo1}, "
               f"alpha={self.config.sprt_alpha}, beta={self.config.sprt_beta})")
 
-        result = subprocess.run(
-            cmd, env=get_libtorch_env(),
-            capture_output=True, text=True,
-        )
+        if self.config.arch == "transformer":
+            # GPU MCTS eval via CUDA binary
+            candidate_bin = candidate_pt.replace(".pt", ".bin")
+            best_bin = self.state.current_best_pth.replace(".pth", ".bin")
+            eval_seed = (generation or 0) * self.config.eval_max_games
+            cmd = [
+                "cuda/build/selfplay", "eval",
+                candidate_bin, best_bin,
+                str(self.config.eval_max_games),
+                str(eval_sims),
+                "--seed", str(eval_seed),
+            ]
+            if self.config.enable_koth:
+                cmd.append("--koth")
+
+            print(f"GPU Eval: {self.config.eval_max_games} games, CUDA transformer...")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        else:
+            # Rust + LibTorch eval
+            cmd = [
+                "cargo", "run", "--release", "--features", "neural",
+                "--bin", "evaluate_models", "--",
+                candidate_pt,
+                self.state.current_best_pt,
+                str(self.config.eval_max_games),
+                str(eval_sims),
+                "--sprt",
+                "--elo0", str(self.config.sprt_elo0),
+                "--elo1", str(self.config.sprt_elo1),
+                "--sprt-alpha", str(self.config.sprt_alpha),
+                "--sprt-beta", str(self.config.sprt_beta),
+            ]
+            if self.config.enable_koth:
+                cmd.append("--enable-koth")
+            if not self.config.enable_tier1:
+                cmd.append("--disable-tier1")
+            if not self.config.enable_material_value:
+                cmd.append("--disable-material")
+            if self.config.qsearch_variant != "extended":
+                cmd.extend(["--qsearch", self.config.qsearch_variant])
+            cmd.extend(["--batch-size", str(self.config.inference_batch_size)])
+            cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
+            if self.config.game_threads > 0:
+                cmd.extend(["--threads", str(self.config.game_threads)])
+            if generation is not None:
+                eval_seed_offset = generation * self.config.eval_max_games
+                cmd.extend(["--seed-offset", str(eval_seed_offset)])
+
+            eval_data_dir = os.path.join(self.config.data_dir, f"gen_{self._current_generation}", "eval_data")
+            cmd.extend(["--save-training-data", eval_data_dir])
+
+            result = subprocess.run(
+                cmd, env=get_libtorch_env(),
+                capture_output=True, text=True,
+            )
 
         # Save eval game logs
         data_dir = os.path.join(self.config.data_dir, f"gen_{self._current_generation}")
@@ -637,7 +741,14 @@ class Orchestrator:
         winrate = float(parts.get("WINRATE", 0.0))
         games_played = int(parts.get("GAMES_PLAYED", wins + losses + draws))
         llr = float(parts.get("LLR", 0.0))
-        sprt_result = parts.get("SPRT_RESULT", "inconclusive")
+        sprt_result = parts.get("SPRT_RESULT", "")
+
+        # If SPRT wasn't computed by the binary (CUDA path), compute it here
+        if not sprt_result and games_played > 0:
+            llr, sprt_result = self._compute_sprt(wins, losses, draws)
+
+        if not sprt_result:
+            sprt_result = "inconclusive"
 
         # Accept only if SPRT decided H1
         accepted = sprt_result == "H1"
