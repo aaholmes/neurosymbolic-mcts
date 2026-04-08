@@ -73,23 +73,29 @@ __device__ void tf_relu(float* data, int count);
 
 // GEMM with both operands in shared memory FP32:
 // C[M,N] = A_smem[M,K] × B_smem[K,N], convert both to FP16 on-the-fly
+// ld_a: stride between rows of A (default K). ld_b: stride between rows of B (default N).
 __device__ void tf_gemm_smem(
     const float* __restrict__ A_smem,
     const float* __restrict__ B_smem,
     float* __restrict__ C_smem,
     half* __restrict__ workspace,
-    int M, int N, int K
+    int M, int N, int K,
+    int ld_a = 0,    // 0 = use K
+    int ld_b = 0     // 0 = use N
 );
 
 // GEMM with A×B^T, both in shared memory FP32:
 // C[M,N] = A_smem[M,K] × B_smem[N,K]^T, with optional scaling
+// ld_a/ld_b: leading dimensions (stride between rows). Default = K.
 __device__ void tf_gemm_smem_abt(
-    const float* __restrict__ A_smem,  // [M, K]
-    const float* __restrict__ B_smem,  // [N, K] — transposed in multiply
+    const float* __restrict__ A_smem,  // [M, K] with ld_a stride
+    const float* __restrict__ B_smem,  // [N, K] with ld_b stride — transposed in multiply
     float* __restrict__ C_smem,        // [M, N]
     half* __restrict__ workspace,
     int M, int N, int K,
-    float scale = 1.0f
+    float scale = 1.0f,
+    int ld_a = 0,    // 0 = use K
+    int ld_b = 0     // 0 = use K
 );
 
 // Linear layer: output[M, N] = input[M, K] × weight^T[K, N] + bias[N]

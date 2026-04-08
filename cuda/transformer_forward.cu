@@ -153,20 +153,67 @@ __device__ void transformer_forward(
         // buf_out = LN(original buf_x), still valid for Q/K/V source
         // buf_x = accumulator for attention output (zeroed)
 
-        float* ws_q    = workspace;           // [64, 32] = 2048 floats
-        float* ws_k    = workspace + 2048;    // [64, 32] = 2048 floats
-        float* ws_attn = workspace;           // [64, 64] = 4096 floats (reuses Q/K)
-        float* ws_v    = workspace + 4096;    // [64, 32] = 2048 floats
-        float* ws_head = workspace + 4096;    // [64, 32] = 2048 floats (reuses V after attn×V)
+        // Workspace: ws_q[64,32] at +0, ws_k[64,32] at +2048
+        // ws_attn[64,64] at +0 (reuses Q/K), ws_v[64,32] at +4096, ws_head at +4096
+        float* ws_q    = workspace;
+        float* ws_k    = workspace + T * TF_HEAD_DIM;
+        float* ws_attn = workspace;
+        float* ws_v    = workspace + T * T;  // +4096
+        float* ws_head = workspace + T * T;  // +4096 (reuses V)
 
         for (int h = 0; h < TF_NUM_HEADS; h++) {
-            int qkv_offset = h * TF_HEAD_DIM;  // column offset within Q/K/V sections
+            int qkv_offset = h * TF_HEAD_DIM;
 
-            // Q_h[64, 32] = buf_out[64, 128] × W_q_h^T
             if (half_w) {
-                tf_linear(buf_out, half_w->blocks[blk].q_head[h], ws_q,
-                          block.qkv_bias + qkv_offset, ws_half, T, TF_HEAD_DIM, D);
+                // Fused Q+K projection: [64, 128] × [64, 128]^T → [64, 64]
+                // qkv_head[h] is [96, 128]. First 64 rows = Q+K weights.
+                // Use only the Q+K portion: [64, 128] at offset 0
+                tf_linear(buf_out, half_w->blocks[blk].qkv_head[h], ws_q,
+                          nullptr, ws_half, T, 2 * TF_HEAD_DIM, D);
+                // Add Q bias to ws_q[0:2048] and K bias to ws_k[0:2048]
+                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
+                    int tok = i / TF_HEAD_DIM, d = i % TF_HEAD_DIM;
+                    ws_q[tok * (2*TF_HEAD_DIM) + d] += block.qkv_bias[qkv_offset + d];
+                    ws_q[tok * (2*TF_HEAD_DIM) + TF_HEAD_DIM + d] += block.qkv_bias[D + qkv_offset + d];
+                }
+                __syncthreads();
+
+                // QK^T: Q at ws_q stride=2*HD, K at ws_q+HD stride=2*HD
+                float scale = rsqrtf((float)TF_HEAD_DIM);
+                tf_gemm_smem_abt(ws_q, ws_q + TF_HEAD_DIM, ws_attn, ws_half,
+                                 T, T, TF_HEAD_DIM, scale, 2 * TF_HEAD_DIM, 2 * TF_HEAD_DIM);
+
+                tf_softmax_rows(ws_attn, T, T, reduce);
+
+                // V projection (separate — can't fit in workspace alongside attn)
+                tf_linear(buf_out, half_w->blocks[blk].v_head[h], ws_v,
+                          block.qkv_bias + 2 * D + qkv_offset, ws_half, T, TF_HEAD_DIM, D);
+
+                // attn×V → ws_head (ws_v and ws_head alias, but tf_gemm_smem zeros C first)
+                // Can't alias B and C. Use buf_x as temp (saved to registers, free for this).
+                tf_gemm_smem(ws_attn, ws_v, buf_x, ws_half, T, TF_HEAD_DIM, T);
+
+                // Output projection: accumulate into buf_x (which now holds head_out)
+                // Wait — buf_x has head_out AND is the accumulator for attention output.
+                // tf_linear reads buf_x as input and accumulates into buf_x. Input=output=buf_x.
+                // That's a problem — tf_linear zeros C (buf_x) on first head, destroying head_out.
+                // With accumulate=true it doesn't zero, but reads and writes same memory.
+                //
+                // Fix: output projection reads from buf_x (head_out), accumulates to buf_x.
+                // For head 0: buf_x was zeroed at the start. tf_linear with accumulate reads
+                // from buf_x[0:T*HD] (head_out in first T*HD floats, rest is zero), writes to
+                // all of buf_x[0:T*D]. The read region [0:T*HD=2048] and write region [0:T*D=8192]
+                // overlap. But tf_linear processes tile by tile — input tiles may be read after
+                // output tiles overwrite them. This IS a race condition.
+                //
+                // Clean solution: copy head_out from buf_x to ws_v (attn consumed, ws_v free).
+                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x)
+                    ws_v[i] = buf_x[i];
+                __syncthreads();
+                tf_linear(ws_v, half_w->blocks[blk].out_proj + h * TF_HEAD_DIM * D,
+                          buf_x, nullptr, ws_half, T, D, TF_HEAD_DIM, true);
             } else {
+                // Scalar path
                 for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
                     int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                     float sum = 0.0f;
@@ -175,14 +222,8 @@ __device__ void transformer_forward(
                     ws_q[i] = sum + block.qkv_bias[qkv_offset + d];
                 }
                 __syncthreads();
-            }
 
-            // K_h[64, 32]
-            int k_offset = D + qkv_offset;
-            if (half_w) {
-                tf_linear(buf_out, half_w->blocks[blk].k_head[h], ws_k,
-                          block.qkv_bias + k_offset, ws_half, T, TF_HEAD_DIM, D);
-            } else {
+                int k_offset = D + qkv_offset;
                 for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
                     int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                     float sum = 0.0f;
@@ -191,13 +232,8 @@ __device__ void transformer_forward(
                     ws_k[i] = sum + block.qkv_bias[k_offset + d];
                 }
                 __syncthreads();
-            }
 
-            // attn[64, 64] = Q_h × K_h^T / sqrt(head_dim)
-            float scale = rsqrtf((float)TF_HEAD_DIM);
-            if (half_w) {
-                tf_gemm_smem_abt(ws_q, ws_k, ws_attn, ws_half, T, T, TF_HEAD_DIM, scale);
-            } else {
+                float scale = rsqrtf((float)TF_HEAD_DIM);
                 for (int i = tid; i < T * T; i += blockDim.x) {
                     int row = i / T; int col = i % T;
                     float sum = 0.0f;
@@ -206,17 +242,10 @@ __device__ void transformer_forward(
                     ws_attn[i] = sum * scale;
                 }
                 __syncthreads();
-            }
 
-            // Softmax per row
-            tf_softmax_rows(ws_attn, T, T, reduce);
+                tf_softmax_rows(ws_attn, T, T, reduce);
 
-            // V_h[64, 32]
-            int v_offset = 2 * D + qkv_offset;
-            if (half_w) {
-                tf_linear(buf_out, half_w->blocks[blk].v_head[h], ws_v,
-                          block.qkv_bias + v_offset, ws_half, T, TF_HEAD_DIM, D);
-            } else {
+                int v_offset = 2 * D + qkv_offset;
                 for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
                     int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                     float sum = 0.0f;
@@ -225,12 +254,7 @@ __device__ void transformer_forward(
                     ws_v[i] = sum + block.qkv_bias[v_offset + d];
                 }
                 __syncthreads();
-            }
 
-            // head_out[64, 32] = attn[64, 64] × V_h[64, 32]
-            if (half_w) {
-                tf_gemm_smem(ws_attn, ws_v, ws_head, ws_half, T, TF_HEAD_DIM, T);
-            } else {
                 for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
                     int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                     float sum = 0.0f;
@@ -241,14 +265,8 @@ __device__ void transformer_forward(
                 __syncthreads();
             }
 
-            // Output projection: buf_x += head_out[64, 32] × W_o_h^T[32, 128]
-            // W_o rows [h*32:(h+1)*32] of [128, 128] = contiguous [32, 128]
-            if (half_w) {
-                // out_proj_weight is [128, 128], per-head slice at row h*32 = [32, 128]
-                // out_proj FP16 pointer + h*32*128 halves
-                tf_linear(ws_head, half_w->blocks[blk].out_proj + h * TF_HEAD_DIM * D,
-                          buf_x, nullptr, ws_half, T, D, TF_HEAD_DIM, true);
-            } else {
+            // Output projection (scalar path only — TC path handles it above)
+            if (!half_w) {
                 for (int i = tid; i < T * D; i += blockDim.x) {
                     int tok = i / D; int d = i % D;
                     float sum = 0.0f;

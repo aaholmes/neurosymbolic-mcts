@@ -146,6 +146,17 @@ TransformerWeightsHalf* convert_transformer_to_half(const TransformerWeights* d_
             cudaMalloc(&h_half.blocks[b].v_head[h], head_slice_n * sizeof(half));
             kernel_extract_qkv_head<<<head_blocks, 256>>>(
                 qkv_src, h_half.blocks[b].v_head[h], NN_HIDDEN_DIM, TF_HEAD_DIM, 2 * NN_HIDDEN_DIM + h * TF_HEAD_DIM);
+
+            // Fused qkv_head[h]: [96, 128] = concat of q_head, k_head, v_head
+            int fused_n = 3 * TF_HEAD_DIM * NN_HIDDEN_DIM;  // 96 * 128 = 12288
+            cudaMalloc(&h_half.blocks[b].qkv_head[h], fused_n * sizeof(half));
+            // Copy q_head[32,128] to offset 0, k_head to offset 32*128, v_head to offset 64*128
+            cudaMemcpy(h_half.blocks[b].qkv_head[h],
+                       h_half.blocks[b].q_head[h], head_slice_n * sizeof(half), cudaMemcpyDeviceToDevice);
+            cudaMemcpy(h_half.blocks[b].qkv_head[h] + head_slice_n,
+                       h_half.blocks[b].k_head[h], head_slice_n * sizeof(half), cudaMemcpyDeviceToDevice);
+            cudaMemcpy(h_half.blocks[b].qkv_head[h] + 2 * head_slice_n,
+                       h_half.blocks[b].v_head[h], head_slice_n * sizeof(half), cudaMemcpyDeviceToDevice);
         }
 
         int op_n = NN_HIDDEN_DIM * NN_HIDDEN_DIM;
@@ -221,6 +232,7 @@ void free_transformer_half(TransformerWeightsHalf* d_half) {
             cudaFree(h.blocks[b].q_head[hh]);
             cudaFree(h.blocks[b].k_head[hh]);
             cudaFree(h.blocks[b].v_head[hh]);
+            cudaFree(h.blocks[b].qkv_head[hh]);
         }
         cudaFree(h.blocks[b].out_proj);
         cudaFree(h.blocks[b].ffn1);

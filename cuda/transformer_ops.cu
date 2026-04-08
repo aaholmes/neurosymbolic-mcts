@@ -115,8 +115,11 @@ __device__ void tf_gemm_smem(
     const float* __restrict__ B_smem,
     float* __restrict__ C_smem,
     half* __restrict__ workspace,
-    int M, int N, int K
+    int M, int N, int K,
+    int ld_a, int ld_b
 ) {
+    if (ld_a == 0) ld_a = K;
+    if (ld_b == 0) ld_b = N;
     int tid = threadIdx.x;
     int warp_id = tid / 32;
     int lane = tid % 32;
@@ -142,17 +145,15 @@ __device__ void tf_gemm_smem(
         for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
             int K_start = k_tile * 16;
 
-            // A staging from shared FP32
             for (int i = lane; i < 256; i += 32) {
                 int r = i / 16, c = i % 16;
                 int m = M_start + r, k = K_start + c;
-                a_staging[i] = (m < M && k < K) ? __float2half(A_smem[m * K + k]) : __float2half(0.0f);
+                a_staging[i] = (m < M && k < K) ? __float2half(A_smem[m * ld_a + k]) : __float2half(0.0f);
             }
-            // B staging from shared FP32
             for (int i = lane; i < 256; i += 32) {
                 int r = i / 16, c = i % 16;
                 int k = K_start + r, n = N_start + c;
-                b_staging[i] = (k < K && n < N) ? __float2half(B_smem[k * N + n]) : __float2half(0.0f);
+                b_staging[i] = (k < K && n < N) ? __float2half(B_smem[k * ld_b + n]) : __float2half(0.0f);
             }
             __syncwarp();
 
@@ -178,8 +179,11 @@ __device__ void tf_gemm_smem_abt(
     float* __restrict__ C_smem,
     half* __restrict__ workspace,
     int M, int N, int K,
-    float scale
+    float scale,
+    int ld_a, int ld_b
 ) {
+    if (ld_a == 0) ld_a = K;
+    if (ld_b == 0) ld_b = K;
     int tid = threadIdx.x;
     int warp_id = tid / 32;
     int lane = tid % 32;
@@ -205,18 +209,16 @@ __device__ void tf_gemm_smem_abt(
         for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
             int K_start = k_tile * 16;
 
-            // A staging: A[M, K] normal
             for (int i = lane; i < 256; i += 32) {
                 int r = i / 16, c = i % 16;
                 int m = M_start + r, k = K_start + c;
-                a_staging[i] = (m < M && k < K) ? __float2half(A_smem[m * K + k]) : __float2half(0.0f);
+                a_staging[i] = (m < M && k < K) ? __float2half(A_smem[m * ld_a + k]) : __float2half(0.0f);
             }
-            // B staging: B[N, K] transposed → B^T[K, N]
-            // staging[k_local, n_local] = B[n, k] = B_smem[n * K + k]
+            // B[N, K] transposed: staging[k_local, n_local] = B[n, k]
             for (int i = lane; i < 256; i += 32) {
-                int r = i / 16, c = i % 16;  // r = k_local, c = n_local
+                int r = i / 16, c = i % 16;
                 int k = K_start + r, n = N_start + c;
-                b_staging[i] = (k < K && n < N) ? __float2half(B_smem[n * K + k]) : __float2half(0.0f);
+                b_staging[i] = (k < K && n < N) ? __float2half(B_smem[n * ld_b + k]) : __float2half(0.0f);
             }
             __syncwarp();
 

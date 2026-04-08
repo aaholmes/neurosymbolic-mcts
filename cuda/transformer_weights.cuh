@@ -82,6 +82,7 @@ struct TransformerWeightsHalf {
         half* q_head[TF_NUM_HEADS];  // per-head [32, 128]
         half* k_head[TF_NUM_HEADS];  // per-head [32, 128]
         half* v_head[TF_NUM_HEADS];  // per-head [32, 128]
+        half* qkv_head[TF_NUM_HEADS]; // per-head fused [96, 128] (Q|K|V concat)
         half* out_proj;     // [128, 128]
         half* ffn1;         // [128, 512] (full, kept for reference)
         half* ffn2;         // [512, 128] (full, kept for reference)
