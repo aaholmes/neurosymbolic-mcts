@@ -25,6 +25,9 @@ add_library(caissawary_cuda STATIC
     nn_forward.cu
     block_ops.cu
     block_forward.cu
+    transformer_weights.cu
+    transformer_ops.cu
+    transformer_forward.cu
 )
 target_include_directories(caissawary_cuda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(caissawary_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -72,6 +75,11 @@ set_target_properties(test_profile_latency PROPERTIES CUDA_SEPARABLE_COMPILATION
 add_executable(test_multi_tree_eval test/test_multi_tree_eval.cu)
 target_link_libraries(test_multi_tree_eval caissawary_cuda)
 set_target_properties(test_multi_tree_eval PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Transformer tests
+add_executable(test_transformer test/test_transformer.cu)
+target_link_libraries(test_transformer caissawary_cuda)
+set_target_properties(test_transformer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # Layer-by-layer timing profile
 add_executable(test_layer_timing test/test_layer_timing.cu)
