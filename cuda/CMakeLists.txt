@@ -28,6 +28,7 @@ add_library(caissawary_cuda STATIC
     transformer_weights.cu
     transformer_ops.cu
     transformer_forward.cu
+    selfplay.cu
 )
 target_include_directories(caissawary_cuda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(caissawary_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -80,6 +81,16 @@ set_target_properties(test_multi_tree_eval PROPERTIES CUDA_SEPARABLE_COMPILATION
 add_executable(test_transformer test/test_transformer.cu)
 target_link_libraries(test_transformer caissawary_cuda)
 set_target_properties(test_transformer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Self-play test
+add_executable(test_selfplay test/test_selfplay.cu)
+target_link_libraries(test_selfplay caissawary_cuda)
+set_target_properties(test_selfplay PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Self-play standalone executable
+add_executable(selfplay selfplay_main.cu)
+target_link_libraries(selfplay caissawary_cuda)
+set_target_properties(selfplay PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # Layer-by-layer timing profile
 add_executable(test_layer_timing test/test_layer_timing.cu)

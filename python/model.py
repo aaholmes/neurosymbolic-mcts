@@ -170,3 +170,142 @@ class OracleNet(nn.Module):
         
         # 3. K scalar: k_logit is initialized to 0.0 in __init__
         # Softplus(0) = ln(2). k = 0.47 * ln(2) ≈ 0.326.
+
+
+# ============================================================
+# Transformer Architecture (pre-LayerNorm, matches CUDA implementation)
+# ============================================================
+
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model, num_heads, ffn_dim):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn1 = nn.Linear(d_model, ffn_dim)
+        self.ffn2 = nn.Linear(ffn_dim, d_model)
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+
+    def forward(self, x):
+        # x: [B, 64, d_model]
+        B, T, D = x.shape
+
+        # Multi-head self-attention (pre-LN)
+        h = self.ln1(x)
+        qkv = self.qkv(h)  # [B, 64, 3*D]
+        qkv = qkv.reshape(B, T, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # [3, B, heads, 64, head_dim]
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # Scaled dot-product attention
+        scale = self.head_dim ** -0.5
+        attn = (q @ k.transpose(-2, -1)) * scale  # [B, heads, 64, 64]
+        attn = F.softmax(attn, dim=-1)
+        out = attn @ v  # [B, heads, 64, head_dim]
+
+        out = out.transpose(1, 2).reshape(B, T, D)  # [B, 64, D]
+        out = self.out_proj(out)
+        x = x + out
+
+        # FFN (pre-LN)
+        h = self.ln2(x)
+        ffn_out = self.ffn2(F.relu(self.ffn1(h)))
+        x = x + ffn_out
+
+        return x
+
+
+class TransformerNet(nn.Module):
+    """Transformer chess network matching the CUDA TransformerWeights struct."""
+
+    def __init__(self, num_blocks=6, hidden_dim=128, input_channels=17,
+                 policy_output_size=4672, num_heads=4, ffn_dim=512):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.ffn_dim = ffn_dim
+
+        # Input: [B, 17, 8, 8] → flatten to [B, 64, 17] → project to [B, 64, D]
+        self.input_proj = nn.Linear(input_channels, hidden_dim)
+        self.pos_embedding = nn.Parameter(torch.zeros(64, hidden_dim))
+
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            TransformerBlock(hidden_dim, num_heads, ffn_dim)
+            for _ in range(num_blocks)
+        ])
+
+        # Policy head: per-token linear → [B, 64, 73] → reshape [B, 4672]
+        self.p_ln = nn.LayerNorm(hidden_dim)
+        self.p_head = nn.Linear(hidden_dim, 73)
+
+        # Value head: LN → global avg pool → concat q_result → FC
+        self.v_ln = nn.LayerNorm(hidden_dim)
+        self.v_fc1 = nn.Linear(hidden_dim + 1, 256)  # +1 for q_result
+        self.v_fc2 = nn.Linear(256, 1)
+
+        # K scalar (same as OracleNet)
+        self.k_logit = nn.Parameter(torch.tensor(0.0))
+
+        self.apply(self._init_weights)
+        self._zero_init_heads()
+
+    def forward(self, x, scalars_input):
+        # x: [B, 17, 8, 8], scalars_input: [B, 2]
+        if scalars_input.dim() == 1:
+            scalars_input = scalars_input.unsqueeze(1)
+        if scalars_input.size(1) == 1:
+            scalars_input = torch.cat([scalars_input, torch.ones_like(scalars_input)], dim=1)
+
+        q_result = scalars_input[:, 0:1]  # [B, 1]
+        k = 0.47 * F.softplus(self.k_logit)
+        k_batch = k.unsqueeze(0).expand(x.size(0), 1)
+
+        # Flatten spatial: [B, 17, 8, 8] → [B, 64, 17] (token = square, features = channels)
+        B = x.size(0)
+        tokens = x.permute(0, 2, 3, 1).reshape(B, 64, -1)  # [B, 64, 17]
+
+        # Input projection + positional embedding
+        h = self.input_proj(tokens) + self.pos_embedding  # [B, 64, D]
+
+        # Transformer blocks
+        for block in self.blocks:
+            h = block(h)
+
+        # Policy head
+        p = self.p_ln(h)
+        p = self.p_head(p)  # [B, 64, 73]
+        p = p.reshape(B, -1)  # [B, 4672]
+        policy = F.log_softmax(p, dim=1)
+
+        # Value head
+        v = self.v_ln(h)
+        v_pool = v.mean(dim=1)  # [B, D] global avg pool
+        v_feat = torch.cat([v_pool, q_result], dim=1)  # [B, D+1]
+        v_hidden = F.relu(self.v_fc1(v_feat))
+        v_logit = self.v_fc2(v_hidden)  # [B, 1]
+
+        total_logit = v_logit + (k_batch * q_result)
+        value = torch.tanh(total_logit)
+
+        if self.training:
+            return policy, value, k_batch
+        else:
+            return policy, v_logit, k_batch
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.weight, 1)
+            nn.init.constant_(m.bias, 0)
+
+    def _zero_init_heads(self):
+        nn.init.constant_(self.p_head.weight, 0.0)
+        nn.init.constant_(self.p_head.bias, 0.0)
+        nn.init.constant_(self.v_fc2.weight, 0.0)
+        nn.init.constant_(self.v_fc2.bias, 0.0)

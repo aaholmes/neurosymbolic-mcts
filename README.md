@@ -263,6 +263,35 @@ The shifted-copy path decomposes conv3x3 into 9 dense GEMMs by kernel position: 
 
 Multi-block scaling is near-perfectly linear up to the SM count (36 on RTX 5060 Ti), then plateaus.
 
+### Two Neural Network Architectures
+
+Both architectures support the same tiered MCTS (mate-in-1, KOTH-in-1, quiescence search, NN evaluation) and produce the same output interface: policy[4672] log-probs + value + k scalar.
+
+| Architecture | Params | Forward pass | Per-move (36 blocks, 200 sims) |
+|---|---|---|---|
+| SE-ResNet 128×6 (shifted-copy TC) | ~2M | 1.51 ms | ~19 ms |
+| Transformer 128×6 (TC + parallel LN/softmax) | ~1.4M | 2.71 ms | ~5.4 ms* |
+
+\* Estimated from 36 games × 200 sims completing in 7.0 seconds (~80 moves/game).
+
+The transformer uses pre-LayerNorm encoder blocks with 4 attention heads (head_dim=32), FFN expansion 4× (128→512→128), and learnable positional embeddings. All GEMMs (Q/K/V projections, attention, FFN) use wmma Tensor Cores. LayerNorm and softmax process all 64 tokens in parallel via warp-shuffle reductions.
+
+### GPU Self-Play
+
+The `selfplay` binary plays complete games entirely on the GPU — no CPU MCTS, no LibTorch. A host-side game loop calls `gpu_mcts_eval_trees_transformer` for batches of 36 concurrent games, applies moves, detects game termination (checkmate, stalemate, 50-move rule, threefold repetition), and writes training data compatible with `train.py`.
+
+```bash
+# Play 36 concurrent self-play games at 200 sims/move
+cuda/build/selfplay /tmp/transformer_weights.bin 36 200 /tmp/selfplay_data/
+
+# Train with transformer architecture
+python python/orchestrate.py --arch transformer --enable-koth
+```
+
+**Self-play throughput (zero weights, 36 concurrent games, RTX 5060 Ti):**
+- 50 sims/move: 36 games in 3.3 seconds (760 samples/sec)
+- 200 sims/move: 36 games in 7.0 seconds (410 samples/sec)
+
 ### Components
 
 | Component | Status | Tests |
@@ -272,32 +301,28 @@ Multi-block scaling is near-perfectly linear up to the SM count (36 on RTX 5060 
 | Quick checks (mate-in-1, KOTH-in-1) | Complete | 8/8 |
 | PeSTO eval + extended q-search + PE | Complete | 11/11 |
 | MCTS kernel (classical mode) | Complete | 10/10 |
-| NN weight struct + loading from PyTorch export | Complete | 2/2 |
-| Warp-cooperative NN ops (GEMM, im2col, BN, SE, softmax) | Complete | 14/14 |
-| Block-cooperative NN ops (256-thread, shared memory) | Complete | 15/15 |
-| Full OracleNet forward pass (warp + block mode) | Complete | 2/2 |
+| SE-ResNet inference (warp, block, TC, shifted-copy) | Complete | 15/15 |
+| Transformer inference (TC + parallel LN/softmax) | Complete | 11/11 |
 | AlphaZero move encoding (73-plane) | Complete | 5/5 |
-| NN-mode MCTS kernel (warp, 32 threads) | Complete | 3/3 |
-| Block-mode MCTS kernel (256 threads, shared memory) | Complete | 9/9 |
-| Multi-block scaling (N blocks, 1 tree) | Complete | — |
 | Multi-tree eval (N trees, 1 block each) | Complete | — |
+| GPU self-play driver | Complete | 2/2 |
 
-**Four inference paths:** The warp-cooperative path (32 threads, 374 KB global scratch, 131 ms) served as a correctness proof. The block-cooperative scalar path (256 threads, 65 KB shared memory, 9.52 ms) added 13.7× via shared-memory activations. The TC im2col path (wmma FP16, 3.65 ms) added 2.6× by reformulating conv3x3 as a GEMM. The shifted-copy path (1.51 ms) adds another 2.4× by decomposing conv3x3 into 9 dense GEMMs by kernel position — eliminating the per-tile im2col scatter/gather that dominated the previous TC path. Residual shortcuts are saved in 32 named float registers per thread to stay within the 96 KB shared memory limit.
+**SE-ResNet inference** evolved through four paths: warp-cooperative (131 ms) → block scalar (9.52 ms) → TC im2col (3.65 ms) → shifted-copy (1.51 ms, 86× faster than warp). Conv3x3 decomposed into 9 dense GEMMs by kernel position with contiguous wmma loads.
 
-**Multi-tree eval** (`gpu_mcts_eval_trees`) runs N independent MCTS searches in parallel, one block per tree, with partitioned node pools. Supports both classical and NN modes.
+**Transformer inference** at 2.71 ms uses TC-accelerated Q/K/V projections, fused Q+K per head, TC attention and FFN (tiled for shared memory), and parallel LayerNorm/softmax across all 64 tokens via warp-shuffle reductions.
+
+**Multi-tree eval** (`gpu_mcts_eval_trees`) runs N independent MCTS searches in parallel, one block per tree, with partitioned node pools. Supports classical, SE-ResNet, and transformer modes.
 
 ```bash
 cd cuda && mkdir -p build && cd build && cmake .. -DCMAKE_CUDA_ARCHITECTURES=89 && make
 cd /path/to/neurosymbolic-mcts  # run from project root for table paths
-cuda/build/test_block_ops       # 15/15 (block conv, BN, SE, forward pass, MCTS, TC, shifted-copy)
+cuda/build/test_block_ops       # 15/15 (SE-ResNet: conv, BN, SE, TC, shifted-copy)
+cuda/build/test_transformer     # 11/11 (transformer: LN, attention, FFN, TC, MCTS)
+cuda/build/test_selfplay        # 2/2 (complete game + batch)
 cuda/build/test_mcts_kernel     # 13/13 (classical + NN mode)
 cuda/build/test_nn_ops          # 21/21 (GEMM, im2col, BN, forward pass, move encoding)
 cuda/build/test_multi_tree_eval # multi-tree classical + NN
-cuda/build/test_movegen         # 30/30 perft
-cuda/build/test_quick_checks    # 8/8
-cuda/build/test_quiescence      # 11/11
-cuda/build/test_tree_store      # 7/7
-cuda/build/test_profile_latency /tmp/weights.bin  # forward pass + MCTS benchmarks
+cuda/build/test_profile_latency /tmp/weights.bin  # SE-ResNet benchmarks
 ```
 
 ## Further Reading

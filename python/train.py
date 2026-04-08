@@ -10,7 +10,7 @@ import os
 import struct
 import glob
 import sys
-from model import OracleNet
+from model import OracleNet, TransformerNet
 from augmentation import augment_sample, augment_all_transforms
 
 # Configuration
@@ -287,6 +287,7 @@ def train_with_config(
     augment=True,
     reset_optimizer=False,
     train_heads="all",
+    arch="oraclenet",
     num_blocks=6,
     hidden_dim=128,
     use_epochs=False,
@@ -342,7 +343,10 @@ def train_with_config(
         )
 
     # Model
-    model = OracleNet(num_blocks=num_blocks, hidden_dim=hidden_dim).to(DEVICE)
+    if arch == "transformer":
+        model = TransformerNet(num_blocks=num_blocks, hidden_dim=hidden_dim).to(DEVICE)
+    else:
+        model = OracleNet(num_blocks=num_blocks, hidden_dim=hidden_dim).to(DEVICE)
 
     # Resume from checkpoint
     global_minibatch = 0
@@ -607,10 +611,13 @@ def parse_args():
     parser.add_argument('--train-heads', type=str, default='all',
                         choices=['all', 'policy', 'value'],
                         help='Which heads to train: all, policy (freeze value+k), value (freeze policy)')
+    parser.add_argument('--arch', type=str, default='oraclenet',
+                        choices=['oraclenet', 'transformer'],
+                        help='Network architecture (default: oraclenet)')
     parser.add_argument('--num-blocks', type=int, default=6,
-                        help='Number of residual blocks in OracleNet (default: 6)')
+                        help='Number of blocks (default: 6)')
     parser.add_argument('--hidden-dim', type=int, default=128,
-                        help='Hidden dimension of OracleNet (default: 128)')
+                        help='Hidden dimension (default: 128)')
     parser.add_argument('--use-epochs', action='store_true',
                         help='Epoch-based training with Elo-weighted inclusion (ignores --minibatches)')
     return parser.parse_args()
@@ -658,6 +665,7 @@ def train():
         augment=args.augment,
         reset_optimizer=args.reset_optimizer,
         train_heads=args.train_heads,
+        arch=args.arch,
         num_blocks=args.num_blocks,
         hidden_dim=args.hidden_dim,
         use_epochs=args.use_epochs,

@@ -14,7 +14,7 @@ import argparse
 from dataclasses import dataclass, field, asdict
 
 import torch
-from model import OracleNet
+from model import OracleNet, TransformerNet
 from replay_buffer import ReplayBuffer
 
 
@@ -61,6 +61,7 @@ class TrainingConfig:
     single_variant: bool = True  # train "all" only; use --multi-variant for policy/value/all
 
     # Model architecture
+    arch: str = "oraclenet"  # "oraclenet" or "transformer"
     num_blocks: int = 6
     hidden_dim: int = 128
 
@@ -129,10 +130,13 @@ class TrainingConfig:
                             help="Skip self-play after gen 1 (eval games produce training data)")
         parser.add_argument("--multi-variant", action="store_true",
                             help="Train all 3 variants (policy-only, value-only, all) instead of just 'all'")
+        parser.add_argument("--arch", type=str, default="oraclenet",
+                            choices=["oraclenet", "transformer"],
+                            help="Network architecture (default: oraclenet)")
         parser.add_argument("--num-blocks", type=int, default=6,
-                            help="Number of residual blocks in OracleNet (default: 6)")
+                            help="Number of residual/transformer blocks (default: 6)")
         parser.add_argument("--hidden-dim", type=int, default=128,
-                            help="Hidden dimension of OracleNet (default: 128)")
+                            help="Hidden dimension (default: 128)")
 
         args = parser.parse_args()
         # Resolve max_epochs: --n-epochs alias overrides --max-epochs if provided
@@ -169,10 +173,19 @@ class TrainingConfig:
             inference_batch_size=args.inference_batch_size,
             game_threads=args.game_threads,
             single_variant=not args.multi_variant,
+            arch=args.arch,
             num_blocks=args.num_blocks,
             hidden_dim=args.hidden_dim,
             skip_self_play=args.skip_self_play,
         )
+
+
+def create_model(config):
+    """Create the appropriate model based on config.arch."""
+    if config.arch == "transformer":
+        return TransformerNet(num_blocks=config.num_blocks, hidden_dim=config.hidden_dim)
+    else:
+        return OracleNet(num_blocks=config.num_blocks, hidden_dim=config.hidden_dim)
 
 
 @dataclass
@@ -266,7 +279,7 @@ class Orchestrator:
         if not os.path.exists(gen0_pt):
             print("Initializing Generation 0...")
             torch.manual_seed(0)
-            model = OracleNet(num_blocks=self.config.num_blocks, hidden_dim=self.config.hidden_dim)
+            model = create_model(self.config)
             # Move to CUDA so TorchScript traces device-dependent ops correctly
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model = model.to(device)
@@ -486,6 +499,7 @@ class Orchestrator:
         if not self.config.enable_material_value:
             cmd.append("--disable-material")
 
+        cmd.extend(["--arch", self.config.arch])
         cmd.extend(["--num-blocks", str(self.config.num_blocks)])
         cmd.extend(["--hidden-dim", str(self.config.hidden_dim)])
 
@@ -537,7 +551,7 @@ class Orchestrator:
 
         # Export to TorchScript
         print("Exporting candidate model...")
-        model = OracleNet(num_blocks=self.config.num_blocks, hidden_dim=self.config.hidden_dim)
+        model = create_model(self.config)
         checkpoint = torch.load(candidate_pth, map_location="cpu", weights_only=False)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             model.load_state_dict(checkpoint["model_state_dict"])
