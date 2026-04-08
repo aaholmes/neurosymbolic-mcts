@@ -79,12 +79,14 @@ struct TransformerWeights {
 struct TransformerWeightsHalf {
     struct BlockHalf {
         half* qkv;          // [128, 384] (fused Q/K/V)
-        half* q_head[TF_NUM_HEADS];  // per-head [32, 128] (extracted from qkv)
+        half* q_head[TF_NUM_HEADS];  // per-head [32, 128]
         half* k_head[TF_NUM_HEADS];  // per-head [32, 128]
         half* v_head[TF_NUM_HEADS];  // per-head [32, 128]
         half* out_proj;     // [128, 128]
-        half* ffn1;         // [512, 128]  (note: [out, in] for tf_linear)
-        half* ffn2;         // [128, 512]
+        half* ffn1;         // [128, 512] (full, kept for reference)
+        half* ffn2;         // [512, 128] (full, kept for reference)
+        half* ffn1_tile[TF_FFN_DIM / TF_FFN_TILE];  // 8 × [64, 128] pre-split tiles
+        half* ffn2_tile[TF_FFN_DIM / TF_FFN_TILE];  // 8 × [128, 64] pre-split tiles
     } blocks[TF_NUM_LAYERS];
     half* input_proj;       // [128, 17]
     half* p_head;           // [73, 128]

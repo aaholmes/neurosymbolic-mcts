@@ -194,17 +194,19 @@ __device__ void transformer_forward(
             }
 
             // attn[64, 64] = Q_h × K_h^T / sqrt(head_dim)
-            // Reuses Q/K space (4096 floats for [64,64], Q/K were 2×2048)
             float scale = rsqrtf((float)TF_HEAD_DIM);
-            for (int i = tid; i < T * T; i += blockDim.x) {
-                int row = i / T;
-                int col = i % T;
-                float sum = 0.0f;
-                for (int d = 0; d < TF_HEAD_DIM; d++)
-                    sum += ws_q[row * TF_HEAD_DIM + d] * ws_k[col * TF_HEAD_DIM + d];
-                ws_attn[i] = sum * scale;
+            if (half_w) {
+                tf_gemm_smem_abt(ws_q, ws_k, ws_attn, ws_half, T, T, TF_HEAD_DIM, scale);
+            } else {
+                for (int i = tid; i < T * T; i += blockDim.x) {
+                    int row = i / T; int col = i % T;
+                    float sum = 0.0f;
+                    for (int d = 0; d < TF_HEAD_DIM; d++)
+                        sum += ws_q[row * TF_HEAD_DIM + d] * ws_k[col * TF_HEAD_DIM + d];
+                    ws_attn[i] = sum * scale;
+                }
+                __syncthreads();
             }
-            __syncthreads();
 
             // Softmax per row
             tf_softmax_rows(ws_attn, T, T, reduce);
@@ -226,15 +228,18 @@ __device__ void transformer_forward(
             }
 
             // head_out[64, 32] = attn[64, 64] × V_h[64, 32]
-            for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
-                int tok = i / TF_HEAD_DIM;
-                int d = i % TF_HEAD_DIM;
-                float sum = 0.0f;
-                for (int k = 0; k < T; k++)
-                    sum += ws_attn[tok * T + k] * ws_v[k * TF_HEAD_DIM + d];
-                ws_head[i] = sum;
+            if (half_w) {
+                tf_gemm_smem(ws_attn, ws_v, ws_head, ws_half, T, TF_HEAD_DIM, T);
+            } else {
+                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
+                    int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
+                    float sum = 0.0f;
+                    for (int k = 0; k < T; k++)
+                        sum += ws_attn[tok * T + k] * ws_v[k * TF_HEAD_DIM + d];
+                    ws_head[i] = sum;
+                }
+                __syncthreads();
             }
-            __syncthreads();
 
             // Output projection: buf_x += head_out[64, 32] × W_o_h^T[32, 128]
             // W_o rows [h*32:(h+1)*32] of [128, 128] = contiguous [32, 128]
@@ -279,28 +284,34 @@ __device__ void transformer_forward(
         for (int tile = 0; tile < TF_FFN_DIM / TF_FFN_TILE; tile++) {
             int tile_start = tile * TF_FFN_TILE;
 
-            // hidden_tile[64, 64] = buf_out[64, 128] × W1[:, tile*64:(tile+1)*64] + b1[tile*64:]
-            for (int i = tid; i < T * TF_FFN_TILE; i += blockDim.x) {
-                int tok = i / TF_FFN_TILE;
-                int d = i % TF_FFN_TILE;
-                float sum = 0.0f;
-                for (int k = 0; k < D; k++)
-                    sum += buf_out[tok * D + k] * block.ffn1_weight[k * TF_FFN_DIM + tile_start + d];
-                float val = sum + block.ffn1_bias[tile_start + d];
-                ws_tile[i] = val > 0.0f ? val : 0.0f;  // ReLU
-            }
-            __syncthreads();
+            if (half_w) {
+                // FFN1 tile: ws_tile[64,64] = buf_out[64,128] × W1_tile[64,128]^T + bias
+                tf_linear(buf_out, half_w->blocks[blk].ffn1_tile[tile], ws_tile,
+                          block.ffn1_bias + tile_start, ws_half, T, TF_FFN_TILE, D);
+                tf_relu(ws_tile, T * TF_FFN_TILE);
+                // FFN2 tile: buf_x += ws_tile[64,64] × W2_tile[128,64]^T
+                tf_linear(ws_tile, half_w->blocks[blk].ffn2_tile[tile], buf_x,
+                          nullptr, ws_half, T, D, TF_FFN_TILE, true);
+            } else {
+                for (int i = tid; i < T * TF_FFN_TILE; i += blockDim.x) {
+                    int tok = i / TF_FFN_TILE; int d = i % TF_FFN_TILE;
+                    float sum = 0.0f;
+                    for (int k = 0; k < D; k++)
+                        sum += buf_out[tok * D + k] * block.ffn1_weight[k * TF_FFN_DIM + tile_start + d];
+                    float val = sum + block.ffn1_bias[tile_start + d];
+                    ws_tile[i] = val > 0.0f ? val : 0.0f;
+                }
+                __syncthreads();
 
-            // buf_x += hidden_tile[64, 64] × W2[tile*64:(tile+1)*64, :]
-            for (int i = tid; i < T * D; i += blockDim.x) {
-                int tok = i / D;
-                int d = i % D;
-                float sum = 0.0f;
-                for (int j = 0; j < TF_FFN_TILE; j++)
-                    sum += ws_tile[tok * TF_FFN_TILE + j] * block.ffn2_weight[(tile_start + j) * D + d];
-                buf_x[i] += sum;
+                for (int i = tid; i < T * D; i += blockDim.x) {
+                    int tok = i / D; int d = i % D;
+                    float sum = 0.0f;
+                    for (int j = 0; j < TF_FFN_TILE; j++)
+                        sum += ws_tile[tok * TF_FFN_TILE + j] * block.ffn2_weight[(tile_start + j) * D + d];
+                    buf_x[i] += sum;
+                }
+                __syncthreads();
             }
-            __syncthreads();
         }
 
         // Add FFN bias

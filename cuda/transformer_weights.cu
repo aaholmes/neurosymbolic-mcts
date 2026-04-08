@@ -86,6 +86,30 @@ __global__ void kernel_extract_qkv_head(
     dst[i] = __float2half(src[k * (3 * d_model) + col_offset + d]);
 }
 
+// Extract FFN1 tile: dst[tile_size, d_model] from src[d_model, ffn_dim]
+// dst[n * d_model + k] = __float2half(src[k * ffn_dim + tile_start + n])
+__global__ void kernel_extract_ffn1_tile(
+    const float* src, half* dst, int d_model, int ffn_dim, int tile_start, int tile_size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= tile_size * d_model) return;
+    int n = i / d_model;  // [0, tile_size)
+    int k = i % d_model;  // [0, d_model)
+    dst[i] = __float2half(src[k * ffn_dim + tile_start + n]);
+}
+
+// Extract FFN2 tile: dst[d_model, tile_size] from src[ffn_dim, d_model]
+// dst[n * tile_size + k] = __float2half(src[(tile_start + k) * d_model + n])
+__global__ void kernel_extract_ffn2_tile(
+    const float* src, half* dst, int d_model, int ffn_dim, int tile_start, int tile_size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= d_model * tile_size) return;
+    int n = i / tile_size;  // [0, d_model)
+    int k = i % tile_size;  // [0, tile_size)
+    dst[i] = __float2half(src[(tile_start + k) * d_model + n]);
+}
+
 TransformerWeightsHalf* convert_transformer_to_half(const TransformerWeights* d_w) {
     TransformerWeightsHalf h_half;
 
@@ -144,6 +168,31 @@ TransformerWeightsHalf* convert_transformer_to_half(const TransformerWeights* d_
             (offsetof(TransformerWeights, blocks) + b * sizeof(TransformerBlock) +
              offsetof(TransformerBlock, ffn2_weight)) / sizeof(float),
             h_half.blocks[b].ffn2, f2_n);
+
+        // Pre-split FFN tiles
+        const float* ffn1_src = (const float*)d_w +
+            (offsetof(TransformerWeights, blocks) + b * sizeof(TransformerBlock) +
+             offsetof(TransformerBlock, ffn1_weight)) / sizeof(float);
+        const float* ffn2_src = (const float*)d_w +
+            (offsetof(TransformerWeights, blocks) + b * sizeof(TransformerBlock) +
+             offsetof(TransformerBlock, ffn2_weight)) / sizeof(float);
+
+        int num_tiles = TF_FFN_DIM / TF_FFN_TILE;
+        for (int t = 0; t < num_tiles; t++) {
+            // FFN1 tile: [TF_FFN_TILE, NN_HIDDEN_DIM] = [64, 128]
+            int tile_n1 = TF_FFN_TILE * NN_HIDDEN_DIM;
+            cudaMalloc(&h_half.blocks[b].ffn1_tile[t], tile_n1 * sizeof(half));
+            kernel_extract_ffn1_tile<<<(tile_n1 + 255) / 256, 256>>>(
+                ffn1_src, h_half.blocks[b].ffn1_tile[t],
+                NN_HIDDEN_DIM, TF_FFN_DIM, t * TF_FFN_TILE, TF_FFN_TILE);
+
+            // FFN2 tile: [NN_HIDDEN_DIM, TF_FFN_TILE] = [128, 64]
+            int tile_n2 = NN_HIDDEN_DIM * TF_FFN_TILE;
+            cudaMalloc(&h_half.blocks[b].ffn2_tile[t], tile_n2 * sizeof(half));
+            kernel_extract_ffn2_tile<<<(tile_n2 + 255) / 256, 256>>>(
+                ffn2_src, h_half.blocks[b].ffn2_tile[t],
+                NN_HIDDEN_DIM, TF_FFN_DIM, t * TF_FFN_TILE, TF_FFN_TILE);
+        }
     }
 
     // Policy head: [73, 128]
@@ -176,6 +225,10 @@ void free_transformer_half(TransformerWeightsHalf* d_half) {
         cudaFree(h.blocks[b].out_proj);
         cudaFree(h.blocks[b].ffn1);
         cudaFree(h.blocks[b].ffn2);
+        for (int t = 0; t < TF_FFN_DIM / TF_FFN_TILE; t++) {
+            cudaFree(h.blocks[b].ffn1_tile[t]);
+            cudaFree(h.blocks[b].ffn2_tile[t]);
+        }
     }
     cudaFree(d_half);
 }

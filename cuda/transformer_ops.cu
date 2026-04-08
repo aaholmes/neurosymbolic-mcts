@@ -107,6 +107,136 @@ __device__ void tf_gemm(
 }
 
 // ============================================================
+// GEMM with both operands in shared memory FP32
+// C[M,N] = A[M,K] × B[K,N]
+// ============================================================
+__device__ void tf_gemm_smem(
+    const float* __restrict__ A_smem,
+    const float* __restrict__ B_smem,
+    float* __restrict__ C_smem,
+    half* __restrict__ workspace,
+    int M, int N, int K
+) {
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+    int M_tiles = (M + 15) / 16;
+    int N_tiles = (N + 15) / 16;
+    int K_tiles = (K + 15) / 16;
+    int total_tiles = M_tiles * N_tiles;
+
+    half* a_staging = workspace + warp_id * 256;
+    half* b_staging = workspace + 8 * 256 + warp_id * 256;
+
+    for (int i = tid; i < M * N; i += blockDim.x) C_smem[i] = 0.0f;
+    __syncthreads();
+
+    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += 8) {
+        int m_tile = tile_idx / N_tiles;
+        int n_tile = tile_idx % N_tiles;
+        int M_start = m_tile * 16, N_start = n_tile * 16;
+
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+        wmma::fill_fragment(acc, 0.0f);
+
+        for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
+            int K_start = k_tile * 16;
+
+            // A staging from shared FP32
+            for (int i = lane; i < 256; i += 32) {
+                int r = i / 16, c = i % 16;
+                int m = M_start + r, k = K_start + c;
+                a_staging[i] = (m < M && k < K) ? __float2half(A_smem[m * K + k]) : __float2half(0.0f);
+            }
+            // B staging from shared FP32
+            for (int i = lane; i < 256; i += 32) {
+                int r = i / 16, c = i % 16;
+                int k = K_start + r, n = N_start + c;
+                b_staging[i] = (k < K && n < N) ? __float2half(B_smem[k * N + n]) : __float2half(0.0f);
+            }
+            __syncwarp();
+
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+            wmma::load_matrix_sync(a_frag, a_staging, 16);
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+            wmma::load_matrix_sync(b_frag, b_staging, 16);
+            wmma::mma_sync(acc, a_frag, b_frag, acc);
+        }
+
+        wmma::store_matrix_sync(C_smem + M_start * N + N_start, acc, N, wmma::mem_row_major);
+    }
+    __syncthreads();
+}
+
+// ============================================================
+// GEMM: C[M,N] = A[M,K] × B[N,K]^T with scaling
+// B is stored as [N, K] and accessed transposed
+// ============================================================
+__device__ void tf_gemm_smem_abt(
+    const float* __restrict__ A_smem,
+    const float* __restrict__ B_smem,
+    float* __restrict__ C_smem,
+    half* __restrict__ workspace,
+    int M, int N, int K,
+    float scale
+) {
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+    int M_tiles = (M + 15) / 16;
+    int N_tiles = (N + 15) / 16;
+    int K_tiles = (K + 15) / 16;
+    int total_tiles = M_tiles * N_tiles;
+
+    half* a_staging = workspace + warp_id * 256;
+    half* b_staging = workspace + 8 * 256 + warp_id * 256;
+
+    for (int i = tid; i < M * N; i += blockDim.x) C_smem[i] = 0.0f;
+    __syncthreads();
+
+    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += 8) {
+        int m_tile = tile_idx / N_tiles;
+        int n_tile = tile_idx % N_tiles;
+        int M_start = m_tile * 16, N_start = n_tile * 16;
+
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+        wmma::fill_fragment(acc, 0.0f);
+
+        for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
+            int K_start = k_tile * 16;
+
+            // A staging: A[M, K] normal
+            for (int i = lane; i < 256; i += 32) {
+                int r = i / 16, c = i % 16;
+                int m = M_start + r, k = K_start + c;
+                a_staging[i] = (m < M && k < K) ? __float2half(A_smem[m * K + k]) : __float2half(0.0f);
+            }
+            // B staging: B[N, K] transposed → B^T[K, N]
+            // staging[k_local, n_local] = B[n, k] = B_smem[n * K + k]
+            for (int i = lane; i < 256; i += 32) {
+                int r = i / 16, c = i % 16;  // r = k_local, c = n_local
+                int k = K_start + r, n = N_start + c;
+                b_staging[i] = (k < K && n < N) ? __float2half(B_smem[n * K + k]) : __float2half(0.0f);
+            }
+            __syncwarp();
+
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+            wmma::load_matrix_sync(a_frag, a_staging, 16);
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+            wmma::load_matrix_sync(b_frag, b_staging, 16);
+            wmma::mma_sync(acc, a_frag, b_frag, acc);
+        }
+
+        // Apply scale and store
+        if (scale != 1.0f) {
+            for (int i = 0; i < acc.num_elements; i++) acc.x[i] *= scale;
+        }
+        wmma::store_matrix_sync(C_smem + M_start * N + N_start, acc, N, wmma::mem_row_major);
+    }
+    __syncthreads();
+}
+
+// ============================================================
 // Linear layer: output[M,N] = input[M,K] × weight^T[K,N] + bias[N]
 //
 // Reformulated as: C_T[N,M] = W[N,K] × input_T[K,M]

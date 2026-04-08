@@ -71,6 +71,27 @@ __device__ void tf_residual_add(
 // ReLU in-place
 __device__ void tf_relu(float* data, int count);
 
+// GEMM with both operands in shared memory FP32:
+// C[M,N] = A_smem[M,K] × B_smem[K,N], convert both to FP16 on-the-fly
+__device__ void tf_gemm_smem(
+    const float* __restrict__ A_smem,
+    const float* __restrict__ B_smem,
+    float* __restrict__ C_smem,
+    half* __restrict__ workspace,
+    int M, int N, int K
+);
+
+// GEMM with A×B^T, both in shared memory FP32:
+// C[M,N] = A_smem[M,K] × B_smem[N,K]^T, with optional scaling
+__device__ void tf_gemm_smem_abt(
+    const float* __restrict__ A_smem,  // [M, K]
+    const float* __restrict__ B_smem,  // [N, K] — transposed in multiply
+    float* __restrict__ C_smem,        // [M, N]
+    half* __restrict__ workspace,
+    int M, int N, int K,
+    float scale = 1.0f
+);
+
 // Linear layer: output[M, N] = input[M, K] × weight^T[K, N] + bias[N]
 // weight_fp16: [N, K] row-major in global FP16 (PyTorch convention)
 // input_smem: [M, K] row-major in shared FP32
