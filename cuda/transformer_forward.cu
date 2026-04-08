@@ -218,7 +218,7 @@ __device__ void transformer_forward(
                     int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                     float sum = 0.0f;
                     for (int k = 0; k < D; k++)
-                        sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + qkv_offset + d];
+                        sum += buf_out[tok * D + k] * block.qkv_weight[(qkv_offset + d) * D + k];
                     ws_q[i] = sum + block.qkv_bias[qkv_offset + d];
                 }
                 __syncthreads();
@@ -228,7 +228,7 @@ __device__ void transformer_forward(
                     int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                     float sum = 0.0f;
                     for (int k = 0; k < D; k++)
-                        sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + k_offset + d];
+                        sum += buf_out[tok * D + k] * block.qkv_weight[(k_offset + d) * D + k];
                     ws_k[i] = sum + block.qkv_bias[k_offset + d];
                 }
                 __syncthreads();
@@ -250,7 +250,7 @@ __device__ void transformer_forward(
                     int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                     float sum = 0.0f;
                     for (int k = 0; k < D; k++)
-                        sum += buf_out[tok * D + k] * block.qkv_weight[k * (3 * D) + v_offset + d];
+                        sum += buf_out[tok * D + k] * block.qkv_weight[(v_offset + d) * D + k];
                     ws_v[i] = sum + block.qkv_bias[v_offset + d];
                 }
                 __syncthreads();
@@ -271,7 +271,7 @@ __device__ void transformer_forward(
                     int tok = i / D; int d = i % D;
                     float sum = 0.0f;
                     for (int j = 0; j < TF_HEAD_DIM; j++)
-                        sum += ws_head[tok * TF_HEAD_DIM + j] * block.out_proj_weight[(h * TF_HEAD_DIM + j) * D + d];
+                        sum += ws_head[tok * TF_HEAD_DIM + j] * block.out_proj_weight[d * D + h * TF_HEAD_DIM + j];
                     buf_x[i] += sum;
                 }
                 __syncthreads();
@@ -315,7 +315,7 @@ __device__ void transformer_forward(
                     int tok = i / TF_FFN_TILE; int d = i % TF_FFN_TILE;
                     float sum = 0.0f;
                     for (int k = 0; k < D; k++)
-                        sum += buf_out[tok * D + k] * block.ffn1_weight[k * TF_FFN_DIM + tile_start + d];
+                        sum += buf_out[tok * D + k] * block.ffn1_weight[(tile_start + d) * D + k];
                     float val = sum + block.ffn1_bias[tile_start + d];
                     ws_tile[i] = val > 0.0f ? val : 0.0f;
                 }
@@ -325,7 +325,7 @@ __device__ void transformer_forward(
                     int tok = i / D; int d = i % D;
                     float sum = 0.0f;
                     for (int j = 0; j < TF_FFN_TILE; j++)
-                        sum += ws_tile[tok * TF_FFN_TILE + j] * block.ffn2_weight[(tile_start + j) * D + d];
+                        sum += ws_tile[tok * TF_FFN_TILE + j] * block.ffn2_weight[d * TF_FFN_DIM + tile_start + j];
                     buf_x[i] += sum;
                 }
                 __syncthreads();

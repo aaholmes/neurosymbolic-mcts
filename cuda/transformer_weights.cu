@@ -75,39 +75,48 @@ static void convert_tf(const float* d_src, half* d_dst, int count) {
 
 // Extract per-head QKV slice: dst[head_dim, d_model] from src[d_model, 3*d_model]
 // dst[d * d_model + k] = __float2half(src[k * (3*d_model) + col_offset + d])
+// Extract per-head QKV slice: dst[head_dim, d_model] from src[3*d_model, d_model]
+// PyTorch nn.Linear(d_model, 3*d_model) stores weight as [3*d_model, d_model] (out, in)
+// For head h: Q = rows [h*head_dim : (h+1)*head_dim], K = rows [d_model + h*hd : ...], etc.
+// dst[d, k] = src[(col_offset + d) * d_model + k]
 __global__ void kernel_extract_qkv_head(
     const float* src, half* dst, int d_model, int head_dim, int col_offset
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int total = head_dim * d_model;
     if (i >= total) return;
-    int d = i / d_model;        // output row [0, head_dim)
-    int k = i % d_model;        // output col [0, d_model)
-    dst[i] = __float2half(src[k * (3 * d_model) + col_offset + d]);
+    int d = i / d_model;        // output row [0, head_dim) = which output neuron
+    int k = i % d_model;        // output col [0, d_model) = which input neuron
+    dst[i] = __float2half(src[(col_offset + d) * d_model + k]);
 }
 
-// Extract FFN1 tile: dst[tile_size, d_model] from src[d_model, ffn_dim]
-// dst[n * d_model + k] = __float2half(src[k * ffn_dim + tile_start + n])
+// Extract FFN1 tile: dst[tile_size, d_model] from src[ffn_dim, d_model]
+// PyTorch nn.Linear(d_model, ffn_dim) stores weight as [ffn_dim, d_model] (out, in)
+// Tile t = rows [tile_start : tile_start + tile_size] of the [ffn_dim, d_model] matrix
+// dst[n, k] = src[(tile_start + n) * d_model + k]
 __global__ void kernel_extract_ffn1_tile(
     const float* src, half* dst, int d_model, int ffn_dim, int tile_start, int tile_size
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= tile_size * d_model) return;
-    int n = i / d_model;  // [0, tile_size)
-    int k = i % d_model;  // [0, d_model)
-    dst[i] = __float2half(src[k * ffn_dim + tile_start + n]);
+    int n = i / d_model;  // [0, tile_size) = output neuron within tile
+    int k = i % d_model;  // [0, d_model) = input neuron
+    dst[i] = __float2half(src[(tile_start + n) * d_model + k]);
 }
 
-// Extract FFN2 tile: dst[d_model, tile_size] from src[ffn_dim, d_model]
-// dst[n * tile_size + k] = __float2half(src[(tile_start + k) * d_model + n])
+// Extract FFN2 tile: dst[d_model, tile_size] from src[d_model, ffn_dim]
+// PyTorch nn.Linear(ffn_dim, d_model) stores weight as [d_model, ffn_dim] (out, in)
+// Tile t = columns [tile_start : tile_start + tile_size] of the [d_model, ffn_dim] matrix
+// For tf_linear: dst should be [N=d_model, K=tile_size]
+// dst[n, k] = src[n * ffn_dim + tile_start + k]
 __global__ void kernel_extract_ffn2_tile(
     const float* src, half* dst, int d_model, int ffn_dim, int tile_start, int tile_size
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= d_model * tile_size) return;
-    int n = i / tile_size;  // [0, d_model)
-    int k = i % tile_size;  // [0, tile_size)
-    dst[i] = __float2half(src[(tile_start + k) * d_model + n]);
+    int n = i / tile_size;  // [0, d_model) = output neuron
+    int k = i % tile_size;  // [0, tile_size) = input neuron within tile
+    dst[i] = __float2half(src[n * ffn_dim + tile_start + k]);
 }
 
 TransformerWeightsHalf* convert_transformer_to_half(const TransformerWeights* d_w) {

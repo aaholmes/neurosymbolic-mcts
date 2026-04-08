@@ -34,18 +34,18 @@ struct TFLayerNorm {
 struct TransformerBlock {
     // Pre-attention LayerNorm
     TFLayerNorm ln1;
-    // QKV projection (fused: [d_model, 3*d_model])
-    float qkv_weight[NN_HIDDEN_DIM * 3 * NN_HIDDEN_DIM];  // [128, 384]
+    // QKV projection (fused): PyTorch [3*d_model, d_model] = [out, in]
+    float qkv_weight[NN_HIDDEN_DIM * 3 * NN_HIDDEN_DIM];  // [384, 128]
     float qkv_bias[3 * NN_HIDDEN_DIM];                      // [384]
-    // Output projection
+    // Output projection: PyTorch [d_model, d_model] = [128, 128]
     float out_proj_weight[NN_HIDDEN_DIM * NN_HIDDEN_DIM];   // [128, 128]
     float out_proj_bias[NN_HIDDEN_DIM];                      // [128]
     // Pre-FFN LayerNorm
     TFLayerNorm ln2;
-    // FFN
-    float ffn1_weight[NN_HIDDEN_DIM * TF_FFN_DIM];          // [128, 512]
+    // FFN: PyTorch convention [out, in]
+    float ffn1_weight[NN_HIDDEN_DIM * TF_FFN_DIM];          // [512, 128]
     float ffn1_bias[TF_FFN_DIM];                              // [512]
-    float ffn2_weight[TF_FFN_DIM * NN_HIDDEN_DIM];          // [512, 128]
+    float ffn2_weight[TF_FFN_DIM * NN_HIDDEN_DIM];          // [128, 512]
     float ffn2_bias[NN_HIDDEN_DIM];                           // [128]
 };
 
