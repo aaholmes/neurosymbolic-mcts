@@ -8,6 +8,7 @@
 #include "nn_ops.cuh"
 #include "block_forward.cuh"
 #include "block_ops.cuh"
+#include "transformer_forward.cuh"
 
 #include <cstdio>
 #include <cmath>
@@ -1267,6 +1268,512 @@ int gpu_mcts_eval_trees(
     }
 
     // Read back alloc counters to get nodes_allocated per tree
+    int h_alloc[64] = {0};
+    cudaMemcpyFromSymbol(h_alloc, g_eval_alloc_counters, num_trees * sizeof(int));
+    for (int i = 0; i < num_trees; i++)
+        h_results[i].nodes_allocated = h_alloc[i];
+
+    return num_trees;
+}
+
+// ============================================================
+// Transformer-mode MCTS kernels
+// ============================================================
+
+__global__ void mcts_kernel_transformer(
+    int max_simulations, bool enable_koth, float c_puct,
+    TransformerWeights* weights, TransformerWeightsHalf* half_w,
+    float* global_policy_bufs
+) {
+    extern __shared__ float smem[];
+    __shared__ float    sh_comm[8];
+    __shared__ BoardState sh_bs;
+    __shared__ int      sh_path[256];
+    __shared__ int      sh_path_len;
+
+    int bid = blockIdx.x;
+    int tid = threadIdx.x;
+    float* my_policy = global_policy_bufs + (size_t)bid * NN_POLICY_SIZE;
+
+    while (true) {
+        if (tid == 0) sh_comm[0] = (float)atomicAdd(&g_sim_counter, 1);
+        __syncthreads();
+        if ((int)sh_comm[0] >= max_simulations) break;
+
+        // === SELECT + EXPAND (thread 0 only) ===
+        if (tid == 0) {
+            int node_idx = 0;
+            int path[256];
+            int path_len = 0;
+            float value = 0.0f;
+            bool evaluated = false;
+
+            path[path_len++] = 0;
+            while (is_expanded(&g_node_pool[node_idx]) &&
+                   !g_node_pool[node_idx].is_terminal &&
+                   g_node_pool[node_idx].num_children > 0) {
+                node_idx = select_child_puct(node_idx, c_puct);
+                apply_virtual_loss(&g_node_pool[node_idx]);
+                path[path_len++] = node_idx;
+            }
+
+            MCTSNode* leaf = &g_node_pool[node_idx];
+            if (!leaf->is_terminal && try_expand(leaf)) {
+                expand_node(node_idx);
+                finish_expand(leaf);
+                if (!leaf->is_terminal && leaf->num_children > 0) {
+                    BoardState bs;
+                    node_to_board(leaf, &bs);
+                    if (check_mate_in_1(&bs)) {
+                        leaf->terminal_value = 1.0f;
+                        leaf->is_terminal = 1;
+                        value = 1.0f; evaluated = true;
+                    } else if (enable_koth && check_koth_in_1(&bs)) {
+                        leaf->terminal_value = 1.0f;
+                        leaf->is_terminal = 1;
+                        value = 1.0f; evaluated = true;
+                    }
+                }
+                if (!evaluated && leaf->num_children > 0 && !leaf->is_terminal) {
+                    node_idx = leaf->first_child_idx;
+                    path[path_len++] = node_idx;
+                }
+            }
+            if (!evaluated && g_node_pool[node_idx].is_terminal) {
+                value = g_node_pool[node_idx].terminal_value;
+                evaluated = true;
+            }
+
+            sh_comm[1] = (float)node_idx;
+            sh_comm[2] = evaluated ? 1.0f : 0.0f;
+            sh_comm[3] = value;
+            for (int i = 0; i < path_len; i++) sh_path[i] = path[i];
+            sh_path_len = path_len;
+            if (!evaluated) {
+                node_to_board(&g_node_pool[node_idx], &sh_bs);
+                sh_comm[4] = gpu_principal_exchange(&sh_bs);
+            }
+        }
+        __syncthreads();
+
+        bool evaluated = (sh_comm[2] != 0.0f);
+        float value    = sh_comm[3];
+
+        // === TRANSFORMER FORWARD PASS (all 256 threads) ===
+        if (!evaluated) {
+            float nn_value, nn_k;
+            transformer_forward(&sh_bs, sh_comm[4], weights, half_w,
+                                smem, my_policy, &nn_value, &nn_k);
+
+            if (tid == 0) {
+                int node_idx   = (int)sh_comm[1];
+                int path_len_  = sh_path_len;
+                int parent_idx = (path_len_ >= 2) ? sh_path[path_len_ - 2] : node_idx;
+                MCTSNode* parent = &g_node_pool[parent_idx];
+                if (parent->num_children > 0) {
+                    set_child_priors(parent_idx, my_policy, parent->w_to_move);
+                }
+                value = nn_value;
+                if (sh_bs.halfmove >= 100 || is_insufficient_material(&sh_bs))
+                    value = 0.0f;
+                sh_comm[3] = value;
+            }
+            __syncthreads();
+            value = sh_comm[3];
+        }
+
+        // === BACKUP (thread 0 only) ===
+        if (tid == 0) {
+            int path_len_ = sh_path_len;
+            float v = value;
+            for (int i = path_len_ - 1; i >= 0; i--) {
+                backprop_value(&g_node_pool[sh_path[i]], v);
+                v = -v;
+            }
+        }
+        __syncthreads();
+    }
+}
+
+// Host function: single-tree transformer MCTS
+GPUMctsResult gpu_mcts_search_transformer(
+    const BoardState& root_position,
+    int simulations,
+    bool enable_koth,
+    float c_puct,
+    TransformerWeights* d_weights,
+    float* d_policy_bufs,
+    int num_blocks
+) {
+    reset_tree();
+    upload_root_position(root_position);
+    reset_sim_counter();
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    TransformerWeightsHalf* d_half = nullptr;
+    if (d_weights) d_half = convert_transformer_to_half(d_weights);
+
+    size_t smem_bytes = (size_t)TF_SMEM_BYTES;
+    cudaFuncSetAttribute(mcts_kernel_transformer,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_bytes);
+
+    mcts_kernel_transformer<<<num_blocks, 256, smem_bytes>>>(
+        simulations, enable_koth, c_puct, d_weights, d_half, d_policy_bufs
+    );
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess)
+        printf("CUDA transformer kernel error: %s\n", cudaGetErrorString(err));
+
+    free_transformer_half(d_half);
+
+    MCTSNode root;
+    read_root_node(&root);
+
+    GPUMctsResult result = {};
+    result.total_simulations = root.visit_count;
+    result.nodes_allocated   = get_allocated_count();
+
+    if (root.num_children == 0 || root.is_terminal) {
+        result.root_value = root.is_terminal ? root.terminal_value : 0.0f;
+        if (root.num_children > 0) {
+            int best_visits = -1;
+            for (int i = 0; i < root.num_children; i++) {
+                MCTSNode child;
+                read_node(root.first_child_idx + i, &child);
+                if (child.visit_count > best_visits) {
+                    best_visits = child.visit_count;
+                    GPUMove mv = (GPUMove)child.move_from_parent;
+                    result.best_move_from  = GPU_MOVE_FROM(mv);
+                    result.best_move_to    = GPU_MOVE_TO(mv);
+                    result.best_move_promo = GPU_MOVE_PROMO(mv);
+                    result.root_value = (child.visit_count > 0)
+                        ? -(child.total_value / (float)child.visit_count) : 0.0f;
+                }
+            }
+        }
+        return result;
+    }
+
+    int best_visits = -1;
+    for (int i = 0; i < root.num_children; i++) {
+        MCTSNode child;
+        read_node(root.first_child_idx + i, &child);
+        if (child.visit_count > best_visits) {
+            best_visits = child.visit_count;
+            GPUMove mv = (GPUMove)child.move_from_parent;
+            result.best_move_from  = GPU_MOVE_FROM(mv);
+            result.best_move_to    = GPU_MOVE_TO(mv);
+            result.best_move_promo = GPU_MOVE_PROMO(mv);
+            result.root_value = (child.visit_count > 0)
+                ? -(child.total_value / (float)child.visit_count) : 0.0f;
+        }
+    }
+    return result;
+}
+
+// Transformer eval kernel (multi-tree)
+__global__ void mcts_kernel_eval_transformer(
+    int max_simulations, int max_nodes_per_tree,
+    bool enable_koth, float c_puct,
+    TransformerWeights* weights, TransformerWeightsHalf* half_w,
+    float* global_policy_bufs,
+    int num_trees
+) {
+    extern __shared__ float smem[];
+    __shared__ float    sh_comm[8];
+    __shared__ BoardState sh_bs;
+    __shared__ int      sh_path[256];
+    __shared__ int      sh_path_len;
+
+    int bid = blockIdx.x;
+    int tid = threadIdx.x;
+    if (bid >= num_trees) return;
+
+    int tree_offset = g_eval_tree_offsets[bid];
+    float* my_policy = (global_policy_bufs && weights)
+        ? global_policy_bufs + (size_t)bid * NN_POLICY_SIZE : nullptr;
+
+    while (true) {
+        if (tid == 0) sh_comm[0] = (float)atomicAdd(&g_eval_sim_counters[bid], 1);
+        __syncthreads();
+        if ((int)sh_comm[0] >= max_simulations) break;
+
+        if (tid == 0) {
+            int node_idx = g_eval_tree_offsets[bid];
+            int path[256];
+            int path_len = 0;
+            float value = 0.0f;
+            bool evaluated = false;
+
+            path[path_len++] = node_idx;
+
+            // SELECT
+            MCTSNode* cur = &g_node_pool[node_idx];
+            while (is_expanded(cur) && !cur->is_terminal && cur->num_children > 0) {
+                MCTSNode* parent = &g_node_pool[node_idx];
+                float sqrt_parent_N = sqrtf((float)parent->visit_count + 1.0f);
+                int best_child = parent->first_child_idx;
+                float best_ucb = -1e9f;
+                for (int i = 0; i < parent->num_children; i++) {
+                    int child_idx = parent->first_child_idx + i;
+                    MCTSNode* child = &g_node_pool[child_idx];
+                    float q;
+                    int n = child->visit_count + child->virtual_loss;
+                    if (n == 0) { q = 0.0f; }
+                    else { q = -(child->total_value / (float)n); }
+                    float u = sqrt_parent_N / (1.0f + (float)n);
+                    float ucb = q + c_puct * child->prior * u;
+                    if (ucb > best_ucb) { best_ucb = ucb; best_child = child_idx; }
+                }
+                node_idx = best_child;
+                cur = &g_node_pool[node_idx];
+                atomicAdd(&cur->virtual_loss, 1);
+                path[path_len++] = node_idx;
+            }
+
+            // EXPAND
+            MCTSNode* leaf = &g_node_pool[node_idx];
+            if (!leaf->is_terminal && try_expand(leaf)) {
+                BoardState bs;
+                node_to_board(leaf, &bs);
+                MoveList caps, quiets;
+                caps.clear(); quiets.clear();
+                gen_pseudo_legal_moves(&bs, &caps, &quiets);
+
+                GPUMove legal_moves[256];
+                int num_legal = 0;
+                for (int i = 0; i < caps.count; i++) {
+                    BoardState t = bs; apply_move(&t, caps.moves[i]);
+                    if (is_legal(&t)) legal_moves[num_legal++] = caps.moves[i];
+                }
+                for (int i = 0; i < quiets.count; i++) {
+                    BoardState t = bs; apply_move(&t, quiets.moves[i]);
+                    if (is_legal(&t)) legal_moves[num_legal++] = quiets.moves[i];
+                }
+
+                int tree_base = g_eval_tree_offsets[bid];
+                int first_child = -1;
+                if (num_legal > 0) {
+                    int alloc_pos = atomicAdd(&g_eval_alloc_counters[bid], num_legal);
+                    first_child = tree_base + alloc_pos;
+                    if (first_child + num_legal > tree_base + max_nodes_per_tree)
+                        first_child = -1;
+                }
+
+                if (first_child >= 0) {
+                    leaf->first_child_idx = first_child;
+                    leaf->num_children = (int16_t)num_legal;
+                    float uniform_prior = 1.0f / (float)num_legal;
+                    for (int i = 0; i < num_legal; i++) {
+                        MCTSNode* child = &g_node_pool[first_child + i];
+                        child->visit_count = 0; child->total_value = 0.0f;
+                        child->virtual_loss = 0; child->expand_lock = 0;
+                        child->parent_idx = node_idx;
+                        child->move_from_parent = (int16_t)legal_moves[i];
+                        child->num_children = 0; child->first_child_idx = -1;
+                        child->prior = uniform_prior;
+                        child->terminal_value = 0.0f; child->is_terminal = 0;
+                        BoardState child_bs = bs;
+                        apply_move(&child_bs, legal_moves[i]);
+                        board_to_node(&child_bs, child);
+                    }
+                    atomicExch(&leaf->expand_lock, 2u);
+                    if (!leaf->is_terminal && leaf->num_children > 0) {
+                        if (check_mate_in_1(&bs)) {
+                            leaf->terminal_value = 1.0f; leaf->is_terminal = 1;
+                            value = 1.0f; evaluated = true;
+                        } else if (enable_koth && check_koth_in_1(&bs)) {
+                            leaf->terminal_value = 1.0f; leaf->is_terminal = 1;
+                            value = 1.0f; evaluated = true;
+                        }
+                    }
+                } else {
+                    leaf->is_terminal = 1; leaf->terminal_value = 0.0f;
+                }
+                if (!evaluated && first_child >= 0 && leaf->num_children > 0 && !leaf->is_terminal) {
+                    node_idx = leaf->first_child_idx;
+                    path[path_len++] = node_idx;
+                }
+            }
+            if (!evaluated && g_node_pool[node_idx].is_terminal) {
+                value = g_node_pool[node_idx].terminal_value;
+                evaluated = true;
+            }
+
+            sh_comm[1] = (float)node_idx;
+            sh_comm[2] = evaluated ? 1.0f : 0.0f;
+            sh_comm[3] = value;
+            for (int i = 0; i < path_len; i++) sh_path[i] = path[i];
+            sh_path_len = path_len;
+            if (!evaluated) {
+                node_to_board(&g_node_pool[node_idx], &sh_bs);
+                sh_comm[4] = gpu_principal_exchange(&sh_bs);
+            }
+        }
+        __syncthreads();
+
+        bool evaluated = (sh_comm[2] != 0.0f);
+        float value = sh_comm[3];
+
+        if (!evaluated) {
+            if (weights != nullptr) {
+                float nn_value, nn_k;
+                transformer_forward(&sh_bs, sh_comm[4], weights, half_w,
+                                    smem, my_policy, &nn_value, &nn_k);
+                if (tid == 0) {
+                    int node_idx_ = (int)sh_comm[1];
+                    int path_len_ = sh_path_len;
+                    int parent_idx = (path_len_ >= 2) ? sh_path[path_len_ - 2] : node_idx_;
+                    MCTSNode* parent = &g_node_pool[parent_idx];
+                    if (parent->num_children > 0)
+                        set_child_priors(parent->first_child_idx, my_policy, sh_bs.w_to_move);
+                    value = nn_value;
+                    if (sh_bs.halfmove >= 100 || is_insufficient_material(&sh_bs))
+                        value = 0.0f;
+                    sh_comm[3] = value;
+                }
+                __syncthreads();
+                value = sh_comm[3];
+            } else {
+                // Classical mode
+                if (tid == 0) {
+                    float q = sh_comm[4];
+                    float v = tanhf(0.326f * q);
+                    if (sh_bs.halfmove >= 100 || is_insufficient_material(&sh_bs)) v = 0.0f;
+                    sh_comm[3] = v;
+                }
+                __syncthreads();
+                value = sh_comm[3];
+            }
+        }
+
+        if (tid == 0) {
+            int path_len_ = sh_path_len;
+            float v = value;
+            for (int i = path_len_ - 1; i >= 0; i--) {
+                backprop_value(&g_node_pool[sh_path[i]], v);
+                v = -v;
+            }
+        }
+        __syncthreads();
+    }
+}
+
+// Host function: multi-tree transformer eval
+int gpu_mcts_eval_trees_transformer(
+    const BoardState* root_positions,
+    int num_trees,
+    int simulations_per_tree,
+    int max_nodes_per_tree,
+    bool enable_koth,
+    float c_puct,
+    TransformerWeights* d_weights,
+    float* d_policy_bufs,
+    TreeEvalResult* h_results
+) {
+    if (num_trees <= 0 || num_trees > 64) return 0;
+    if (d_weights != nullptr && d_policy_bufs == nullptr) {
+        printf("gpu_mcts_eval_trees_transformer: d_policy_bufs required when d_weights is set\n");
+        return 0;
+    }
+
+    int total_nodes = num_trees * max_nodes_per_tree;
+    if (total_nodes > MAX_NODES) {
+        printf("Transformer multi-tree eval: need %d nodes, have %d\n", total_nodes, MAX_NODES);
+        return 0;
+    }
+
+    // Reset counters
+    int h_zero[64] = {0};
+    int h_one[64];
+    for (int i = 0; i < num_trees; i++) h_one[i] = 1;
+    cudaMemcpyToSymbol(g_eval_sim_counters, h_zero, num_trees * sizeof(int));
+    cudaMemcpyToSymbol(g_eval_alloc_counters, h_one, num_trees * sizeof(int));
+
+    int offsets[64];
+    for (int i = 0; i < num_trees; i++) offsets[i] = i * max_nodes_per_tree;
+    cudaMemcpyToSymbol(g_eval_tree_offsets, offsets, num_trees * sizeof(int));
+
+    // Zero node pool
+    {
+        void* d_ptr = nullptr;
+        cudaGetSymbolAddress(&d_ptr, g_node_pool);
+        cudaMemset(d_ptr, 0, total_nodes * sizeof(MCTSNode));
+    }
+
+    // Upload root positions
+    for (int i = 0; i < num_trees; i++) {
+        MCTSNode h_root;
+        memset(&h_root, 0, sizeof(h_root));
+        h_root.parent_idx = -1;
+        memcpy(h_root.pieces, root_positions[i].pieces, sizeof(h_root.pieces));
+        memcpy(h_root.pieces_occ, root_positions[i].pieces_occ, sizeof(h_root.pieces_occ));
+        h_root.w_to_move = root_positions[i].w_to_move;
+        h_root.en_passant = root_positions[i].en_passant;
+        h_root.castling = root_positions[i].castling;
+        h_root.halfmove = root_positions[i].halfmove;
+
+        void* d_ptr = nullptr;
+        cudaGetSymbolAddress(&d_ptr, g_node_pool);
+        cudaMemcpy((char*)d_ptr + offsets[i] * sizeof(MCTSNode), &h_root,
+                   sizeof(MCTSNode), cudaMemcpyHostToDevice);
+    }
+
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    TransformerWeightsHalf* d_half = nullptr;
+    if (d_weights) d_half = convert_transformer_to_half(d_weights);
+
+    size_t smem_bytes = TF_SMEM_BYTES;
+    cudaFuncSetAttribute(mcts_kernel_eval_transformer,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_bytes);
+
+    mcts_kernel_eval_transformer<<<num_trees, 256, smem_bytes>>>(
+        simulations_per_tree, max_nodes_per_tree, enable_koth, c_puct,
+        d_weights, d_half, d_policy_bufs, num_trees
+    );
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA transformer eval error: %s\n", cudaGetErrorString(err));
+        free_transformer_half(d_half);
+        return 0;
+    }
+    free_transformer_half(d_half);
+
+    // Read back results
+    void* d_pool = nullptr;
+    cudaGetSymbolAddress(&d_pool, g_node_pool);
+
+    for (int i = 0; i < num_trees; i++) {
+        MCTSNode h_root;
+        cudaMemcpy(&h_root, (char*)d_pool + offsets[i] * sizeof(MCTSNode),
+                   sizeof(MCTSNode), cudaMemcpyDeviceToHost);
+        h_results[i].total_simulations = h_root.visit_count;
+        h_results[i].nodes_allocated = 0;
+
+        if (h_root.num_children > 0 && h_root.first_child_idx >= 0) {
+            int best_visits = -1;
+            for (int c = 0; c < h_root.num_children; c++) {
+                MCTSNode h_child;
+                cudaMemcpy(&h_child, (char*)d_pool + (h_root.first_child_idx + c) * sizeof(MCTSNode),
+                           sizeof(MCTSNode), cudaMemcpyDeviceToHost);
+                if (h_child.visit_count > best_visits) {
+                    best_visits = h_child.visit_count;
+                    GPUMove mv = (GPUMove)h_child.move_from_parent;
+                    h_results[i].best_move_from = GPU_MOVE_FROM(mv);
+                    h_results[i].best_move_to = GPU_MOVE_TO(mv);
+                    h_results[i].best_move_promo = GPU_MOVE_PROMO(mv);
+                    h_results[i].root_value = (h_child.visit_count > 0)
+                        ? -(h_child.total_value / (float)h_child.visit_count) : 0.0f;
+                }
+            }
+        } else {
+            h_results[i].best_move_from = 0;
+            h_results[i].best_move_to = 0;
+            h_results[i].root_value = h_root.is_terminal ? h_root.terminal_value : 0.0f;
+        }
+    }
+
     int h_alloc[64] = {0};
     cudaMemcpyFromSymbol(h_alloc, g_eval_alloc_counters, num_trees * sizeof(int));
     for (int i = 0; i < num_trees; i++)

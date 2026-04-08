@@ -3,6 +3,7 @@
 #include "common.cuh"
 #include "nn_weights.cuh"
 #include "nn_forward.cuh"
+#include "transformer_weights.cuh"
 
 // ============================================================
 // GPU MCTS Kernel — Single-Explorer Classical Mode
@@ -130,6 +131,32 @@ int gpu_mcts_eval_trees(
     bool enable_koth,
     float c_puct,
     OracleNetWeights* d_weights,
+    float* d_policy_bufs,
+    TreeEvalResult* h_results
+);
+
+// ============================================================
+// Transformer-mode search
+// ============================================================
+
+GPUMctsResult gpu_mcts_search_transformer(
+    const BoardState& root_position,
+    int simulations,
+    bool enable_koth,
+    float c_puct,
+    TransformerWeights* d_weights,
+    float* d_policy_bufs,
+    int num_blocks
+);
+
+int gpu_mcts_eval_trees_transformer(
+    const BoardState* root_positions,
+    int num_trees,
+    int simulations_per_tree,
+    int max_nodes_per_tree,
+    bool enable_koth,
+    float c_puct,
+    TransformerWeights* d_weights,
     float* d_policy_bufs,
     TreeEvalResult* h_results
 );
