@@ -789,6 +789,13 @@ __global__ void kernel_debug_forward(
         for (int k = 0; k < 32; k++) buf_x[tid + k * 256] += res[k];
         __syncthreads();
 
+        // Dump after attention (before FFN) for block 0 only — use stage 9
+        if (blk == 0) {
+            for (int i = tid; i < T * D; i += blockDim.x)
+                debug_out[9 * T * D + i] = buf_x[i];
+            __syncthreads();
+        }
+
         // FFN
         for (int k = 0; k < 32; k++) res[k] = buf_x[tid + k * 256];
         tf_layer_norm(buf_x, buf_out, block.ln2.weight, block.ln2.bias, T, D, reduce);
@@ -873,7 +880,7 @@ void test_transformer_dump_policy(bool& test_failed) {
     cudaMalloc(&d_value, sizeof(float)); cudaMalloc(&d_k, sizeof(float));
 
     // Debug output: 9 stages × [64, 128] = 73728 floats + policy pre-softmax
-    int debug_size = 9 * TF_NUM_TOKENS * NN_HIDDEN_DIM;
+    int debug_size = 10 * TF_NUM_TOKENS * NN_HIDDEN_DIM;
     float* d_debug;
     cudaMalloc(&d_debug, debug_size * sizeof(float));
     cudaMemset(d_debug, 0, debug_size * sizeof(float));
@@ -930,6 +937,26 @@ void test_transformer_dump_policy(bool& test_failed) {
     for (int i = 1; i < NN_POLICY_SIZE; i++)
         if (h_policy[i] > h_policy[top_idx]) top_idx = i;
     printf("\n    policy: top=%d(%.4f) [PyTorch=494(-2.54)] ", top_idx, h_policy[top_idx]);
+
+    // Also test TC path with trained weights
+    TransformerWeightsHalf* d_half_dbg = convert_transformer_to_half(d_weights);
+    float *d_policy_tc;
+    cudaMalloc(&d_policy_tc, NN_POLICY_SIZE * sizeof(float));
+    float d_val_tc_h, d_k_tc_h;
+    cudaFuncSetAttribute(kernel_transformer_forward_tc,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, TF_SMEM_BYTES);
+    kernel_transformer_forward_tc<<<1, 256, TF_SMEM_BYTES>>>(
+        d_bs, 0.0f, d_weights, d_half_dbg, d_policy_tc, d_value, d_k);
+    cudaDeviceSynchronize();
+    float* h_pol_tc = (float*)malloc(NN_POLICY_SIZE * sizeof(float));
+    cudaMemcpy(h_pol_tc, d_policy_tc, NN_POLICY_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    int nan_tc = 0, top_tc = 0;
+    for (int i = 0; i < NN_POLICY_SIZE; i++) {
+        if (isnan(h_pol_tc[i])) nan_tc++;
+        if (!isnan(h_pol_tc[i]) && h_pol_tc[i] > h_pol_tc[top_tc]) top_tc = i;
+    }
+    printf("\n    TC path: top=%d(%.4f) nan=%d", top_tc, h_pol_tc[top_tc], nan_tc);
+    free(h_pol_tc); cudaFree(d_policy_tc); free_transformer_half(d_half_dbg);
 
     ASSERT_TRUE(true);  // informational
 
