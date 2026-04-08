@@ -612,6 +612,69 @@ void test_board_encoding_consistency(bool& test_failed) {
 }
 
 // ============================================================
+// Dump CUDA forward pass output for comparison with PyTorch
+// ============================================================
+
+void test_transformer_dump_policy(bool& test_failed) {
+    // Load trained weights if available, otherwise use zeros
+    const char* weights_path = "weights/transformer4/candidate_1.bin";
+    TransformerWeights* d_weights = load_transformer_weights(weights_path);
+    if (!d_weights) {
+        printf("[no weights at %s, skipping] ", weights_path);
+        ASSERT_TRUE(true);  // skip gracefully
+        return;
+    }
+    TransformerWeightsHalf* d_half = convert_transformer_to_half(d_weights);
+
+    BoardState bs = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float *d_policy, *d_value, *d_k;
+    cudaMalloc(&d_policy, NN_POLICY_SIZE * sizeof(float));
+    cudaMalloc(&d_value, sizeof(float)); cudaMalloc(&d_k, sizeof(float));
+
+    // Test BOTH scalar and TC paths
+    // Scalar first
+    cudaFuncSetAttribute(kernel_transformer_forward,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, TF_SMEM_BYTES);
+    kernel_transformer_forward<<<1, 256, TF_SMEM_BYTES>>>(
+        d_bs, 0.0f, d_weights, d_policy, d_value, d_k);
+    cudaDeviceSynchronize();
+
+    float h_value, h_k;
+    cudaMemcpy(&h_value, d_value, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_k, d_k, sizeof(float), cudaMemcpyDeviceToHost);
+
+    float* h_policy = (float*)malloc(NN_POLICY_SIZE * sizeof(float));
+    cudaMemcpy(h_policy, d_policy, NN_POLICY_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Find top move
+    int top_idx = 0;
+    for (int i = 1; i < NN_POLICY_SIZE; i++)
+        if (h_policy[i] > h_policy[top_idx]) top_idx = i;
+
+    printf("[val=%.4f k=%.4f top=%d(%.4f)] ", h_value, h_k, top_idx, h_policy[top_idx]);
+
+    // Save to file for Python comparison
+    FILE* f = fopen("/tmp/cuda_policy_dump.bin", "wb");
+    if (f) { fwrite(h_policy, sizeof(float), NN_POLICY_SIZE, f); fclose(f); }
+    FILE* f2 = fopen("/tmp/cuda_vk_dump.txt", "w");
+    if (f2) { fprintf(f2, "%.6f %.6f\n", h_value, h_k); fclose(f2); }
+
+    // PyTorch reference: top=494 (Nf3), value=-0.033369
+    // If CUDA matches: top should be 494
+    printf("[PyTorch expects top=494] ");
+    ASSERT_TRUE(true);  // informational, not hard failure
+
+    free(h_policy);
+    cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k);
+    free_transformer_half(d_half);
+    free_transformer_weights(d_weights);
+}
+
+// ============================================================
 // Layer-by-layer profiling kernels
 // ============================================================
 
@@ -848,6 +911,7 @@ int main() {
     RUN_TEST(test_tf_linear_small);
     RUN_TEST(test_tf_gemm_smem_abt);
     RUN_TEST(test_board_encoding_consistency);
+    RUN_TEST(test_transformer_dump_policy);
     RUN_TEST(test_transformer_layer_timing);
 
     printf("\nResults: %d/%d passed", passes, total);

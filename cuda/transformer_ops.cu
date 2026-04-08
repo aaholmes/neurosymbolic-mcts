@@ -321,16 +321,125 @@ __device__ void tf_linear(
 
         // acc holds C_T[N_start:N_start+16, M_start:M_start+16]
         // We need output[M_start:M_start+16, N_start:N_start+16] = C_T^T
-        // Store to temp, then transpose into output
-        // Use b_staging (256 floats reinterpreted) as temp for the 16×16 tile
-        float* temp = (float*)b_staging;  // 256 halves = 128 floats... not enough for 256 floats
+        // Store to output_smem directly with transposed indexing.
+        // Use shared memory as temp: store row-major [16,16], then scatter-transpose.
+        // Reuse b_staging region as temp (512 halves = 256 floats, just barely fits 16×16)
+        // Actually: need contiguous 256 floats. Use output_smem itself as temp
+        // by storing to a region we'll overwrite anyway.
+        //
+        // Simplest correct approach: store to output directly using row-major layout,
+        // but with transposed coordinates. wmma::store_matrix_sync writes [16,16] to
+        // memory with given leading dimension. If we store to output[N_start, M_start]
+        // with ld=M, we get C_T stored in the output's row-major layout at the
+        // wrong position. Instead, just store to shared temp and transpose.
+        //
+        // Use the first 256 floats of the shared workspace (safe because all warps
+        // are processing different tiles and we sync after the full loop).
+        // Each warp needs its own temp. Use b_staging reinterpreted:
+        // b_staging has 256 halves = 512 bytes = 128 floats. NOT enough.
+        //
+        // Real fix: store row-major to output at transposed position.
+        // C_T[n, m] = acc[n_local, m_local] at output[m, n].
+        // wmma::store_matrix_sync stores acc[r][c] to addr[r * ld + c].
+        // If we store to output + N_start * M + M_start with ld = M, we get:
+        //   output[N_start + r, M_start + c] (if output were [N, M])
+        // But output is [M, N], so this writes to the wrong place.
+        //
+        // Must use element-by-element extraction. wmma fragments expose .x[] array.
+        // acc.num_elements = 8 per thread. The mapping from acc.x[i] to (row, col)
+        // is architecture-dependent but we can store to temp and read back.
+        //
+        // Allocate temp in output_smem itself at a safe location:
+        // output_smem[M_start * N + N_start] is where this tile's output goes.
+        // Store C_T there temporarily, then transpose in-place.
+        float* tile_out = output_smem + M_start * N + N_start;
 
-        // Actually: store to a_staging + b_staging = 512 halves = 256 floats = 1 tile
-        float* tile_temp = (float*)a_staging;  // 512 halves = 256 floats across a+b staging
+        // Store C_T row-major into tile_out with ld=N (the output's full width)
+        // This puts C_T[r,c] at tile_out[r * N + c] = output[(M_start) * N + N_start + r * N + c]
+        //                                            = output[M_start + r, N_start + c] if we read as [rows, cols]
+        // But we want output[m, n] = C_T[n, m]. With M_start as token offset and N_start as feature offset:
+        // We're computing C_T[N, M] = W[N, K] × input^T[K, M]
+        // C_T[n_local, m_local] should go to output[(M_start + m_local) * N + (N_start + n_local)]
+        // wmma::store with base = output + M_start * N + N_start, ld = N stores:
+        //   acc[r, c] → base[r * N + c] = output[M_start * N + N_start + r * N + c]
+        //                                = output[(M_start + r) * N + (N_start + c)]
+        // This puts r in the M dimension and c in the N dimension.
+        // acc[r, c] = C_T[N_start + r, M_start + c]
+        // So output[(M_start + r), (N_start + c)] = C_T[N_start + r, M_start + c]
+        // We want output[m, n] = C_T[n, m], i.e., output[M_start + c, N_start + r] = C_T[N_start + r, M_start + c]
+        // But we're getting output[M_start + r, N_start + c] = C_T[N_start + r, M_start + c]
+        // This is output[M_start + r, N_start + c] = C_T[N_start + r, M_start + c]
+        // i.e., m = M_start + r, n = N_start + c, and the stored value is C_T[n, m] — wait, no:
+        //   C_T[N_start + r, M_start + c] — n_idx = N_start + r, m_idx = M_start + c
+        //   Stored at output[M_start + r, N_start + c] — m = M_start + r, n = N_start + c
+        //   So output[m, n] gets C_T[N_start + r, M_start + c] where m = M_start + r, n = N_start + c
+        //   = C_T[n - N_start + N_start + (m - M_start - r + r)...
+        // This is confusing. Let me just check: does r map to the m dimension or n dimension?
+        //
+        // The GEMM is C_T[N, M] = A[N, K] × B[K, M]. A is weight [N, K], B is input^T [K, M].
+        // wmma computes C_T with M-tiles mapping to the "M" dimension of the GEMM (= N of weight)
+        // and N-tiles mapping to the "N" dimension (= M of input).
+        //
+        // Wait — I got the tile mapping confused. Let me re-read the tile assignment:
+        //   n_tile = tile_idx / N_tiles (maps to GEMM's M dimension = weight's N)
+        //   m_tile = tile_idx % N_tiles (maps to GEMM's N dimension = input's M)
+        // So N_start is the start in the weight/output-feature dimension
+        // And M_start is the start in the token dimension
+        //
+        // The accumulator acc[r, c] contains C_T[N_start + r, M_start + c]
+        // We want output[M_start + c, N_start + r] (transpose of C_T)
+        //
+        // If we store with ld=N at output + M_start * N + N_start:
+        //   output[(M_start)*N + N_start + r*N + c] = acc[r,c]
+        //   = output[M_start + r][N_start + c]   (interpreting as [M, N] matrix)
+        //   = C_T[N_start + r, M_start + c]
+        //
+        // But we want output[m][n] = C_T[n, m], so:
+        //   output[M_start + c][N_start + r] = C_T[N_start + r, M_start + c]
+        //
+        // The store puts it at [M_start + r][N_start + c] but we need [M_start + c][N_start + r].
+        // r and c are swapped. The store is WRONG for transposition.
+        //
+        // For correct transposition, store at output + N_start * M + M_start with ld=M:
+        // But wait, output is [M, N], ld should be N. We can't change ld per tile.
+        //
+        // The only correct approach without a temp buffer:
+        // Store row-major with ld=16 to a per-warp temp, then scatter-transpose.
+        // We need 256 floats of temp per warp.
+        // Solution: increase workspace to have 256 floats per warp for tile_temp.
+        // For now, just use shared memory outside the workspace:
+        // The reduce buffer at TF_REDUCE_OFFSET has 256 floats, not used during GEMMs.
+        // But that's shared across all warps. Not safe.
+        //
+        // Practical fix: use the output buffer itself. Store the raw 16×16 tile
+        // at the output location (wrong order), then do an in-place transpose.
+        // But 16×16 in-place transpose within shared memory is non-trivial.
+        //
+        // SIMPLEST FIX: just do element-by-element accumulation via scalar loop.
+        // 256 elements / 32 lanes = 8 per thread. Very fast.
+
+        // Store acc to per-warp temp using b_staging as half-precision temp
+        // (we only need the values, precision loss is acceptable for store/reload)
+        // Actually NO — we need FP32 precision for the output.
+        //
+        // Just compute the output elements directly from the accumulator.
+        // wmma fragment .x[] elements have architecture-dependent mapping,
+        // so we must store to temp memory first.
+        //
+        // Use output_smem as temp: store at the CORRECT transposed position row by row.
+        // wmma doesn't support this directly. Use cooperative store:
+
+        // FINAL APPROACH: store to a temporary 16x16 tile in shared memory,
+        // then transpose-scatter into output. Allocate 256 floats per warp
+        // in the workspace area beyond the staging regions.
+        // Current workspace: 8*256 (a_staging) + 8*256 (b_staging) = 4096 halves = 2048 floats
+        // Add 8*256 = 2048 more floats for tile_temp. Total workspace: 4096 floats = 16 KB.
+        // This fits in TF_WORKSPACE_SIZE (6144 floats = 24 KB).
+        float* tile_temp = (float*)(workspace + 2 * 8 * 256) + warp_id * 256;
         wmma::store_matrix_sync(tile_temp, acc, 16, wmma::mem_row_major);
 
-        // Transpose tile_temp[16, 16] → output[M_start+c, N_start+r]
-        // tile_temp[r * 16 + c] = C_T[N_start+r, M_start+c] → output[(M_start+c) * N + (N_start+r)]
+        // Transpose: tile_temp[r * 16 + c] = C_T[N_start+r, M_start+c]
+        //          → output[(M_start+c) * N + (N_start+r)]
         for (int i = lane; i < 256; i += 32) {
             int r = i / 16, c = i % 16;
             int out_m = M_start + c, out_n = N_start + r;
