@@ -635,9 +635,9 @@ class Orchestrator:
             else:
                 return -100.0, "H0"
 
-        llr0 = total * (score * math.log(score / p0) + (1 - score) * math.log((1 - score) / (1 - p0)))
-        llr1 = total * (score * math.log(score / p1) + (1 - score) * math.log((1 - score) / (1 - p1)))
-        llr = llr1 - llr0
+        # LLR = log(P(data|H1) / P(data|H0))
+        # = N * [score * log(p1/p0) + (1-score) * log((1-p1)/(1-p0))]
+        llr = total * (score * math.log(p1 / p0) + (1 - score) * math.log((1 - p1) / (1 - p0)))
 
         # SPRT bounds
         lower = math.log(self.config.sprt_beta / (1 - self.config.sprt_alpha))

@@ -12,6 +12,11 @@
 #include <cstring>
 #include <cmath>
 
+// GPU_MAKE_MOVE helper (matches common.cuh encoding)
+#ifndef GPU_MAKE_MOVE
+#define GPU_MAKE_MOVE(from, to, promo) ((GPUMove)((from) | ((to) << 6) | ((promo) << 12)))
+#endif
+
 // ============================================================
 // Tests
 // ============================================================
@@ -103,6 +108,133 @@ void test_selfplay_batch(bool& test_failed) {
 }
 
 // ============================================================
+// Unit tests for selfplay internals
+// ============================================================
+
+void test_board_to_planes_starting_pos(bool& test_failed) {
+    BoardState bs = make_starting_position();
+    float planes[17 * 64];
+    board_to_planes_host(bs, planes);
+
+    // White pawns (STM=white, plane 0) should be on rank 2 (squares 8-15)
+    int pawn_count = 0;
+    for (int i = 0; i < 64; i++) if (planes[0 * 64 + i] != 0.0f) pawn_count++;
+    printf("[stm_pawns=%d] ", pawn_count);
+    ASSERT_EQ(pawn_count, 8);
+
+    // Total pieces: 16 white + 16 black = 32 on piece planes (0-11)
+    int total_pieces = 0;
+    for (int i = 0; i < 12 * 64; i++) if (planes[i] != 0.0f) total_pieces++;
+    printf("[total=%d] ", total_pieces);
+    ASSERT_EQ(total_pieces, 32);
+
+    // Castling planes (13-16) should all be set (all 64 squares = 1.0)
+    int castling_ones = 0;
+    for (int p = 13; p <= 16; p++)
+        for (int i = 0; i < 64; i++) if (planes[p * 64 + i] == 1.0f) castling_ones++;
+    printf("[castling=%d] ", castling_ones);
+    ASSERT_EQ(castling_ones, 4 * 64);
+}
+
+void test_board_to_planes_black_to_move(bool& test_failed) {
+    // After 1.e4, black to move — planes should be flipped
+    BoardState bs = make_starting_position();
+    // Manually set black to move (crude but sufficient for encoding test)
+    bs.w_to_move = 0;
+    float planes[17 * 64];
+    board_to_planes_host(bs, planes);
+
+    // STM is black, so plane 0 = black pawns (flipped: rank 7 → rank 2 in STM view)
+    // Black pawns are on rank 7 (squares 48-55), flipped by ^56 → rank 2 (squares 8-15)
+    int stm_pawns = 0;
+    for (int i = 0; i < 64; i++) if (planes[0 * 64 + i] != 0.0f) stm_pawns++;
+    printf("[stm_pawns=%d] ", stm_pawns);
+    ASSERT_EQ(stm_pawns, 8);
+}
+
+void test_move_to_policy_index(bool& test_failed) {
+    // e2e4 = from=12, to=28 (pawn push 2 squares forward)
+    // As white: dr=2, dc=0 → direction 0 (N), distance 2 → plane = 0*7 + 1 = 1
+    // Index = from_sq * 73 + plane = 12 * 73 + 1 = 877
+    GPUMove e2e4 = GPU_MAKE_MOVE(12, 28, 0);
+    int idx = move_to_policy_index_host(e2e4, 1);
+    printf("[e2e4=%d] ", idx);
+    ASSERT_EQ(idx, 12 * 73 + 1);
+
+    // Knight b1c3 = from=1, to=18, dr=2, dc=1 → knight move index 1 → plane 57
+    GPUMove nb1c3 = GPU_MAKE_MOVE(1, 18, 0);
+    int idx2 = move_to_policy_index_host(nb1c3, 1);
+    printf("[Nb1c3=%d] ", idx2);
+    ASSERT_EQ(idx2, 1 * 73 + 57);  // plane 56+1=57
+
+    // Same move as black should flip squares
+    int idx3 = move_to_policy_index_host(nb1c3, 0);
+    printf("[Nb1c3_black=%d] ", idx3);
+    // Flipped: from=1^56=57, to=18^56=42, dr=-2, dc=1 → knight index 7 → plane 63
+    ASSERT_EQ(idx3, 57 * 73 + 63);
+}
+
+void test_sprt_computation(bool& test_failed) {
+    // All draws: LLR should be near 0, inconclusive
+    float llr = compute_llr(0, 0, 100, 0.0f, 10.0f);
+    const char* decision = check_sprt(llr, 0.05f, 0.05f);
+    printf("[all_draws: llr=%.3f %s] ", llr, decision ? decision : "inconclusive");
+    ASSERT_TRUE(decision == nullptr);  // inconclusive
+
+    // Slightly better: 55% win rate with 800 games → should favor H1
+    // score=0.55, p0=0.5, p1=0.514 — close to H1's expected score
+    float llr2 = compute_llr(440, 360, 0, 0.0f, 10.0f);
+    const char* d2 = check_sprt(llr2, 0.05f, 0.05f);
+    printf("[440w360l: llr=%.3f %s] ", llr2, d2 ? d2 : "inconclusive");
+    ASSERT_TRUE(llr2 > 0.0f);  // positive LLR = favors H1
+
+    // Slightly worse: 45% win rate → should favor H0
+    float llr3 = compute_llr(360, 440, 0, 0.0f, 10.0f);
+    const char* d3 = check_sprt(llr3, 0.05f, 0.05f);
+    printf("[360w440l: llr=%.3f %s] ", llr3, d3 ? d3 : "inconclusive");
+    ASSERT_TRUE(llr3 < 0.0f);  // negative LLR = favors H0
+}
+
+void test_selfplay_determinism(bool& test_failed) {
+    // Run the same config twice — should produce identical results
+    TransformerWeights* d_weights = init_transformer_weights_zeros();
+
+    SelfPlayConfig config = {};
+    config.num_games = 2;
+    config.sims_per_move = 30;
+    config.max_nodes_per_tree = config.sims_per_move + 100;
+    config.explore_base = 0.80f;
+    config.enable_koth = false;
+    config.c_puct = 1.414f;
+    config.max_concurrent = 2;
+    config.seed = 12345;
+
+    GameRecord* r1 = new GameRecord[2];
+    GameRecord* r2 = new GameRecord[2];
+    for (int i = 0; i < 2; i++) {
+        r1[i].samples = nullptr; r1[i].num_samples = 0; r1[i].result = 0;
+        r2[i].samples = nullptr; r2[i].num_samples = 0; r2[i].result = 0;
+    }
+
+    run_selfplay_games(d_weights, config, r1, 2);
+    run_selfplay_games(d_weights, config, r2, 2);
+
+    bool match = true;
+    for (int g = 0; g < 2; g++) {
+        if (r1[g].num_samples != r2[g].num_samples || r1[g].result != r2[g].result) match = false;
+    }
+    printf("[r1: %d/%d, r2: %d/%d, match=%s] ",
+           r1[0].num_samples, r1[1].num_samples,
+           r2[0].num_samples, r2[1].num_samples,
+           match ? "yes" : "no");
+    ASSERT_TRUE(match);
+
+    for (int i = 0; i < 2; i++) { r1[i].free_buf(); r2[i].free_buf(); }
+    delete[] r1; delete[] r2;
+    free_transformer_weights(d_weights);
+}
+
+// ============================================================
 // Eval mode tests
 // ============================================================
 
@@ -170,6 +302,11 @@ int main(int argc, char** argv) {
 
     RUN_TEST(test_selfplay_single_game);
     RUN_TEST(test_selfplay_batch);
+    RUN_TEST(test_board_to_planes_starting_pos);
+    RUN_TEST(test_board_to_planes_black_to_move);
+    RUN_TEST(test_move_to_policy_index);
+    RUN_TEST(test_sprt_computation);
+    RUN_TEST(test_selfplay_determinism);
     RUN_TEST(test_eval_single_game);
     RUN_TEST(test_eval_batch);
 

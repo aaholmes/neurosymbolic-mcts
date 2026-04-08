@@ -16,7 +16,7 @@
 // Mirrors block_board_to_planes / tf_board_to_tokens logic
 // ============================================================
 
-static void board_to_planes_host(const BoardState& bs, float* planes) {
+void board_to_planes_host(const BoardState& bs, float* planes) {
     memset(planes, 0, 17 * 64 * sizeof(float));
     int stm = bs.w_to_move ? 0 : 1;
     int opp = 1 - stm;
@@ -249,7 +249,7 @@ static GPUMove sample_move(
 // ============================================================
 
 // Host-side move_to_policy_index (mirrors nn_ops.cu)
-static int move_to_policy_index_host(GPUMove move, int w_to_move) {
+int move_to_policy_index_host(GPUMove move, int w_to_move) {
     int from_sq = GPU_MOVE_FROM(move);
     int to_sq = GPU_MOVE_TO(move);
     int promo = GPU_MOVE_PROMO(move);
@@ -626,19 +626,20 @@ int run_selfplay(
 // ============================================================
 
 // SPRT log-likelihood ratio computation
-static float compute_llr(int wins, int losses, int draws, float elo0, float elo1) {
+float compute_llr(int wins, int losses, int draws, float elo0, float elo1) {
     int total = wins + losses + draws;
     if (total == 0) return 0.0f;
     float score = ((float)wins + 0.5f * (float)draws) / (float)total;
     if (score <= 0.0f || score >= 1.0f) return score >= 1.0f ? 100.0f : -100.0f;
     float p0 = 1.0f / (1.0f + powf(10.0f, -elo0 / 400.0f));
     float p1 = 1.0f / (1.0f + powf(10.0f, -elo1 / 400.0f));
-    float l0 = (float)total * (score * logf(score / p0) + (1.0f - score) * logf((1.0f - score) / (1.0f - p0)));
-    float l1 = (float)total * (score * logf(score / p1) + (1.0f - score) * logf((1.0f - score) / (1.0f - p1)));
-    return l1 - l0;
+    // Log-likelihood ratio: log(P(data|H1) / P(data|H0))
+    // = N * [score * log(p1/p0) + (1-score) * log((1-p1)/(1-p0))]
+    float llr = (float)total * (score * logf(p1 / p0) + (1.0f - score) * logf((1.0f - p1) / (1.0f - p0)));
+    return llr;
 }
 
-static const char* check_sprt(float llr, float alpha, float beta) {
+const char* check_sprt(float llr, float alpha, float beta) {
     float lower = logf(beta / (1.0f - alpha));
     float upper = logf((1.0f - beta) / alpha);
     if (llr >= upper) return "H1";

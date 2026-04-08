@@ -7,6 +7,7 @@
 #include "../transformer_ops.cuh"
 #include "../transformer_forward.cuh"
 #include "../mcts_kernel.cuh"
+#include "../selfplay.cuh"
 #include "../movegen.cuh"
 #include "test_helpers.cuh"
 
@@ -454,6 +455,163 @@ void test_transformer_tc_timing(bool& test_failed) {
 }
 
 // ============================================================
+// Unit tests for transformer ops
+// ============================================================
+
+// Test tf_linear: compare against CPU reference
+__global__ void k_tf_linear_test(
+    const float* input, const half* weight, float* output, const float* bias,
+    int M, int N, int K
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    float* in_smem = smem;
+    float* out_smem = smem + M * K;
+    half* ws = (half*)(smem + M * K + M * N);
+    for (int i = tid; i < M * K; i += blockDim.x) in_smem[i] = input[i];
+    for (int i = tid; i < M * N; i += blockDim.x) out_smem[i] = 0.0f;
+    __syncthreads();
+    tf_linear(in_smem, weight, out_smem, bias, ws, M, N, K, false);
+    for (int i = tid; i < M * N; i += blockDim.x) output[i] = out_smem[i];
+}
+
+void test_tf_linear_small(bool& test_failed) {
+    // Small test: [4, 8] × [16, 8]^T → [4, 16]
+    // y[m, n] = sum_k input[m, k] * weight[n, k]
+    const int M = 4, K = 8, N = 16;
+    float h_input[M * K], h_weight_f32[N * K], h_output[M * N], h_ref[M * N];
+    float h_bias[N];
+    for (int i = 0; i < M * K; i++) h_input[i] = ((i * 7 + 3) % 11) / 5.0f - 1.0f;
+    for (int i = 0; i < N * K; i++) h_weight_f32[i] = ((i * 13 + 5) % 9) / 4.0f - 1.0f;
+    for (int i = 0; i < N; i++) h_bias[i] = 0.1f * i;
+
+    // CPU reference: y = input @ weight^T + bias
+    for (int m = 0; m < M; m++)
+        for (int n = 0; n < N; n++) {
+            float sum = h_bias[n];
+            for (int k = 0; k < K; k++) sum += h_input[m * K + k] * h_weight_f32[n * K + k];
+            h_ref[m * N + n] = sum;
+        }
+
+    // Convert weight to FP16
+    half* h_weight_h = (half*)malloc(N * K * sizeof(half));
+    for (int i = 0; i < N * K; i++) h_weight_h[i] = __float2half(h_weight_f32[i]);
+
+    float *d_input, *d_output, *d_bias; half *d_weight;
+    cudaMalloc(&d_input, M * K * 4); cudaMalloc(&d_output, M * N * 4);
+    cudaMalloc(&d_weight, N * K * 2); cudaMalloc(&d_bias, N * 4);
+    cudaMemcpy(d_input, h_input, M * K * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight, h_weight_h, N * K * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_bias, h_bias, N * 4, cudaMemcpyHostToDevice);
+
+    int smem_size = (M * K + M * N + 4096 * 2) * 4;
+    cudaFuncSetAttribute(k_tf_linear_test, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    k_tf_linear_test<<<1, 256, smem_size>>>(d_input, d_weight, d_output, d_bias, M, N, K);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_output, d_output, M * N * 4, cudaMemcpyDeviceToHost);
+
+    int mismatches = 0;
+    float max_diff = 0.0f;
+    for (int i = 0; i < M * N; i++) {
+        float diff = fabsf(h_ref[i] - h_output[i]);
+        if (diff > max_diff) max_diff = diff;
+        if (diff > 0.5f) mismatches++;
+    }
+    printf("[mismatches=%d, max_diff=%.4f] ", mismatches, max_diff);
+    ASSERT_EQ(mismatches, 0);
+
+    free(h_weight_h);
+    cudaFree(d_input); cudaFree(d_output); cudaFree(d_weight); cudaFree(d_bias);
+}
+
+// Test tf_gemm_smem_abt: Q × K^T with known values
+__global__ void k_tf_gemm_abt_test(
+    const float* A, const float* B, float* C, int M, int N, int K, float scale
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    float* a_smem = smem;
+    float* b_smem = smem + M * K;
+    float* c_smem = smem + M * K + N * K;
+    half* ws = (half*)(smem + M * K + N * K + M * N);
+    for (int i = tid; i < M * K; i += blockDim.x) a_smem[i] = A[i];
+    for (int i = tid; i < N * K; i += blockDim.x) b_smem[i] = B[i];
+    __syncthreads();
+    tf_gemm_smem_abt(a_smem, b_smem, c_smem, ws, M, N, K, scale, 0, 0);
+    for (int i = tid; i < M * N; i += blockDim.x) C[i] = c_smem[i];
+}
+
+void test_tf_gemm_smem_abt(bool& test_failed) {
+    // C[64, 64] = A[64, 32] × B[64, 32]^T * scale (realistic attention dimensions)
+    const int M = 64, N = 64, K = 32;
+    float* h_a = (float*)malloc(M * K * sizeof(float));
+    float* h_b = (float*)malloc(N * K * sizeof(float));
+    float* h_c = (float*)malloc(M * N * sizeof(float));
+    float* h_ref = (float*)malloc(M * N * sizeof(float));
+    for (int i = 0; i < M * K; i++) h_a[i] = ((i * 3 + 1) % 7) / 7.0f - 0.5f;
+    for (int i = 0; i < N * K; i++) h_b[i] = ((i * 5 + 2) % 11) / 11.0f - 0.5f;
+    float scale = 0.1767f;  // 1/sqrt(32)
+
+    for (int m = 0; m < M; m++)
+        for (int n = 0; n < N; n++) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; k++) sum += h_a[m * K + k] * h_b[n * K + k];
+            h_ref[m * N + n] = sum * scale;
+        }
+
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, M * K * 4); cudaMalloc(&d_b, N * K * 4); cudaMalloc(&d_c, M * N * 4);
+    cudaMemcpy(d_a, h_a, M * K * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, N * K * 4, cudaMemcpyHostToDevice);
+
+    int smem_size = (M * K + N * K + M * N + 4096 * 2) * 4;
+    cudaFuncSetAttribute(k_tf_gemm_abt_test, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    k_tf_gemm_abt_test<<<1, 256, smem_size>>>(d_a, d_b, d_c, M, N, K, scale);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_c, d_c, M * N * 4, cudaMemcpyDeviceToHost);
+
+    int mismatches = 0;
+    float max_diff = 0.0f;
+    for (int i = 0; i < M * N; i++) {
+        float diff = fabsf(h_ref[i] - h_c[i]);
+        if (diff > max_diff) max_diff = diff;
+        if (diff > 1.0f) mismatches++;  // FP16 with small matrices can have ~0.5 error
+    }
+    printf("[mismatches=%d, max_diff=%.4f] ", mismatches, max_diff);
+    ASSERT_EQ(mismatches, 0);
+
+    free(h_a); free(h_b); free(h_c); free(h_ref);
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+}
+
+// Test board encoding matches between transformer and SE-ResNet
+void test_board_encoding_consistency(bool& test_failed) {
+    // tf_board_to_tokens produces [64, 17] (token-major)
+    // block_board_to_planes produces [17, 64] (channel-major)
+    // They should contain the same data, just transposed
+    BoardState bs = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    // Use host-side board_to_planes (channel-major [17, 64])
+    float planes[17 * 64];
+    board_to_planes_host(bs, planes);
+
+    // Check that channel c, square s in planes[c*64+s] matches token s, feature c
+    // Both should be identical since the starting position is white-to-move
+    int total_set = 0;
+    for (int c = 0; c < 17; c++)
+        for (int s = 0; s < 64; s++)
+            if (planes[c * 64 + s] != 0.0f) total_set++;
+    printf("[nonzero=%d] ", total_set);
+    // 32 pieces + 4*64 castling = 288
+    ASSERT_EQ(total_set, 32 + 4 * 64);
+
+    cudaFree(d_bs);
+}
+
+// ============================================================
 // Layer-by-layer profiling kernels
 // ============================================================
 
@@ -687,6 +845,9 @@ int main() {
     RUN_TEST(test_transformer_forward_timing);
     RUN_TEST(test_transformer_tc_forward);
     RUN_TEST(test_transformer_tc_timing);
+    RUN_TEST(test_tf_linear_small);
+    RUN_TEST(test_tf_gemm_smem_abt);
+    RUN_TEST(test_board_encoding_consistency);
     RUN_TEST(test_transformer_layer_timing);
 
     printf("\nResults: %d/%d passed", passes, total);

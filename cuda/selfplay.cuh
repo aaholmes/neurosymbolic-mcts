@@ -85,6 +85,15 @@ struct EvalResult {
     const char* sprt_result;  // "H1", "H0", or "inconclusive"
 };
 
+// ============================================================
+// Exposed for testing
+// ============================================================
+
+void board_to_planes_host(const BoardState& bs, float* planes);
+int move_to_policy_index_host(GPUMove move, int w_to_move);
+float compute_llr(int wins, int losses, int draws, float elo0, float elo1);
+const char* check_sprt(float llr, float alpha, float beta);
+
 // Play evaluation games between two networks with SPRT early stopping.
 // Half the games have A=white, half have A=black.
 // Optionally saves training data from both players.
