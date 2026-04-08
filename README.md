@@ -64,7 +64,7 @@ Profiled over 10 self-play games (400 simulations/move, KOTH enabled, gen_18 2M-
 | KOTH-in-3 | CPU | 206,362 | 149 us | 361 us | 780 | 0.19 | 8% |
 | Q-search | CPU | 180,326 | 8 us | 15 us | 15 | 0.53 | <1% |
 
-The GPU-resident MCTS kernel eliminates the CPU/GPU split entirely: 400 simulations in **19 ms** (36 blocks with shifted-copy Tensor Core conv, 44× faster) vs 840 ms above. See [GPU MCTS](#gpu-mcts-cuda) for details.
+The GPU-resident MCTS kernel eliminates the CPU/GPU split entirely — each block runs the full MCTS loop (select→expand→evaluate→backup) with NN inference inline, no per-simulation CPU↔GPU transfer. With 36 concurrent games on 36 SMs: 200 sims/move completes 36 games in ~7 seconds (transformer) or ~19 ms per move for 400 sims (SE-ResNet). See [GPU MCTS](#gpu-mcts-cuda) for details.
 
 NN inference breaks down into three phases: CPU-to-GPU tensor transfer (49 us), GPU forward pass (1,122 us), and GPU-to-CPU result transfer (41 us). The GPU forward pass dominates at 92% of NN time — transfer overhead is negligible. Mate search uses pure minimax (not alpha-beta) since iterative deepening already finds the shortest mate and within each depth the question is binary: "is there a forced mate?" The solver short-circuits immediately — attacker on first success, defender on first refutation — matching KOTH's `solve_koth` pattern. Five optimizations reduced cost from 1.08 us/node to 0.37 us/node (cumulative 66%): (1) a `gives_check()` pre-filter that skips `make_move` entirely for non-checking moves on attacker plies, (2) converting from stateful `BoardStack` to stateless `&Board` with `apply_move_to_board`, (3) `is_legal_after_move()` before `apply_move_to_board` to avoid cloning the board for illegal pseudo-legal moves, (4) removing atomic node budgets and alpha-beta bookkeeping in favor of a plain counter, and (5) batched per-piece checkmate detection at depth-0 leaves — generating moves by piece type in priority order (king first via direct bitboard, then double-check detection, then knight/bishop/rook/queen/pawn) and aborting as soon as any legal evasion is found, avoiding full movegen in the ~70-80% of leaves where a king move suffices. KOTH-in-3 at 0.19 us/node benefits from direct king-move generation on root-side advancing turns: `k_move_bitboard[king_sq] & target_mask & !friendly_occ` yields exactly the 1-3 valid king destinations without calling `gen_pseudo_legal_moves` at all, skipping the full movegen that would produce ~35 moves only to discard ~30 non-king moves. When the king is already in the target ring, full movegen is used with a post-apply ring check. Q-search is effectively free relative to the other operations, running 220x faster than a single NN call while providing the PeSTO evaluation that grounds every leaf evaluation. Q-search completes naturally 100% of the time with a mean depth of 3.3 (max 20), confirming the depth limit is sufficient.
 
@@ -237,31 +237,35 @@ The `--qsearch` flag selects the quiescence search variant: `pe` (principal exch
 
 A fully GPU-resident MCTS implementation in `cuda/`. The entire search loop — tree traversal, node expansion, quick checks, quiescence search, and neural network inference — runs inside a persistent CUDA kernel with no CPU interaction during search. No cuBLAS, no cuDNN, no host round-trips.
 
-### Performance: GPU-Resident vs CPU+LibTorch
+### Why GPU-Resident MCTS is Faster
 
-Profiled on RTX 5060 Ti with gen_18 OracleNet (6×128, ~2M params), 400 simulations per move:
+The standard approach (Rust engine + LibTorch) requires a CPU↔GPU round-trip for every NN evaluation: CPU selects a leaf node, copies the position tensor to GPU, runs inference, copies the result back. With batched inference (batch-16 across games), each game must wait for other games to accumulate pending evaluations before a batch can be dispatched. This creates two bottlenecks:
 
-| Configuration | Per-move time | vs CPU baseline |
+1. **Per-simulation transfer overhead:** Each of ~200 simulations requires a CPU↔GPU data transfer (~90 µs round-trip), adding ~18 ms of transfer time per move on top of inference.
+2. **Batching stalls:** Games block each other waiting for a full batch — a game ready for inference must idle until 15 other games also need inference.
+
+The GPU-resident kernel eliminates both: each block runs the complete MCTS loop (select→expand→evaluate→backup) for all simulations in shared memory, with inference called inline as a `__device__` function. The only CPU↔GPU transfer is one `BoardState` upload and one result readback per move (not per simulation). With 36 concurrent games running on 36 SMs, there are no batching stalls — each block runs independently.
+
+### Performance (RTX 5060 Ti, SE-ResNet 6×128)
+
+Single-game sequential profiling with 400 simulations per move:
+
+| Configuration | Per-move time | Note |
 |---|---|---|
-| CPU + LibTorch GPU inference (baseline) | 840 ms | 1.0× |
-| GPU-resident, 1 block (scalar FP32 conv) | 3,864 ms | 0.2× |
-| GPU-resident, 1 block (shifted-copy TC) | 657 ms | 1.3× |
-| GPU-resident, 8 blocks | 81 ms | 10.4× |
-| GPU-resident, 16 blocks | 41 ms | 20.5× |
-| GPU-resident, 36 blocks (1 per SM) | 19 ms | **44×** |
+| CPU MCTS + LibTorch GPU inference | 840 ms | single-game, no batching |
+| GPU-resident, 1 block (SE-ResNet TC) | 657 ms | single block, all on GPU |
+| GPU-resident, 36 blocks (1 per SM) | 19 ms | 36 concurrent games |
 
-Four inference paths, each faster than the last:
+The single-game 840 ms baseline does not reflect the Rust engine's batched throughput (which is faster when running multiple games). The GPU kernel's advantage is most pronounced in the multi-game setting where 36 games run simultaneously with zero coordination overhead.
 
-| Path | Forward pass | Speedup |
-|---|---|---|
-| Warp-cooperative (32 threads, FP32, global scratch) | 130.6 ms | 1.0× |
-| Block-cooperative (256 threads, FP32, shared memory) | 9.52 ms | 13.7× |
-| Block + TC im2col (256 threads, wmma FP16) | 3.65 ms | 35.8× |
-| **Block + TC shifted-copy (9-GEMM, wmma FP16)** | **1.51 ms** | **86×** |
+**SE-ResNet forward pass optimization history:**
 
-The shifted-copy path decomposes conv3x3 into 9 dense GEMMs by kernel position: `output = Σ W_s × shifted_s`. For each kernel offset (ky, kx), all 256 threads cooperatively build a shifted FP16 copy of the input in shared memory (16 KB), then 8 warps run a standard `wmma` GEMM with contiguous, aligned loads — no im2col scatter/gather, no staging buffers. This eliminates the per-tile integer division and bounds checking that dominated the previous TC path. Conv weights are pre-split into 9 × [C_out, C_in] FP16 matrices at search start.
-
-Multi-block scaling is near-perfectly linear up to the SM count (36 on RTX 5060 Ti), then plateaus.
+| Path | Forward pass |
+|---|---|
+| Warp-cooperative (32 threads, FP32) | 130.6 ms |
+| Block-cooperative (256 threads, FP32, shared memory) | 9.52 ms |
+| Block + TC im2col (wmma FP16) | 3.65 ms |
+| Block + TC shifted-copy (9-GEMM, wmma FP16) | **1.51 ms** |
 
 ### Two Neural Network Architectures
 
@@ -292,6 +296,10 @@ python python/orchestrate.py --arch transformer --enable-koth
 - 50 sims/move: 36 games in 3.3 seconds (760 samples/sec)
 - 200 sims/move: 36 games in 7.0 seconds (410 samples/sec)
 
+### GPU Evaluation (Two-Network Matches)
+
+For SPRT gating, two networks play against each other. Each game is a match between network A and network B, with colors alternated across games for fairness. The host-side game loop partitions active games by which player is to move and makes two `gpu_mcts_eval_trees_transformer` calls per round — one per weight set. Both weight sets (~4.7 MB each) reside in GPU global memory simultaneously.
+
 ### Components
 
 | Component | Status | Tests |
@@ -306,6 +314,7 @@ python python/orchestrate.py --arch transformer --enable-koth
 | AlphaZero move encoding (73-plane) | Complete | 5/5 |
 | Multi-tree eval (N trees, 1 block each) | Complete | — |
 | GPU self-play driver | Complete | 2/2 |
+| GPU eval (two-network matches) | Complete | 2/2 |
 
 **SE-ResNet inference** evolved through four paths: warp-cooperative (131 ms) → block scalar (9.52 ms) → TC im2col (3.65 ms) → shifted-copy (1.51 ms, 86× faster than warp). Conv3x3 decomposed into 9 dense GEMMs by kernel position with contiguous wmma loads.
 

@@ -53,3 +53,33 @@ int run_selfplay_games(
     GameRecord* records,           // array of num_games GameRecords
     int num_games
 );
+
+// ============================================================
+// Eval mode: two networks play against each other
+// ============================================================
+
+struct EvalConfig {
+    int num_games;
+    int sims_per_move;
+    int max_nodes_per_tree;
+    float explore_base;           // typically 0.90 for eval
+    bool enable_koth;
+    float c_puct;
+    int max_concurrent;
+    int seed;
+};
+
+struct EvalResult {
+    int wins_a;       // games won by player A
+    int wins_b;       // games won by player B
+    int draws;
+};
+
+// Play num_games evaluation games between two networks.
+// Half the games have A=white, half have A=black.
+// Returns wins/losses/draws from A's perspective.
+EvalResult run_eval_games(
+    TransformerWeights* d_weights_a,
+    TransformerWeights* d_weights_b,
+    const EvalConfig& config
+);

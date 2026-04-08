@@ -103,6 +103,58 @@ void test_selfplay_batch(bool& test_failed) {
 }
 
 // ============================================================
+// Eval mode tests
+// ============================================================
+
+void test_eval_single_game(bool& test_failed) {
+    TransformerWeights* d_a = init_transformer_weights_zeros();
+    TransformerWeights* d_b = init_transformer_weights_zeros();
+
+    EvalConfig config = {};
+    config.num_games = 1;
+    config.sims_per_move = 30;
+    config.max_nodes_per_tree = config.sims_per_move + 100;
+    config.explore_base = 0.90f;
+    config.enable_koth = false;
+    config.c_puct = 1.414f;
+    config.max_concurrent = 1;
+
+    EvalResult result = run_eval_games(d_a, d_b, config);
+
+    printf("[A:%d B:%d D:%d] ", result.wins_a, result.wins_b, result.draws);
+
+    // Game must complete
+    ASSERT_EQ(result.wins_a + result.wins_b + result.draws, 1);
+
+    free_transformer_weights(d_a);
+    free_transformer_weights(d_b);
+}
+
+void test_eval_batch(bool& test_failed) {
+    TransformerWeights* d_a = init_transformer_weights_zeros();
+    TransformerWeights* d_b = init_transformer_weights_zeros();
+
+    EvalConfig config = {};
+    config.num_games = 8;
+    config.sims_per_move = 30;
+    config.max_nodes_per_tree = config.sims_per_move + 100;
+    config.explore_base = 0.90f;
+    config.enable_koth = false;
+    config.c_puct = 1.414f;
+    config.max_concurrent = 8;
+
+    EvalResult result = run_eval_games(d_a, d_b, config);
+
+    printf("[A:%d B:%d D:%d] ", result.wins_a, result.wins_b, result.draws);
+
+    // All games must complete
+    ASSERT_EQ(result.wins_a + result.wins_b + result.draws, 8);
+
+    free_transformer_weights(d_a);
+    free_transformer_weights(d_b);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -118,6 +170,8 @@ int main(int argc, char** argv) {
 
     RUN_TEST(test_selfplay_single_game);
     RUN_TEST(test_selfplay_batch);
+    RUN_TEST(test_eval_single_game);
+    RUN_TEST(test_eval_batch);
 
     printf("\nResults: %d/%d passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);

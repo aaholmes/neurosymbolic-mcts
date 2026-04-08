@@ -622,6 +622,223 @@ int run_selfplay(
 }
 
 // ============================================================
+// Eval mode: two networks play against each other
+// ============================================================
+
+EvalResult run_eval_games(
+    TransformerWeights* d_weights_a,
+    TransformerWeights* d_weights_b,
+    const EvalConfig& config
+) {
+    init_zobrist();
+
+    EvalResult result = {0, 0, 0};
+
+    int concurrent = config.max_concurrent;
+    if (concurrent > config.num_games) concurrent = config.num_games;
+    if (concurrent > SP_MAX_CONCURRENT) concurrent = SP_MAX_CONCURRENT;
+
+    // GPU resources
+    float* d_policy_bufs = nullptr;
+    cudaMalloc(&d_policy_bufs, concurrent * NN_POLICY_SIZE * sizeof(float));
+
+    BoardState* d_bs = nullptr;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    GPUMove* d_moves = nullptr;
+    cudaMalloc(&d_moves, 256 * sizeof(GPUMove));
+    int* d_count = nullptr;
+    cudaMalloc(&d_count, sizeof(int));
+    int* d_check = nullptr;
+    cudaMalloc(&d_check, sizeof(int));
+
+    struct EvalGame {
+        BoardState board;
+        uint64_t hash_history[SP_MAX_MOVES_PER_GAME];
+        int hash_count;
+        int move_number;
+        int game_idx;
+        bool a_is_white;   // true: A plays white, B plays black
+        GameRng rng;
+    };
+
+    EvalGame* games = new EvalGame[concurrent];
+    int games_started = 0;
+    int games_completed = 0;
+
+    auto init_eval_game = [&](EvalGame& g, int game_idx) {
+        g.board = make_start_pos();
+        g.hash_count = 0;
+        g.move_number = 1;
+        g.game_idx = game_idx;
+        g.a_is_white = (game_idx % 2 == 0);  // alternate colors for fairness
+        g.rng.seed(game_idx, config.seed);
+        uint64_t h = compute_hash(g.board);
+        g.hash_history[g.hash_count++] = h;
+    };
+
+    int active_count = 0;
+    for (int i = 0; i < concurrent && games_started < config.num_games; i++) {
+        init_eval_game(games[i], games_started++);
+        active_count++;
+    }
+
+    // Temp arrays for partitioning
+    BoardState positions_a[SP_MAX_CONCURRENT], positions_b[SP_MAX_CONCURRENT];
+    int idx_a[SP_MAX_CONCURRENT], idx_b[SP_MAX_CONCURRENT];  // map back to games[]
+    TreeEvalResult results_a[SP_MAX_CONCURRENT], results_b[SP_MAX_CONCURRENT];
+
+    while (active_count > 0) {
+        // Partition active games by which player is to move
+        int count_a = 0, count_b = 0;
+        for (int i = 0; i < active_count; i++) {
+            bool stm_is_white = games[i].board.w_to_move;
+            bool a_to_move = (stm_is_white == games[i].a_is_white);
+            if (a_to_move) {
+                positions_a[count_a] = games[i].board;
+                idx_a[count_a] = i;
+                count_a++;
+            } else {
+                positions_b[count_b] = games[i].board;
+                idx_b[count_b] = i;
+                count_b++;
+            }
+        }
+
+        // MCTS for group A (using weights_a)
+        if (count_a > 0) {
+            memset(results_a, 0, count_a * sizeof(TreeEvalResult));
+            gpu_mcts_eval_trees_transformer(
+                positions_a, count_a, config.sims_per_move,
+                config.max_nodes_per_tree, config.enable_koth, config.c_puct,
+                d_weights_a, d_policy_bufs, results_a
+            );
+        }
+
+        // MCTS for group B (using weights_b)
+        if (count_b > 0) {
+            memset(results_b, 0, count_b * sizeof(TreeEvalResult));
+            gpu_mcts_eval_trees_transformer(
+                positions_b, count_b, config.sims_per_move,
+                config.max_nodes_per_tree, config.enable_koth, config.c_puct,
+                d_weights_b, d_policy_bufs, results_b
+            );
+        }
+
+        // Merge results back: for each group, find best move and apply
+        // Process in reverse so we can swap-remove
+        auto process_game = [&](int game_slot, TreeEvalResult& res, int tree_idx) {
+            EvalGame& g = games[game_slot];
+
+            // Read children to get visit counts for move selection
+            void* d_pool_ptr = nullptr;
+            cudaGetSymbolAddress(&d_pool_ptr, g_node_pool);
+            int tree_offset = tree_idx * config.max_nodes_per_tree;
+            MCTSNode h_root;
+            cudaMemcpy(&h_root, (char*)d_pool_ptr + tree_offset * sizeof(MCTSNode),
+                       sizeof(MCTSNode), cudaMemcpyDeviceToHost);
+
+            int num_children = h_root.num_children;
+            if (num_children > 256) num_children = 256;
+            int h_visits[256];
+            GPUMove h_moves[256];
+            int total_visits = 0;
+            for (int c = 0; c < num_children; c++) {
+                MCTSNode h_child;
+                cudaMemcpy(&h_child, (char*)d_pool_ptr + (h_root.first_child_idx + c) * sizeof(MCTSNode),
+                           sizeof(MCTSNode), cudaMemcpyDeviceToHost);
+                h_visits[c] = h_child.visit_count;
+                h_moves[c] = (GPUMove)h_child.move_from_parent;
+                total_visits += h_child.visit_count;
+            }
+
+            // Select move (eval uses explore_base for slight randomness)
+            GPUMove chosen = 0;
+            if (num_children > 0 && total_visits > 0) {
+                chosen = sample_move(res, g.board, g.move_number, config.explore_base,
+                                     h_visits, h_moves, num_children, g.rng);
+            }
+
+            int game_result = 0;  // 0=ongoing
+
+            if (chosen != 0 && num_children > 0) {
+                // Apply move
+                cudaMemcpy(d_bs, &g.board, sizeof(BoardState), cudaMemcpyHostToDevice);
+                kernel_apply_move<<<1, 1>>>(d_bs, chosen);
+                cudaMemcpy(&g.board, d_bs, sizeof(BoardState), cudaMemcpyDeviceToHost);
+                g.move_number++;
+
+                uint64_t h = compute_hash(g.board);
+                if (g.hash_count < SP_MAX_MOVES_PER_GAME)
+                    g.hash_history[g.hash_count++] = h;
+
+                // Check game end
+                cudaMemcpy(d_bs, &g.board, sizeof(BoardState), cudaMemcpyHostToDevice);
+                kernel_gen_legal_moves<<<1, 1>>>(d_bs, d_moves, d_count);
+                int legal_count;
+                cudaMemcpy(&legal_count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
+
+                if (legal_count == 0) {
+                    kernel_is_in_check<<<1, 1>>>(d_bs, d_check);
+                    int in_check;
+                    cudaMemcpy(&in_check, d_check, sizeof(int), cudaMemcpyDeviceToHost);
+                    game_result = in_check ? (g.board.w_to_move ? 2 : 1) : 3;
+                } else if (g.board.halfmove >= 100) {
+                    game_result = 3;
+                } else if (is_threefold(g.hash_history, g.hash_count, h)) {
+                    game_result = 3;
+                } else if (g.move_number > SP_MAX_MOVES_PER_GAME) {
+                    game_result = 3;
+                }
+            } else {
+                game_result = 3;  // no legal moves or no visits
+            }
+
+            if (game_result != 0) {
+                // Classify result from A's perspective
+                if (game_result == 3) {
+                    result.draws++;
+                } else if (game_result == 1) {
+                    // White wins
+                    if (g.a_is_white) result.wins_a++;
+                    else result.wins_b++;
+                } else {
+                    // Black wins
+                    if (!g.a_is_white) result.wins_a++;
+                    else result.wins_b++;
+                }
+                games_completed++;
+
+                // Replace with new game
+                if (games_started < config.num_games) {
+                    init_eval_game(games[game_slot], games_started++);
+                } else {
+                    if (game_slot < active_count - 1)
+                        games[game_slot] = games[active_count - 1];
+                    active_count--;
+                }
+            }
+        };
+
+        // Process group A results (in reverse for safe swap-remove)
+        for (int i = count_a - 1; i >= 0; i--)
+            process_game(idx_a[i], results_a[i], i);
+
+        // Process group B results
+        for (int i = count_b - 1; i >= 0; i--)
+            process_game(idx_b[i], results_b[i], i);
+    }
+
+    cudaFree(d_policy_bufs);
+    cudaFree(d_bs);
+    cudaFree(d_moves);
+    cudaFree(d_count);
+    cudaFree(d_check);
+    delete[] games;
+
+    return result;
+}
+
+// ============================================================
 // Standalone executable
 // ============================================================
 
