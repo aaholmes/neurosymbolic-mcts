@@ -352,105 +352,132 @@ __device__ void tf_linear(
 }
 
 // ============================================================
-// LayerNorm: per-token normalization
+// LayerNorm: per-token normalization — all tokens in parallel
+//
+// 256 threads, 64 tokens → 4 threads per token.
+// Each thread handles 32 elements of d_model=128.
+// Reductions via warp shuffle across 4-thread groups.
+// No __syncthreads needed for reduction (all within-warp).
 // ============================================================
+
+// Helper: reduce sum across G consecutive threads within a warp
+__device__ __forceinline__ float group_reduce_sum(float val, int G) {
+    for (int s = G / 2; s > 0; s >>= 1)
+        val += __shfl_down_sync(0xFFFFFFFF, val, s);
+    return val;
+}
+
+// Helper: reduce max across G consecutive threads within a warp
+__device__ __forceinline__ float group_reduce_max(float val, int G) {
+    for (int s = G / 2; s > 0; s >>= 1) {
+        float other = __shfl_down_sync(0xFFFFFFFF, val, s);
+        val = fmaxf(val, other);
+    }
+    return val;
+}
+
+// Helper: broadcast from lane 0 of each G-thread group
+__device__ __forceinline__ float group_broadcast(float val, int group_lane, int G) {
+    return __shfl_sync(0xFFFFFFFF, val, (threadIdx.x / G) * G);
+}
+
 __device__ void tf_layer_norm(
     const float* __restrict__ input,
     float* __restrict__ output,
     const float* __restrict__ gamma,
     const float* __restrict__ beta,
     int num_tokens, int d_model,
-    float* __restrict__ smem_reduce
+    float* __restrict__ smem_reduce  // unused in parallel version but kept for API compat
 ) {
     int tid = threadIdx.x;
-    int total = num_tokens * d_model;
 
-    // Process each token
-    for (int tok = 0; tok < num_tokens; tok++) {
-        const float* x = input + tok * d_model;
-        float* y = output + tok * d_model;
+    // For d_model=128, num_tokens=64: 4 threads per token, 32 elements per thread
+    // For other sizes: fall back to serial if ratio doesn't work cleanly
+    int threads_per_tok = blockDim.x / num_tokens;  // 256/64 = 4
+    int tok = tid / threads_per_tok;
+    int group_lane = tid % threads_per_tok;
+    int elems_per_thread = d_model / threads_per_tok;  // 128/4 = 32
+    int d_start = group_lane * elems_per_thread;
 
-        // Mean
-        float local_sum = 0.0f;
-        for (int d = tid; d < d_model; d += blockDim.x) local_sum += x[d];
-        smem_reduce[tid] = local_sum;
-        __syncthreads();
-        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s) smem_reduce[tid] += smem_reduce[tid + s];
-            __syncthreads();
-        }
-        float mean = smem_reduce[0] / (float)d_model;
-        __syncthreads();
+    if (tok >= num_tokens) { __syncthreads(); return; }
 
-        // Variance
-        float local_var = 0.0f;
-        for (int d = tid; d < d_model; d += blockDim.x) {
-            float diff = x[d] - mean;
-            local_var += diff * diff;
-        }
-        smem_reduce[tid] = local_var;
-        __syncthreads();
-        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s) smem_reduce[tid] += smem_reduce[tid + s];
-            __syncthreads();
-        }
-        float inv_std = rsqrtf(smem_reduce[0] / (float)d_model + 1e-5f);
-        __syncthreads();
+    const float* x = input + tok * d_model;
+    float* y = output + tok * d_model;
 
-        // Normalize
-        for (int d = tid; d < d_model; d += blockDim.x) {
-            y[d] = (x[d] - mean) * inv_std * gamma[d] + beta[d];
-        }
-        __syncthreads();
+    // Mean: each thread sums its 32 elements
+    float local_sum = 0.0f;
+    for (int d = 0; d < elems_per_thread; d++)
+        local_sum += x[d_start + d];
+
+    float total_sum = group_reduce_sum(local_sum, threads_per_tok);
+    float mean = group_broadcast(total_sum, group_lane, threads_per_tok) / (float)d_model;
+
+    // Variance
+    float local_var = 0.0f;
+    for (int d = 0; d < elems_per_thread; d++) {
+        float diff = x[d_start + d] - mean;
+        local_var += diff * diff;
     }
+
+    float total_var = group_reduce_sum(local_var, threads_per_tok);
+    float inv_std = rsqrtf(group_broadcast(total_var, group_lane, threads_per_tok) / (float)d_model + 1e-5f);
+
+    // Normalize
+    for (int d = 0; d < elems_per_thread; d++) {
+        int idx = d_start + d;
+        y[idx] = (x[idx] - mean) * inv_std * gamma[idx] + beta[idx];
+    }
+    __syncthreads();
 }
 
 // ============================================================
-// Row-wise softmax
+// Row-wise softmax — all rows in parallel
+//
+// 256 threads, 64 rows → 4 threads per row.
+// Each thread handles 16 elements (cols=64, 64/4=16).
+// Reductions via warp shuffle across 4-thread groups.
 // ============================================================
 __device__ void tf_softmax_rows(
     float* __restrict__ data,
     int rows, int cols,
-    float* __restrict__ smem_reduce
+    float* __restrict__ smem_reduce  // unused in parallel version
 ) {
     int tid = threadIdx.x;
 
-    for (int row = 0; row < rows; row++) {
-        float* r = data + row * cols;
+    int threads_per_row = blockDim.x / rows;  // 256/64 = 4
+    int row = tid / threads_per_row;
+    int group_lane = tid % threads_per_row;
+    int elems_per_thread = cols / threads_per_row;  // 64/4 = 16
+    int c_start = group_lane * elems_per_thread;
 
-        // Max
-        float local_max = -FLT_MAX;
-        for (int c = tid; c < cols; c += blockDim.x)
-            if (r[c] > local_max) local_max = r[c];
-        smem_reduce[tid] = local_max;
-        __syncthreads();
-        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s && smem_reduce[tid + s] > smem_reduce[tid])
-                smem_reduce[tid] = smem_reduce[tid + s];
-            __syncthreads();
-        }
-        float row_max = smem_reduce[0];
-        __syncthreads();
+    if (row >= rows) { __syncthreads(); return; }
 
-        // Sum exp
-        float local_sum = 0.0f;
-        for (int c = tid; c < cols; c += blockDim.x) {
-            r[c] = expf(r[c] - row_max);
-            local_sum += r[c];
-        }
-        smem_reduce[tid] = local_sum;
-        __syncthreads();
-        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-            if (tid < s) smem_reduce[tid] += smem_reduce[tid + s];
-            __syncthreads();
-        }
-        float inv_sum = 1.0f / smem_reduce[0];
-        __syncthreads();
+    float* r = data + row * cols;
 
-        // Normalize
-        for (int c = tid; c < cols; c += blockDim.x) r[c] *= inv_sum;
-        __syncthreads();
+    // Max
+    float local_max = -FLT_MAX;
+    for (int c = 0; c < elems_per_thread; c++)
+        if (r[c_start + c] > local_max) local_max = r[c_start + c];
+
+    float row_max = group_reduce_max(local_max, threads_per_row);
+    row_max = group_broadcast(row_max, group_lane, threads_per_row);
+
+    // Exp and sum
+    float local_sum = 0.0f;
+    for (int c = 0; c < elems_per_thread; c++) {
+        float val = expf(r[c_start + c] - row_max);
+        r[c_start + c] = val;
+        local_sum += val;
     }
+
+    float total_sum = group_reduce_sum(local_sum, threads_per_row);
+    float inv_sum = 1.0f / group_broadcast(total_sum, group_lane, threads_per_row);
+
+    // Normalize
+    for (int c = 0; c < elems_per_thread; c++)
+        r[c_start + c] *= inv_sum;
+
+    __syncthreads();
 }
 
 // ============================================================

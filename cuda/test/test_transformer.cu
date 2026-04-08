@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <functional>
 
 // ============================================================
 // Test kernels
@@ -57,11 +58,11 @@ void test_transformer_weights_size(bool& test_failed) {
 }
 
 void test_layer_norm(bool& test_failed) {
-    const int T = 4, D = 8;  // small for verification
-    float h_data[T * D];
-    float h_gamma[D], h_beta[D];
+    const int T = TF_NUM_TOKENS, D = NN_HIDDEN_DIM;  // 64 tokens, 128 dims
+    float* h_data = (float*)malloc(T * D * sizeof(float));
+    float* h_gamma = (float*)malloc(D * sizeof(float));
+    float* h_beta = (float*)malloc(D * sizeof(float));
 
-    // Simple input: token t, dim d = t * D + d
     for (int i = 0; i < T * D; i++) h_data[i] = (float)(i % 7) - 3.0f;
     for (int d = 0; d < D; d++) { h_gamma[d] = 1.0f; h_beta[d] = 0.0f; }
 
@@ -91,6 +92,7 @@ void test_layer_norm(bool& test_failed) {
     printf("[mean≈0, var≈1] ");
     ASSERT_TRUE(ok);
 
+    free(h_data); free(h_gamma); free(h_beta);
     cudaFree(d_data); cudaFree(d_gamma); cudaFree(d_beta);
 }
 
@@ -452,6 +454,219 @@ void test_transformer_tc_timing(bool& test_failed) {
 }
 
 // ============================================================
+// Layer-by-layer profiling kernels
+// ============================================================
+
+__global__ void k_tf_layer_norm(float* data, const float* gamma, const float* beta, int T, int D) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    for (int i = tid; i < T * D; i += blockDim.x) smem[i] = data[i];
+    __syncthreads();
+    float* reduce = smem + T * D;
+    tf_layer_norm(smem, smem, gamma, beta, T, D, reduce);
+    for (int i = tid; i < T * D; i += blockDim.x) data[i] = smem[i];
+}
+
+__global__ void k_tf_linear_op(
+    const float* input, const half* weight, float* output, const float* bias,
+    int M, int N, int K, bool accum
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    float* in_smem = smem;
+    float* out_smem = smem + M * K;
+    half* ws = (half*)(smem + M * K + M * N);
+    for (int i = tid; i < M * K; i += blockDim.x) in_smem[i] = input[i];
+    if (!accum) for (int i = tid; i < M * N; i += blockDim.x) out_smem[i] = 0.0f;
+    else for (int i = tid; i < M * N; i += blockDim.x) out_smem[i] = output[i];
+    __syncthreads();
+    tf_linear(in_smem, weight, out_smem, bias, ws, M, N, K, accum);
+    for (int i = tid; i < M * N; i += blockDim.x) output[i] = out_smem[i];
+}
+
+__global__ void k_tf_gemm_smem_abt_op(
+    const float* A, const float* B, float* C, int M, int N, int K, float scale
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    float* a_smem = smem;
+    float* b_smem = smem + M * K;
+    float* c_smem = smem + M * K + N * K;
+    half* ws = (half*)(smem + M * K + N * K + M * N);
+    for (int i = tid; i < M * K; i += blockDim.x) a_smem[i] = A[i];
+    for (int i = tid; i < N * K; i += blockDim.x) b_smem[i] = B[i];
+    __syncthreads();
+    tf_gemm_smem_abt(a_smem, b_smem, c_smem, ws, M, N, K, scale);
+    for (int i = tid; i < M * N; i += blockDim.x) C[i] = c_smem[i];
+}
+
+__global__ void k_tf_gemm_smem_op(
+    const float* A, const float* B, float* C, int M, int N, int K
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    float* a_smem = smem;
+    float* b_smem = smem + M * K;
+    float* c_smem = smem + M * K + K * N;
+    half* ws = (half*)(smem + M * K + K * N + M * N);
+    for (int i = tid; i < M * K; i += blockDim.x) a_smem[i] = A[i];
+    for (int i = tid; i < K * N; i += blockDim.x) b_smem[i] = B[i];
+    __syncthreads();
+    tf_gemm_smem(a_smem, b_smem, c_smem, ws, M, N, K);
+    for (int i = tid; i < M * N; i += blockDim.x) C[i] = c_smem[i];
+}
+
+__global__ void k_tf_softmax(float* data, int rows, int cols) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    for (int i = tid; i < rows * cols; i += blockDim.x) smem[i] = data[i];
+    __syncthreads();
+    float* reduce = smem + rows * cols;
+    tf_softmax_rows(smem, rows, cols, reduce);
+    for (int i = tid; i < rows * cols; i += blockDim.x) data[i] = smem[i];
+}
+
+void test_transformer_layer_timing(bool& test_failed) {
+    TransformerWeights* d_weights = init_transformer_weights_zeros();
+    TransformerWeightsHalf* d_half = convert_transformer_to_half(d_weights);
+
+    // Read half weight pointers back to host
+    TransformerWeightsHalf h_half;
+    cudaMemcpy(&h_half, d_half, sizeof(TransformerWeightsHalf), cudaMemcpyDeviceToHost);
+
+    const int T = TF_NUM_TOKENS;  // 64
+    const int D = NN_HIDDEN_DIM;  // 128
+    const int HD = TF_HEAD_DIM;   // 32
+    const int ITERS = 50;
+
+    // Allocate buffers
+    float *d_buf1, *d_buf2, *d_buf3;
+    cudaMalloc(&d_buf1, T * D * sizeof(float));
+    cudaMalloc(&d_buf2, T * D * sizeof(float));
+    cudaMalloc(&d_buf3, T * T * sizeof(float));  // for attention
+    cudaMemset(d_buf1, 0, T * D * sizeof(float));
+    cudaMemset(d_buf2, 0, T * D * sizeof(float));
+
+    cudaEvent_t ev_start, ev_end;
+    cudaEventCreate(&ev_start); cudaEventCreate(&ev_end);
+
+    auto time_op = [&](const char* name, std::function<void()> fn) -> float {
+        fn(); cudaDeviceSynchronize();  // warmup
+        cudaEventRecord(ev_start);
+        for (int i = 0; i < ITERS; i++) fn();
+        cudaEventRecord(ev_end); cudaEventSynchronize(ev_end);
+        float ms; cudaEventElapsedTime(&ms, ev_start, ev_end);
+        float avg = ms / ITERS;
+        printf("  %-42s %8.3f ms\n", name, avg);
+        return avg;
+    };
+
+    printf("\n=== Transformer Layer-by-Layer Timing (TC mode) ===\n");
+    printf("Averaged over %d iterations\n\n", ITERS);
+
+    // LayerNorm [64, 128]
+    int ln_smem = (T * D + 256) * sizeof(float);
+    float t_ln = time_op("LayerNorm [64, 128]", [&]() {
+        k_tf_layer_norm<<<1, 256, ln_smem>>>(d_buf1, d_weights->blocks[0].ln1.weight,
+                                              d_weights->blocks[0].ln1.bias, T, D);
+    });
+
+    // Q projection [64,128] × [32,128]^T → [64,32]
+    int qproj_smem = (T*D + T*HD + 4096*2) * sizeof(float);
+    cudaFuncSetAttribute(k_tf_linear_op, cudaFuncAttributeMaxDynamicSharedMemorySize, qproj_smem);
+    float t_qproj = time_op("Q projection [64,128]×[32,128]^T (TC)", [&]() {
+        k_tf_linear_op<<<1, 256, qproj_smem>>>(d_buf1, h_half.blocks[0].q_head[0], d_buf2,
+                                                 d_weights->blocks[0].qkv_bias, T, HD, D, false);
+    });
+
+    // Attention QK^T [64,32] × [64,32]^T → [64,64]
+    int qkt_smem = (T*HD + T*HD + T*T + 4096*2) * sizeof(float);
+    cudaFuncSetAttribute(k_tf_gemm_smem_abt_op, cudaFuncAttributeMaxDynamicSharedMemorySize, qkt_smem);
+    float t_qkt = time_op("Attention QK^T [64,32]×[32,64] (TC)", [&]() {
+        k_tf_gemm_smem_abt_op<<<1, 256, qkt_smem>>>(d_buf2, d_buf2, d_buf3, T, T, HD, 0.1767f);
+    });
+
+    // Softmax [64, 64]
+    int sm_smem = (T * T + 256) * sizeof(float);
+    float t_softmax = time_op("Softmax [64, 64] per-row", [&]() {
+        k_tf_softmax<<<1, 256, sm_smem>>>(d_buf3, T, T);
+    });
+
+    // Attention × V [64,64] × [64,32] → [64,32]
+    int av_smem = (T*T + T*HD + T*HD + 4096*2) * sizeof(float);
+    cudaFuncSetAttribute(k_tf_gemm_smem_op, cudaFuncAttributeMaxDynamicSharedMemorySize, av_smem);
+    float t_attnv = time_op("Attention×V [64,64]×[64,32] (TC)", [&]() {
+        k_tf_gemm_smem_op<<<1, 256, av_smem>>>(d_buf3, d_buf2, d_buf2, T, HD, T);
+    });
+
+    // Output projection [64,32] × [32,128]^T → [64,128] (accumulate)
+    int oproj_smem = (T*HD + T*D + 4096*2) * sizeof(float);
+    cudaFuncSetAttribute(k_tf_linear_op, cudaFuncAttributeMaxDynamicSharedMemorySize, oproj_smem);
+    float t_oproj = time_op("Output proj [64,32]×[32,128]^T (TC acc)", [&]() {
+        k_tf_linear_op<<<1, 256, oproj_smem>>>(d_buf2, h_half.blocks[0].out_proj, d_buf1,
+                                                 nullptr, T, D, HD, true);
+    });
+
+    // FFN1 tile [64,128] × [64,128]^T → [64,64]
+    int ffn1_smem = (T*D + T*TF_FFN_TILE + 4096*2) * sizeof(float);
+    cudaFuncSetAttribute(k_tf_linear_op, cudaFuncAttributeMaxDynamicSharedMemorySize, ffn1_smem);
+    float t_ffn1 = time_op("FFN1 tile [64,128]×[64,128]^T (TC)", [&]() {
+        k_tf_linear_op<<<1, 256, ffn1_smem>>>(d_buf1, h_half.blocks[0].ffn1_tile[0], d_buf2,
+                                                d_weights->blocks[0].ffn1_bias, T, TF_FFN_TILE, D, false);
+    });
+
+    // FFN2 tile [64,64] × [128,64]^T → [64,128] (accumulate)
+    int ffn2_smem = (T*TF_FFN_TILE + T*D + 4096*2) * sizeof(float);
+    cudaFuncSetAttribute(k_tf_linear_op, cudaFuncAttributeMaxDynamicSharedMemorySize, ffn2_smem);
+    float t_ffn2 = time_op("FFN2 tile [64,64]×[128,64]^T (TC acc)", [&]() {
+        k_tf_linear_op<<<1, 256, ffn2_smem>>>(d_buf2, h_half.blocks[0].ffn2_tile[0], d_buf1,
+                                                nullptr, T, D, TF_FFN_TILE, true);
+    });
+
+    // Full forward pass (TC)
+    cudaFuncSetAttribute(kernel_transformer_forward_tc, cudaFuncAttributeMaxDynamicSharedMemorySize, TF_SMEM_BYTES);
+    BoardState bs = make_starting_position();
+    BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+    float *d_policy, *d_value, *d_k;
+    cudaMalloc(&d_policy, NN_POLICY_SIZE * sizeof(float));
+    cudaMalloc(&d_value, sizeof(float)); cudaMalloc(&d_k, sizeof(float));
+
+    float t_full = time_op("\nFULL FORWARD PASS (TC)", [&]() {
+        kernel_transformer_forward_tc<<<1, 256, TF_SMEM_BYTES>>>(
+            d_bs, 0.0f, d_weights, d_half, d_policy, d_value, d_k);
+        cudaDeviceSynchronize();
+    });
+
+    // Summary: estimate per-layer contributions
+    // Per block: 2×LN + 4 heads × (Q+K+V proj + QK^T + softmax + attn×V + out_proj) + 8 tiles × (FFN1+FFN2)
+    float per_block_attn = 4.0f * (3*t_qproj + t_qkt + t_softmax + t_attnv + t_oproj);
+    float per_block_ffn = 8.0f * (t_ffn1 + t_ffn2);
+    float per_block_ln = 2.0f * t_ln;
+    float per_block = per_block_attn + per_block_ffn + per_block_ln;
+
+    printf("\n  --- Per-block breakdown (×6 layers) ---\n");
+    printf("  %-42s %8.3f ms (%5.1f%%)\n", "LayerNorm (2×)", per_block_ln, 100*per_block_ln/per_block);
+    printf("  %-42s %8.3f ms (%5.1f%%)\n", "Attention (4 heads: Q+K+V+QKt+sm+aV+Oproj)",
+           per_block_attn, 100*per_block_attn/per_block);
+    printf("  %-42s %8.3f ms (%5.1f%%)\n", "FFN (8 tiles: FFN1+FFN2)",
+           per_block_ffn, 100*per_block_ffn/per_block);
+    printf("  %-42s %8.3f ms\n", "Total per block (estimated)", per_block);
+    printf("  %-42s %8.3f ms\n", "6 blocks (estimated)", 6*per_block);
+    printf("  %-42s %8.3f ms\n", "Actual full forward pass", t_full);
+    printf("  %-42s %8.3f ms\n", "Overhead (heads + residual + other)",
+           t_full - 6*per_block);
+
+    ASSERT_TRUE(t_full > 0.0f);
+
+    cudaEventDestroy(ev_start); cudaEventDestroy(ev_end);
+    cudaFree(d_buf1); cudaFree(d_buf2); cudaFree(d_buf3);
+    cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k);
+    free_transformer_half(d_half);
+    free_transformer_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -472,6 +687,7 @@ int main() {
     RUN_TEST(test_transformer_forward_timing);
     RUN_TEST(test_transformer_tc_forward);
     RUN_TEST(test_transformer_tc_timing);
+    RUN_TEST(test_transformer_layer_timing);
 
     printf("\nResults: %d/%d passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);
