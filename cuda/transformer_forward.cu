@@ -38,7 +38,8 @@ __device__ void transformer_forward(
     float* buf_out   = smem + TF_BUF_OUT_OFFSET;      // [64, 128] output
     float* workspace = smem + TF_WORKSPACE_OFFSET;     // [6144] attention/FFN/GEMM
     float* reduce    = smem + TF_REDUCE_OFFSET;        // [256] LayerNorm/softmax
-    half*  ws_half   = (half*)workspace;               // workspace as half* for GEMM staging
+    // Note: TC (Tensor Core) path is disabled — staging memory in workspace overlaps
+    // with workspace I/O buffers. Needs dedicated staging region to fix.
 
     const int D = NN_HIDDEN_DIM;  // 128
     const int T = TF_NUM_TOKENS;  // 64
@@ -49,19 +50,15 @@ __device__ void transformer_forward(
     tf_board_to_tokens(bs, tokens);
 
     // === 2. Input projection: tokens[64, 17] × W^T → buf_out[64, 128] ===
-    if (half_w) {
-        tf_linear(tokens, half_w->input_proj, buf_out, weights->input_proj_bias,
-                  ws_half, T, D, NN_INPUT_CHANNELS);
-    } else {
-        for (int i = tid; i < T * D; i += blockDim.x) {
-            int tok = i / D; int d = i % D;
-            float sum = 0.0f;
-            for (int c = 0; c < NN_INPUT_CHANNELS; c++)
-                sum += tokens[tok * NN_INPUT_CHANNELS + c] * weights->input_proj_weight[d * NN_INPUT_CHANNELS + c];
-            buf_out[i] = sum + weights->input_proj_bias[d];
-        }
-        __syncthreads();
+    // Always scalar: TC staging in workspace would corrupt tokens also in workspace.
+    for (int i = tid; i < T * D; i += blockDim.x) {
+        int tok = i / D; int d = i % D;
+        float sum = 0.0f;
+        for (int c = 0; c < NN_INPUT_CHANNELS; c++)
+            sum += tokens[tok * NN_INPUT_CHANNELS + c] * weights->input_proj_weight[d * NN_INPUT_CHANNELS + c];
+        buf_out[i] = sum + weights->input_proj_bias[d];
     }
+    __syncthreads();
 
     // Add positional embeddings: buf_x = buf_out + pos_embedding
     for (int i = tid; i < T * D; i += blockDim.x)
@@ -154,66 +151,17 @@ __device__ void transformer_forward(
         // buf_x = accumulator for attention output (zeroed)
 
         // Workspace: ws_q[64,32] at +0, ws_k[64,32] at +2048
-        // ws_attn[64,64] at +0 (reuses Q/K), ws_v[64,32] at +4096, ws_head at +4096
+        // ws_attn[64,64] at +0 (reuses Q/K), ws_v[64,32] at +4096
         float* ws_q    = workspace;
         float* ws_k    = workspace + T * TF_HEAD_DIM;
         float* ws_attn = workspace;
         float* ws_v    = workspace + T * T;  // +4096
-        float* ws_head = workspace + T * T;  // +4096 (reuses V)
 
         for (int h = 0; h < TF_NUM_HEADS; h++) {
             int qkv_offset = h * TF_HEAD_DIM;
 
-            if (half_w) {
-                // Fused Q+K projection: [64, 128] × [64, 128]^T → [64, 64]
-                // qkv_head[h] is [96, 128]. First 64 rows = Q+K weights.
-                // Use only the Q+K portion: [64, 128] at offset 0
-                tf_linear(buf_out, half_w->blocks[blk].qkv_head[h], ws_q,
-                          nullptr, ws_half, T, 2 * TF_HEAD_DIM, D);
-                // Add Q bias to ws_q[0:2048] and K bias to ws_k[0:2048]
-                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
-                    int tok = i / TF_HEAD_DIM, d = i % TF_HEAD_DIM;
-                    ws_q[tok * (2*TF_HEAD_DIM) + d] += block.qkv_bias[qkv_offset + d];
-                    ws_q[tok * (2*TF_HEAD_DIM) + TF_HEAD_DIM + d] += block.qkv_bias[D + qkv_offset + d];
-                }
-                __syncthreads();
-
-                // QK^T: Q at ws_q stride=2*HD, K at ws_q+HD stride=2*HD
-                float scale = rsqrtf((float)TF_HEAD_DIM);
-                tf_gemm_smem_abt(ws_q, ws_q + TF_HEAD_DIM, ws_attn, ws_half,
-                                 T, T, TF_HEAD_DIM, scale, 2 * TF_HEAD_DIM, 2 * TF_HEAD_DIM);
-
-                tf_softmax_rows(ws_attn, T, T, reduce);
-
-                // V projection (separate — can't fit in workspace alongside attn)
-                tf_linear(buf_out, half_w->blocks[blk].v_head[h], ws_v,
-                          block.qkv_bias + 2 * D + qkv_offset, ws_half, T, TF_HEAD_DIM, D);
-
-                // attn×V → ws_head (ws_v and ws_head alias, but tf_gemm_smem zeros C first)
-                // Can't alias B and C. Use buf_x as temp (saved to registers, free for this).
-                tf_gemm_smem(ws_attn, ws_v, buf_x, ws_half, T, TF_HEAD_DIM, T);
-
-                // Output projection: accumulate into buf_x (which now holds head_out)
-                // Wait — buf_x has head_out AND is the accumulator for attention output.
-                // tf_linear reads buf_x as input and accumulates into buf_x. Input=output=buf_x.
-                // That's a problem — tf_linear zeros C (buf_x) on first head, destroying head_out.
-                // With accumulate=true it doesn't zero, but reads and writes same memory.
-                //
-                // Fix: output projection reads from buf_x (head_out), accumulates to buf_x.
-                // For head 0: buf_x was zeroed at the start. tf_linear with accumulate reads
-                // from buf_x[0:T*HD] (head_out in first T*HD floats, rest is zero), writes to
-                // all of buf_x[0:T*D]. The read region [0:T*HD=2048] and write region [0:T*D=8192]
-                // overlap. But tf_linear processes tile by tile — input tiles may be read after
-                // output tiles overwrite them. This IS a race condition.
-                //
-                // Clean solution: copy head_out from buf_x to ws_v (attn consumed, ws_v free).
-                for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x)
-                    ws_v[i] = buf_x[i];
-                __syncthreads();
-                tf_linear(ws_v, half_w->blocks[blk].out_proj + h * TF_HEAD_DIM * D,
-                          buf_x, nullptr, ws_half, T, D, TF_HEAD_DIM, true);
-            } else {
-                // Scalar path
+            {
+                // Scalar attention: Q/K/V projections + QK^T + attn×V
                 for (int i = tid; i < T * TF_HEAD_DIM; i += blockDim.x) {
                     int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                     float sum = 0.0f;
@@ -234,14 +182,27 @@ __device__ void transformer_forward(
                 __syncthreads();
 
                 float scale = rsqrtf((float)TF_HEAD_DIM);
-                for (int i = tid; i < T * T; i += blockDim.x) {
-                    int row = i / T; int col = i % T;
-                    float sum = 0.0f;
-                    for (int d = 0; d < TF_HEAD_DIM; d++)
-                        sum += ws_q[row * TF_HEAD_DIM + d] * ws_k[col * TF_HEAD_DIM + d];
-                    ws_attn[i] = sum * scale;
+                // QK^T — local_results pattern to avoid ws_q/ws_attn aliasing race
+                {
+                    float local_attn[16];
+                    int n_attn = (T * T + blockDim.x - 1) / blockDim.x;
+                    for (int e = 0; e < n_attn; e++) {
+                        int i = tid + e * blockDim.x;
+                        if (i >= T * T) break;
+                        int row = i / T; int col = i % T;
+                        float sum = 0.0f;
+                        for (int d = 0; d < TF_HEAD_DIM; d++)
+                            sum += ws_q[row * TF_HEAD_DIM + d] * ws_k[col * TF_HEAD_DIM + d];
+                        local_attn[e] = sum * scale;
+                    }
+                    __syncthreads();
+                    for (int e = 0; e < n_attn; e++) {
+                        int i = tid + e * blockDim.x;
+                        if (i >= T * T) break;
+                        ws_attn[i] = local_attn[e];
+                    }
+                    __syncthreads();
                 }
-                __syncthreads();
 
                 tf_softmax_rows(ws_attn, T, T, reduce);
 
@@ -295,8 +256,8 @@ __device__ void transformer_forward(
                 }
             }
 
-            // Output projection (scalar path only — TC path handles it above)
-            if (!half_w) {
+            // Output projection: ws_q[64,32] × out_proj → buf_x[64,128] (accumulate)
+            {
                 for (int i = tid; i < T * D; i += blockDim.x) {
                     int tok = i / D; int d = i % D;
                     float sum = 0.0f;
@@ -332,15 +293,7 @@ __device__ void transformer_forward(
         for (int tile = 0; tile < TF_FFN_DIM / TF_FFN_TILE; tile++) {
             int tile_start = tile * TF_FFN_TILE;
 
-            if (half_w) {
-                // FFN1 tile: ws_tile[64,64] = buf_out[64,128] × W1_tile[64,128]^T + bias
-                tf_linear(buf_out, half_w->blocks[blk].ffn1_tile[tile], ws_tile,
-                          block.ffn1_bias + tile_start, ws_half, T, TF_FFN_TILE, D);
-                tf_relu(ws_tile, T * TF_FFN_TILE);
-                // FFN2 tile: buf_x += ws_tile[64,64] × W2_tile[128,64]^T
-                tf_linear(ws_tile, half_w->blocks[blk].ffn2_tile[tile], buf_x,
-                          nullptr, ws_half, T, D, TF_FFN_TILE, true);
-            } else {
+            {
                 for (int i = tid; i < T * TF_FFN_TILE; i += blockDim.x) {
                     int tok = i / TF_FFN_TILE; int d = i % TF_FFN_TILE;
                     float sum = 0.0f;
