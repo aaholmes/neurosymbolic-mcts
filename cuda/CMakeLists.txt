@@ -92,6 +92,16 @@ add_executable(selfplay selfplay_main.cu)
 target_link_libraries(selfplay caissawary_cuda)
 set_target_properties(selfplay PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+# Attention debug test
+add_executable(test_attn_debug test/test_attn_debug.cu)
+target_link_libraries(test_attn_debug caissawary_cuda)
+set_target_properties(test_attn_debug PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Transformer vs PyTorch regression tests
+add_executable(test_transformer_vs_pytorch test/test_transformer_vs_pytorch.cu)
+target_link_libraries(test_transformer_vs_pytorch caissawary_cuda)
+set_target_properties(test_transformer_vs_pytorch PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
 # Layer-by-layer timing profile
 add_executable(test_layer_timing test/test_layer_timing.cu)
 target_link_libraries(test_layer_timing caissawary_cuda)
