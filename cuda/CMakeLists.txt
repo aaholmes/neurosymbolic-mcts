@@ -106,3 +106,8 @@ set_target_properties(test_transformer_vs_pytorch PROPERTIES CUDA_SEPARABLE_COMP
 add_executable(test_layer_timing test/test_layer_timing.cu)
 target_link_libraries(test_layer_timing caissawary_cuda)
 set_target_properties(test_layer_timing PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Selfplay encoding & transformer ops tests
+add_executable(test_selfplay_and_ops test/test_selfplay_and_ops.cu)
+target_link_libraries(test_selfplay_and_ops caissawary_cuda)
+set_target_properties(test_selfplay_and_ops PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
