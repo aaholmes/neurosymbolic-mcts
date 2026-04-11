@@ -75,11 +75,12 @@ __global__ void kernel_encode_board(
 __global__ void kernel_full_forward(
     const BoardState* bs, float q_result,
     const TransformerWeights* weights,
+    const TransformerWeightsHalf* half_w,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ float smem[];
     float v, k;
-    transformer_forward(bs, q_result, weights, nullptr, smem, policy_out, &v, &k);
+    transformer_forward(bs, q_result, weights, half_w, smem, policy_out, &v, &k);
     if (threadIdx.x == 0) { *value_out = v; *k_out = k; }
 }
 
@@ -100,7 +101,7 @@ __global__ void kernel_stages(
     const int T = TF_NUM_TOKENS, D = NN_HIDDEN_DIM;
 
     float* buf_x     = smem + TF_BUF_X_OFFSET;
-    float* buf_out   = smem + TF_BUF_OUT_OFFSET;
+    half*  buf_out   = (half*)(smem + TF_BUF_OUT_OFFSET);  // FP16
     float* workspace = smem + TF_WORKSPACE_OFFSET;
     float* reduce    = smem + TF_REDUCE_OFFSET;
 
@@ -108,33 +109,33 @@ __global__ void kernel_stages(
     float* tokens = workspace;
     tf_board_to_tokens(bs, tokens);
 
-    // Input projection (scalar)
+    // Input projection (scalar, output FP16)
     for (int i = tid; i < T * D; i += blockDim.x) {
         int tok = i / D; int d = i % D;
         float sum = 0.0f;
         for (int c = 0; c < NN_INPUT_CHANNELS; c++)
             sum += tokens[tok * NN_INPUT_CHANNELS + c] * weights->input_proj_weight[d * NN_INPUT_CHANNELS + c];
-        buf_out[i] = sum + weights->input_proj_bias[d];
+        buf_out[i] = __float2half(sum + weights->input_proj_bias[d]);
     }
     __syncthreads();
 
-    // Dump after proj
-    for (int i = tid; i < T * D; i += blockDim.x) out_after_proj[i] = buf_out[i];
+    // Dump after proj (convert FP16 → FP32 for comparison)
+    for (int i = tid; i < T * D; i += blockDim.x) out_after_proj[i] = __half2float(buf_out[i]);
 
     // Add pos embedding
     for (int i = tid; i < T * D; i += blockDim.x)
-        buf_x[i] = buf_out[i] + weights->pos_embedding[i];
+        buf_x[i] = __half2float(buf_out[i]) + weights->pos_embedding[i];
     __syncthreads();
 
     // Dump after posemb
     for (int i = tid; i < T * D; i += blockDim.x) out_after_posemb[i] = buf_x[i];
 
-    // Transformer blocks (replicating the forward pass logic)
+    // Transformer blocks (scalar path for test — matches production without half_w)
     for (int blk = 0; blk < TF_NUM_LAYERS; blk++) {
         const TransformerBlock& block = weights->blocks[blk];
 
         // Attention
-        tf_layer_norm(buf_x, buf_out, block.ln1.weight, block.ln1.bias, T, D, reduce);
+        tf_layer_norm_f16out(buf_x, buf_out, block.ln1.weight, block.ln1.bias, T, D, reduce);
 
         float res[32];
         for (int k = 0; k < 32; k++) res[k] = buf_x[tid + k * 256];
@@ -154,7 +155,7 @@ __global__ void kernel_stages(
                 int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                 float sum = 0.0f;
                 for (int k = 0; k < D; k++)
-                    sum += buf_out[tok * D + k] * block.qkv_weight[(qkv_offset + d) * D + k];
+                    sum += __half2float(buf_out[tok * D + k]) * block.qkv_weight[(qkv_offset + d) * D + k];
                 ws_q[i] = sum + block.qkv_bias[qkv_offset + d];
             }
             __syncthreads();
@@ -165,7 +166,7 @@ __global__ void kernel_stages(
                 int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                 float sum = 0.0f;
                 for (int k = 0; k < D; k++)
-                    sum += buf_out[tok * D + k] * block.qkv_weight[(k_offset + d) * D + k];
+                    sum += __half2float(buf_out[tok * D + k]) * block.qkv_weight[(k_offset + d) * D + k];
                 ws_k[i] = sum + block.qkv_bias[k_offset + d];
             }
             __syncthreads();
@@ -201,7 +202,7 @@ __global__ void kernel_stages(
                 int tok = i / TF_HEAD_DIM; int d = i % TF_HEAD_DIM;
                 float sum = 0.0f;
                 for (int k = 0; k < D; k++)
-                    sum += buf_out[tok * D + k] * block.qkv_weight[(v_offset + d) * D + k];
+                    sum += __half2float(buf_out[tok * D + k]) * block.qkv_weight[(v_offset + d) * D + k];
                 ws_v[i] = sum + block.qkv_bias[v_offset + d];
             }
             __syncthreads();
@@ -245,7 +246,7 @@ __global__ void kernel_stages(
 
         // FFN
         for (int k = 0; k < 32; k++) res[k] = buf_x[tid + k * 256];
-        tf_layer_norm(buf_x, buf_out, block.ln2.weight, block.ln2.bias, T, D, reduce);
+        tf_layer_norm_f16out(buf_x, buf_out, block.ln2.weight, block.ln2.bias, T, D, reduce);
         for (int i = tid; i < T * D; i += blockDim.x) buf_x[i] = 0.0f;
         __syncthreads();
 
@@ -256,7 +257,7 @@ __global__ void kernel_stages(
                 int tok = i / TF_FFN_TILE; int d = i % TF_FFN_TILE;
                 float sum = 0.0f;
                 for (int k = 0; k < D; k++)
-                    sum += buf_out[tok * D + k] * block.ffn1_weight[(tile_start + d) * D + k];
+                    sum += __half2float(buf_out[tok * D + k]) * block.ffn1_weight[(tile_start + d) * D + k];
                 float val = sum + block.ffn1_bias[tile_start + d];
                 ws_tile[i] = val > 0.0f ? val : 0.0f;
             }
@@ -334,7 +335,7 @@ void test_input_proj_matches_pytorch(bool& test_failed) {
 
     float md = max_abs_diff(h_proj, ref, 64 * 128);
     printf("[max_diff=%.6f] ", md);
-    ASSERT_TRUE(md < 1e-5f);
+    ASSERT_TRUE(md < 5e-4f);  // FP16 buf_out rounding
 
     cudaFree(d_bs); cudaFree(d_proj); cudaFree(d_posemb);
     cudaFree(d_blk0); cudaFree(d_blk5);
@@ -366,7 +367,7 @@ void test_posemb_matches_pytorch(bool& test_failed) {
 
     float md = max_abs_diff(h_posemb, ref, 64 * 128);
     printf("[max_diff=%.6f] ", md);
-    ASSERT_TRUE(md < 1e-5f);
+    ASSERT_TRUE(md < 5e-4f);  // FP16 buf_out rounding
 
     cudaFree(d_bs); cudaFree(d_proj); cudaFree(d_posemb);
     cudaFree(d_blk0); cudaFree(d_blk5);
@@ -399,7 +400,7 @@ void test_block0_matches_pytorch(bool& test_failed) {
     ASSERT_TRUE(!has_nan(h_blk0, 64 * 128));
     float md = max_abs_diff(h_blk0, ref, 64 * 128);
     printf("[max_diff=%.6f] ", md);
-    ASSERT_TRUE(md < 1e-4f);  // 6 blocks of FP32 accumulation
+    ASSERT_TRUE(md < 2e-2f);  // FP16 buf_out introduces rounding per block
 
     cudaFree(d_bs); cudaFree(d_proj); cudaFree(d_posemb);
     cudaFree(d_blk0); cudaFree(d_blk5);
@@ -432,7 +433,7 @@ void test_block5_matches_pytorch(bool& test_failed) {
     ASSERT_TRUE(!has_nan(h_blk5, 64 * 128));
     float md = max_abs_diff(h_blk5, ref, 64 * 128);
     printf("[max_diff=%.6f] ", md);
-    ASSERT_TRUE(md < 1e-3f);  // error accumulates through 6 blocks
+    ASSERT_TRUE(md < 5e-2f);  // FP16 rounding accumulates through 6 blocks
 
     cudaFree(d_bs); cudaFree(d_proj); cudaFree(d_posemb);
     cudaFree(d_blk0); cudaFree(d_blk5);
@@ -453,9 +454,10 @@ void test_policy_matches_pytorch(bool& test_failed) {
     float *d_policy, *d_val, *d_k;
     cudaMalloc(&d_policy, 4672 * 4); cudaMalloc(&d_val, 4); cudaMalloc(&d_k, 4);
 
+    TransformerWeightsHalf* d_hw = convert_transformer_to_half(d_w);
     int smem = TF_SMEM_BYTES;
     cudaFuncSetAttribute(kernel_full_forward, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-    kernel_full_forward<<<1, 256, smem>>>(d_bs, 0.0f, d_w, d_policy, d_val, d_k);
+    kernel_full_forward<<<1, 256, smem>>>(d_bs, 0.0f, d_w, d_hw, d_policy, d_val, d_k);
     cudaDeviceSynchronize();
 
     float h_policy[4672];
@@ -465,7 +467,7 @@ void test_policy_matches_pytorch(bool& test_failed) {
     float md = max_abs_diff(h_policy, ref, 4672);
     float mn = mean_abs_diff(h_policy, ref, 4672);
     printf("[max_diff=%.6f mean=%.6f] ", md, mn);
-    ASSERT_TRUE(md < 1e-3f);
+    ASSERT_TRUE(md < 5e-3f);  // TC introduces FP16 rounding
 
     // Check top move matches
     int cuda_top = 0, ref_top = 0;
@@ -477,7 +479,7 @@ void test_policy_matches_pytorch(bool& test_failed) {
     ASSERT_EQ(cuda_top, ref_top);
 
     cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_val); cudaFree(d_k);
-    free_transformer_weights(d_w); free(ref);
+    free_transformer_half(d_hw); free_transformer_weights(d_w); free(ref);
 }
 
 void test_value_matches_pytorch(bool& test_failed) {
@@ -495,32 +497,33 @@ void test_value_matches_pytorch(bool& test_failed) {
     float *d_policy, *d_val, *d_k;
     cudaMalloc(&d_policy, 4672 * 4); cudaMalloc(&d_val, 4); cudaMalloc(&d_k, 4);
 
+    TransformerWeightsHalf* d_hw = convert_transformer_to_half(d_w);
     int smem = TF_SMEM_BYTES;
     cudaFuncSetAttribute(kernel_full_forward, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
 
     float ref_value_q0 = ref[1], ref_k = ref[2], ref_value_q3 = ref[4];
 
     // q=0
-    kernel_full_forward<<<1, 256, smem>>>(d_bs, 0.0f, d_w, d_policy, d_val, d_k);
+    kernel_full_forward<<<1, 256, smem>>>(d_bs, 0.0f, d_w, d_hw, d_policy, d_val, d_k);
     cudaDeviceSynchronize();
     float h_val, h_k;
     cudaMemcpy(&h_val, d_val, 4, cudaMemcpyDeviceToHost);
     cudaMemcpy(&h_k, d_k, 4, cudaMemcpyDeviceToHost);
 
     printf("[q=0: val=%.6f ref=%.6f] ", h_val, ref_value_q0);
-    ASSERT_NEAR(h_val, ref_value_q0, 1e-4f);
+    ASSERT_NEAR(h_val, ref_value_q0, 5e-4f);
     ASSERT_NEAR(h_k, ref_k, 1e-4f);
 
     // q=3
-    kernel_full_forward<<<1, 256, smem>>>(d_bs, 3.0f, d_w, d_policy, d_val, d_k);
+    kernel_full_forward<<<1, 256, smem>>>(d_bs, 3.0f, d_w, d_hw, d_policy, d_val, d_k);
     cudaDeviceSynchronize();
     cudaMemcpy(&h_val, d_val, 4, cudaMemcpyDeviceToHost);
 
     printf("[q=3: val=%.6f ref=%.6f] ", h_val, ref_value_q3);
-    ASSERT_NEAR(h_val, ref_value_q3, 1e-4f);
+    ASSERT_NEAR(h_val, ref_value_q3, 5e-4f);
 
     cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_val); cudaFree(d_k);
-    free_transformer_weights(d_w); free(ref);
+    free_transformer_half(d_hw); free_transformer_weights(d_w); free(ref);
 }
 
 void test_no_nan_in_forward_pass(bool& test_failed) {
@@ -534,9 +537,10 @@ void test_no_nan_in_forward_pass(bool& test_failed) {
     float *d_policy, *d_val, *d_k;
     cudaMalloc(&d_policy, 4672 * 4); cudaMalloc(&d_val, 4); cudaMalloc(&d_k, 4);
 
+    TransformerWeightsHalf* d_hw = convert_transformer_to_half(d_w);
     int smem = TF_SMEM_BYTES;
     cudaFuncSetAttribute(kernel_full_forward, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-    kernel_full_forward<<<1, 256, smem>>>(d_bs, 0.0f, d_w, d_policy, d_val, d_k);
+    kernel_full_forward<<<1, 256, smem>>>(d_bs, 0.0f, d_w, d_hw, d_policy, d_val, d_k);
     cudaDeviceSynchronize();
 
     float h_policy[4672], h_val;
@@ -547,7 +551,7 @@ void test_no_nan_in_forward_pass(bool& test_failed) {
     ASSERT_TRUE(!isnan(h_val));
 
     cudaFree(d_bs); cudaFree(d_policy); cudaFree(d_val); cudaFree(d_k);
-    free_transformer_weights(d_w);
+    free_transformer_half(d_hw); free_transformer_weights(d_w);
 }
 
 // ============================================================

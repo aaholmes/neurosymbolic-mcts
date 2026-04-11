@@ -115,6 +115,29 @@ __device__ void tf_linear(
     bool accumulate = false
 );
 
+// LayerNorm with FP16 output (compute in FP32, convert at final write)
+__device__ void tf_layer_norm_f16out(
+    const float* __restrict__ input,
+    half* __restrict__ output,
+    const float* __restrict__ gamma,
+    const float* __restrict__ beta,
+    int num_tokens, int d_model,
+    float* __restrict__ smem_reduce
+);
+
+// Linear layer with FP16 input (already in shared memory)
+// input is [M, K] FP16 in shared memory — skips FP32→FP16 staging conversion
+// staging: dedicated TC staging region (must NOT overlap input, output, or workspace)
+__device__ void tf_linear_f16in(
+    const half* __restrict__ input_smem,
+    const half* __restrict__ weight_fp16,
+    float* __restrict__ output_smem,
+    const float* __restrict__ bias,
+    half* __restrict__ staging,
+    int M, int N, int K,
+    bool accumulate = false
+);
+
 // Board encoding to [64, 17] FP32 (token-major: each token is one square's 17 features)
 // Different from block_board_to_planes which outputs [17, 64] (channel-major)
 __device__ void tf_board_to_tokens(

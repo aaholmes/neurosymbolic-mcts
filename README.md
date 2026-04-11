@@ -274,11 +274,11 @@ Both architectures support the same tiered MCTS (mate-in-1, KOTH-in-1, quiescenc
 | Architecture | Params | Forward pass | Per-move (36 blocks, 200 sims) |
 |---|---|---|---|
 | SE-ResNet 128×6 (shifted-copy TC) | ~2M | 1.51 ms | ~19 ms |
-| Transformer 128×6 (TC + parallel LN/softmax) | ~1.4M | 2.71 ms | ~5.4 ms* |
+| Transformer 128×6 (hybrid TC/scalar) | ~1.4M | — | ~5.7 ms* |
 
-\* Estimated from 36 games × 200 sims completing in 7.0 seconds (~80 moves/game).
+\* Measured: 36 games × 200 sims completing in 37.3 seconds (~84 moves/game avg).
 
-The transformer uses pre-LayerNorm encoder blocks with 4 attention heads (head_dim=32), FFN expansion 4× (128→512→128), and learnable positional embeddings. All GEMMs (Q/K/V projections, attention, FFN) use wmma Tensor Cores. LayerNorm and softmax process all 64 tokens in parallel via warp-shuffle reductions.
+The transformer uses pre-LayerNorm encoder blocks with 4 attention heads (head_dim=32), FFN expansion 4× (128→512→128), and learnable positional embeddings. `buf_out` (the LayerNorm output buffer) is stored in FP16, freeing 16 KB of shared memory for a dedicated TC staging region that doesn't overlap with Q/K/V/attention workspace. Q/K/V projections and FFN use wmma Tensor Cores (FP16 input, FP32 accumulation); QK^T, softmax, and attn×V stay scalar (workspace aliasing). LayerNorm and softmax process all 64 tokens in parallel via warp-shuffle reductions. The FP16 intermediate is safe because buf_out is only consumed by linear projections (which would convert to FP16 anyway for TC) and never feeds back into the FP32 residual stream.
 
 ### GPU Self-Play
 
@@ -292,9 +292,9 @@ cuda/build/selfplay /tmp/transformer_weights.bin 36 200 /tmp/selfplay_data/
 python python/orchestrate.py --arch transformer --enable-koth
 ```
 
-**Self-play throughput (zero weights, 36 concurrent games, RTX 5060 Ti):**
-- 50 sims/move: 36 games in 3.3 seconds (760 samples/sec)
-- 200 sims/move: 36 games in 7.0 seconds (410 samples/sec)
+**Self-play throughput (trained weights, 36 concurrent games, RTX 5060 Ti):**
+- 50 sims/move: 36 games in 17.8 seconds (159 samples/sec)
+- 200 sims/move: 36 games in 37.3 seconds (81.5 samples/sec)
 
 ### GPU Evaluation (Two-Network Matches)
 
@@ -318,7 +318,7 @@ For SPRT gating, two networks play against each other. Each game is a match betw
 
 **SE-ResNet inference** evolved through four paths: warp-cooperative (131 ms) → block scalar (9.52 ms) → TC im2col (3.65 ms) → shifted-copy (1.51 ms, 86× faster than warp). Conv3x3 decomposed into 9 dense GEMMs by kernel position with contiguous wmma loads.
 
-**Transformer inference** at 2.71 ms uses TC-accelerated Q/K/V projections, fused Q+K per head, TC attention and FFN (tiled for shared memory), and parallel LayerNorm/softmax across all 64 tokens via warp-shuffle reductions.
+**Transformer inference** uses hybrid TC/scalar: Q/K/V projections and FFN use wmma Tensor Cores (FP16 input from buf_out, FP32 accumulation); QK^T and attn×V stay scalar to avoid workspace aliasing. `buf_out` is stored in FP16, freeing 16 KB for a dedicated TC staging region within the 89 KB shared memory budget. Parallel LayerNorm/softmax across all 64 tokens via warp-shuffle reductions. 4.7× faster than all-scalar (10.9 vs 2.3 samples/sec at 200 sims, 2 games).
 
 **Multi-tree eval** (`gpu_mcts_eval_trees`) runs N independent MCTS searches in parallel, one block per tree, with partitioned node pools. Supports classical, SE-ResNet, and transformer modes.
 

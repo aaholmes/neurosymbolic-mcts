@@ -537,19 +537,19 @@ The *block-cooperative TC shifted-copy* path eliminates the im2col gather entire
 
 The scalar conv achieves 12.7 GFLOPS — 0.006% of the RTX 5060 Ti's 200 TFLOPS peak. The TC im2col path reduced conv time 3× but im2col gather still dominated (integer division by 9, bounds checks, staging). The shifted-copy path eliminates the gather entirely: each conv does 9 shifted copies (bit shifts only) + 9 dense contiguous GEMMs. A loop reorder (shifts outer, N_tiles inner) further reduced copies from 36→9 per conv, bringing per-conv from 0.25 ms (TC im2col) to ~0.08 ms.
 
-Tests: 7 tree store + 30 perft + 8 quick checks + 11 q-search + 13 MCTS kernel + 21 NN ops + 5 move encoding + 15 block ops + 11 transformer + 2 selfplay = 123 tests.
+Tests: 7 tree store + 30 perft + 8 quick checks + 11 q-search + 13 MCTS kernel + 21 NN ops + 5 move encoding + 15 block ops + 11 transformer + 8 transformer-vs-pytorch + 26 selfplay-and-ops + 2 selfplay = 157 CUDA tests + 24 Python tests = 181 total.
 
 ### Transformer architecture
 
 A pre-LayerNorm transformer (128×6, 4 heads, FFN 128→512→128, ~1.4M params) runs alongside the SE-ResNet as an alternative architecture selectable via `--arch transformer`. Same input (17 planes), same output (4672 policy + value + k), same tiered MCTS integration.
 
-The transformer forward pass (2.71 ms) uses TC-accelerated GEMMs for Q/K/V projections (fused Q+K per head), attention matrix multiply, output projection, and tiled FFN. LayerNorm and softmax process all 64 tokens in parallel via 4-thread warp-shuffle groups (0.020 ms and 0.008 ms respectively, down from 0.080 ms and 0.070 ms with serial per-token reductions).
+The transformer forward pass uses a hybrid TC/scalar approach. Q/K/V projections and FFN (the largest GEMMs) use wmma Tensor Cores with FP16 input and FP32 accumulation. QK^T, softmax, and attn×V stay scalar due to workspace memory aliasing constraints. The key enabler: `buf_out` (LayerNorm output) is stored in FP16, freeing 16 KB of shared memory for a dedicated TC staging region. This keeps the total shared memory at 89 KB (under the 99 KB hardware limit) while eliminating the staging/workspace overlap that previously corrupted TC results. The FP16 intermediate is numerically safe — buf_out is only consumed by linear projections (which convert to FP16 anyway for wmma) and never feeds back into the FP32 residual stream. Result: 4.7× speedup over all-scalar (10.9 vs 2.3 samples/sec). LayerNorm and softmax process all 64 tokens in parallel via 4-thread warp-shuffle groups.
 
 ### GPU self-play
 
 A host-side game loop calls `gpu_mcts_eval_trees_transformer` for batches of 36 concurrent games. Each batch runs one MCTS evaluation for all active positions simultaneously (one block per game, 256 threads per block). The host applies moves, samples from visit count distributions (proportional-or-greedy with explore_base=0.80), detects game termination (checkmate, stalemate, 50-move rule, threefold repetition via Zobrist hashing), and records training data in the binary format consumed by `train.py`.
 
-**Self-play throughput (36 concurrent games, RTX 5060 Ti, transformer 128×6):** 200 sims/move: 36 games in 7.0 seconds, producing ~2,900 training samples.
+**Self-play throughput (trained weights, 36 concurrent games, RTX 5060 Ti, transformer 128×6):** 200 sims/move: 36 games in 37.3 seconds (81.5 samples/sec, ~3,000 training samples). 50 sims/move: 36 games in 17.8 seconds (159 samples/sec).
 
 ## 9. Tournament Design: Adaptive CI-Targeted Pairing
 

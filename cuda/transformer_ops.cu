@@ -615,6 +615,144 @@ __device__ void tf_relu(float* data, int count) {
 }
 
 // ============================================================
+// ============================================================
+// LayerNorm with FP16 output — compute in FP32, convert at final write
+// ============================================================
+__device__ void tf_layer_norm_f16out(
+    const float* __restrict__ input,
+    half* __restrict__ output,
+    const float* __restrict__ gamma,
+    const float* __restrict__ beta,
+    int num_tokens, int d_model,
+    float* __restrict__ smem_reduce
+) {
+    int tid = threadIdx.x;
+    int threads_per_tok = blockDim.x / num_tokens;
+    int tok = tid / threads_per_tok;
+    int group_lane = tid % threads_per_tok;
+    int elems_per_thread = d_model / threads_per_tok;
+    int d_start = group_lane * elems_per_thread;
+
+    if (tok >= num_tokens) { __syncthreads(); return; }
+
+    const float* x = input + tok * d_model;
+    half* y = output + tok * d_model;
+
+    float local_sum = 0.0f;
+    for (int d = 0; d < elems_per_thread; d++)
+        local_sum += x[d_start + d];
+    float total_sum = group_reduce_sum(local_sum, threads_per_tok);
+    float mean = group_broadcast(total_sum, group_lane, threads_per_tok) / (float)d_model;
+
+    float local_var = 0.0f;
+    for (int d = 0; d < elems_per_thread; d++) {
+        float diff = x[d_start + d] - mean;
+        local_var += diff * diff;
+    }
+    float total_var = group_reduce_sum(local_var, threads_per_tok);
+    float inv_std = rsqrtf(group_broadcast(total_var, group_lane, threads_per_tok) / (float)d_model + 1e-5f);
+
+    for (int d = 0; d < elems_per_thread; d++) {
+        int idx = d_start + d;
+        y[idx] = __float2half((x[idx] - mean) * inv_std * gamma[idx] + beta[idx]);
+    }
+    __syncthreads();
+}
+
+// ============================================================
+// Linear layer with FP16 input (already in shared memory)
+// Uses dedicated staging region that doesn't overlap workspace.
+// ============================================================
+__device__ void tf_linear_f16in(
+    const half* __restrict__ input_smem,
+    const half* __restrict__ weight_fp16,
+    float* __restrict__ output_smem,
+    const float* __restrict__ bias,
+    half* __restrict__ staging,
+    int M, int N, int K,
+    bool accumulate
+) {
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+
+    int M_tiles = (N + 15) / 16;
+    int N_tiles = (M + 15) / 16;
+    int K_tiles = (K + 15) / 16;
+    int total_tiles = M_tiles * N_tiles;
+    bool a_aligned = (K % 16 == 0);
+
+    half* a_staging = staging + warp_id * 256;
+    half* b_staging = staging + 8 * 256 + warp_id * 256;
+
+    if (!accumulate) {
+        for (int i = tid; i < M * N; i += blockDim.x) output_smem[i] = 0.0f;
+        __syncthreads();
+    }
+
+    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += 8) {
+        int n_tile = tile_idx / N_tiles;
+        int m_tile = tile_idx % N_tiles;
+        int N_start = n_tile * 16;
+        int M_start = m_tile * 16;
+
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+        wmma::fill_fragment(acc, 0.0f);
+
+        for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
+            int K_start = k_tile * 16;
+
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+            if (a_aligned && K_start + 16 <= K && N_start + 16 <= N) {
+                wmma::load_matrix_sync(a_frag, weight_fp16 + N_start * K + K_start, K);
+            } else {
+                for (int i = lane; i < 256; i += 32) {
+                    int r = i / 16, c = i % 16;
+                    int n = N_start + r, k = K_start + c;
+                    a_staging[i] = (n < N && k < K) ? weight_fp16[n * K + k] : __float2half(0.0f);
+                }
+                __syncwarp();
+                wmma::load_matrix_sync(a_frag, a_staging, 16);
+            }
+
+            // B fragment: input is already FP16 — skip FP32→FP16 conversion
+            for (int i = lane; i < 256; i += 32) {
+                int r = i / 16, c = i % 16;
+                int k = K_start + r, m = M_start + c;
+                b_staging[i] = (k < K && m < M) ? input_smem[m * K + k] : __float2half(0.0f);
+            }
+            __syncwarp();
+
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+            wmma::load_matrix_sync(b_frag, b_staging, 16);
+
+            wmma::mma_sync(acc, a_frag, b_frag, acc);
+        }
+
+        float* tile_temp = (float*)(staging + 2 * 8 * 256) + warp_id * 256;
+        wmma::store_matrix_sync(tile_temp, acc, 16, wmma::mem_row_major);
+
+        for (int i = lane; i < 256; i += 32) {
+            int r = i / 16, c = i % 16;
+            int out_m = M_start + c, out_n = N_start + r;
+            if (out_m < M && out_n < N) {
+                if (accumulate)
+                    output_smem[out_m * N + out_n] += tile_temp[i];
+                else
+                    output_smem[out_m * N + out_n] = tile_temp[i];
+            }
+        }
+        __syncwarp();
+    }
+
+    if (bias) {
+        __syncthreads();
+        for (int i = tid; i < M * N; i += blockDim.x)
+            output_smem[i] += bias[i % N];
+    }
+    __syncthreads();
+}
+
 // Board encoding: BoardState → [64, 17] token features
 // Token t (square t) has 17 features: 12 piece planes + 1 EP + 4 castling
 // STM-relative: pieces[0-5]=STM, pieces[6-11]=OPP, flipped for black
