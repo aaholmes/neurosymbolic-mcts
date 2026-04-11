@@ -4,620 +4,230 @@ This document traces the evolution of Caissawary's architecture — what was tri
 
 ### Why King of the Hill?
 
-Standard chess is a surprisingly poor testbed for Tier 1 safety gates. Forced checkmates are rare in typical play — most games are decided by slow accumulation of positional and material advantages. In King of the Hill (KOTH), where moving your king to a central square also wins, the threat of forced wins is *always in the air*. Every midgame position has the dual tension of checkmate threats and king-march threats, both of which are tractable subgames solvable by Tier 1 gates. This makes KOTH an ideal stress test: the three-tier system gets far more opportunities to prove its value compared to standard chess, where Tier 1 would rarely fire.
+Standard chess is a poor testbed for Tier 1 safety gates — forced checkmates are rare in typical play. In King of the Hill (KOTH), where moving your king to a central square also wins, the dual tension of checkmate threats and king-march threats is *always in the air*. Both are tractable subgames solvable by Tier 1 gates. KOTH is an ideal stress test: the three-tier system gets far more opportunities to prove its value.
 
 ## 1. Three-Tier MCTS: Why Not Pure AlphaZero?
 
-**The problem.** AlphaZero treats every position uniformly: expand, evaluate with the neural network, backpropagate. But many positions have known answers. A mate-in-2 doesn't need a neural network — it needs a proof. A king that can trivially walk to the center in KOTH doesn't need 800 simulations — it needs geometry. Pure AlphaZero wastes its most expensive resource (NN calls) on positions where a microsecond of classical analysis gives an exact answer.
+**The problem.** AlphaZero treats every position uniformly: expand, evaluate with the NN, backpropagate. But many positions have known answers. A mate-in-2 doesn't need a neural network — it needs a proof. Pure AlphaZero wastes its most expensive resource (NN calls) on positions where a microsecond of classical analysis gives an exact answer.
 
 **The hypothesis.** Decompose positions into three tiers: (1) tractable subgames with exact solutions, (2) positions with useful heuristic structure, and (3) genuinely uncertain positions requiring learned evaluation. Only Tier 3 needs the neural network.
 
-**Domain-general framing.** This decomposition applies wherever MCTS encounters tractable subproblems. The most natural next domain is mathematical reasoning: automated theorem provers (Lean's `decide`, `omega`, `norm_num`) can resolve certain subgoals exactly, while a neural policy guides the high-level proof search through uncertain creative steps. The confidence scalar $k$ maps directly: a global trust level in the computable component, modulated per-position by the value head.
+**Domain-general framing.** This decomposition applies wherever MCTS encounters tractable subproblems. The most natural next domain is mathematical reasoning: automated theorem provers (Lean's `decide`, `omega`, `norm_num`) can resolve certain subgoals exactly, while a neural policy guides high-level proof search. The confidence scalar $k$ maps directly: a global trust level in the computable component.
 
 The pattern is always the same: compute what you can exactly, heuristically order what you understand, learn what remains.
 
 ## 2. Tier 1: Safety Gates as Terminal Nodes
 
-### First attempt: gate values as priors
+### The key insight: terminal semantics
 
-The initial design ran mate search at expansion, then used the result as a value prior for the node. The node was still expanded normally — children were created and evaluated by the NN or classical eval.
+The initial design ran mate search at expansion, then used the result as a value prior — but the node was still expanded normally. MCTS diluted the proven values: a proven mate-in-2 (+1.0) would be averaged with dozens of approximate NN evaluations (+0.3, -0.1), converging toward something much weaker.
 
-**What went wrong.** MCTS diluted the proven values. If a node was proven to be mate-in-2 (value = +1.0), but it got expanded, subsequent visits would descend into children evaluated by approximate methods. Those children might return values like +0.3 or -0.1 (the NN hadn't learned this pattern yet). The exact +1.0 from the mate search would get averaged with dozens of approximate values, converging toward something much weaker.
+**Solution:** Gate-resolved nodes became **terminal** — treated identically to checkmate and stalemate. No children are ever created. Every future visit re-uses the cached exact value. Proven values must be *cached*, not *mixed with approximations*. Once an MCTS node is proven, it stays proven forever.
 
-### Solution: terminal semantics
+### Mate search: exhaustive mate-in-2 + checks-only mate-in-3
 
-Gate-resolved nodes became **terminal** — treated identically to checkmate and stalemate. No children are ever created. Every future visit simply re-uses the cached exact value. This preserves the proof throughout the entire search.
+Full-width mate search at all depths is too expensive for every MCTS expansion. The compromise: mate-in-1/2 exhaustive (all legal moves), mate-in-3 checks-only (keeps branching manageable). The exhaustive mate-in-2 works because branching is naturally limited — the attacker's ~30 moves each lead to positions where the defender must have *all* replies lead to mate-in-1, a condition that prunes aggressively.
 
-**Key insight:** Proven values must be *cached*, not *mixed with approximations*. The terminal semantics are what make the proof sticky — once an MCTS node is proven, it stays proven forever.
-
-### Exhaustive mate-in-2 + checks-only mate-in-3
-
-Full-width mate search at all depths is too expensive to run at every MCTS expansion. The compromise uses a configurable `exhaustive_depth` parameter (default: 3 plies) that controls which depths search all legal moves vs. only checking moves:
-
-- **Mate-in-1 (depth 1):** exhaustive — all legal moves tried
-- **Mate-in-2 (depth 3):** exhaustive — catches quiet-first forced mates like 1.Kg6! Ra8# where the first move doesn't give check
-- **Mate-in-3 (depth 5):** checks-only — keeps branching manageable at deeper levels
-
-The exhaustive mate-in-2 is modest because mate-in-2 has limited branching: the attacker's ~30 legal moves each lead to positions where the defender must have *all* replies lead to mate-in-1 — a condition that prunes aggressively. No artificial node budget is needed — depth limiting and checks-only filtering keep the search naturally bounded.
-
-### Fast check detection with gives\_check() pre-filter
-
-On attacker plies with checks-only search, the naive approach generates all ~35 pseudo-legal moves, then for each: `make_move` → `is_legal` → `is_check` → `undo_move`. Since only ~1-5 moves give check, ~30 moves pay the full `make_move`/`undo_move` cost (Zobrist update, history push/pop) just to discover they don't give check.
-
-The optimization calls `gives_check()` *before* `make_move`. This function works on the pre-move board using modified occupancy: direct checks require one magic/table lookup (does the piece on `to` attack the king?), discovered checks require up to two slider lookups (does vacating `from` reveal an attack?). Special moves (promotions, castling, en passant) fall back to `apply_move_to_board` + `is_check`. Non-checking moves skip `make_move` entirely — eliminating both the expensive board mutation and the subsequent `is_check` call.
-
-**Correctness subtlety:** When all moves are filtered out on an attacker ply, `has_legal_move` stays false. But this doesn't mean checkmate/stalemate — it means no *checking* moves exist. The fix: on attacker plies with checks-only, return 0 (no mate found) instead of checking for checkmate/stalemate. Terminal detection only matters on defender plies, where all legal moves are tried.
-
-This reduced mate search cost by 26% (1.08 → 0.80 us/node).
-
-### Stateless search: &Board instead of BoardStack
-
-Even after the `gives_check()` optimization, mate search cost 1.7x more per node than KOTH (0.80 vs 0.47 us/node). Profiling revealed the remaining gap came from `BoardStack` overhead: `make_move`/`undo_move` performs incremental Zobrist hashing, pushes/pops state history, and `is_draw_by_repetition()` scans the position history — none of which is needed for forced mate detection, since a repeated position on the path to checkmate is irrelevant.
-
-The fix: convert mate search from `&mut BoardStack` (stateful make/undo) to `&Board` (stateless `apply_move_to_board`), matching KOTH's approach. Each recursive call creates a new `Board` on the stack — no history tracking, no Zobrist updates, no repetition checks.
-
-Combined with `gives_check()`, this reduced mate search from 1.08 to 0.64 us/node (41% total improvement).
-
-### Pure minimax with legality-first filtering
-
-The remaining gap between mate search (0.64 us/node) and KOTH (0.19 us/node) came from three sources: alpha-beta bookkeeping (score tracking, alpha/beta updates per move), atomic node budgets (`SearchContext` with `AtomicUsize`, `AtomicBool`, `Mutex`), and board clones wasted on illegal pseudo-legal moves.
-
-**Alpha-beta → pure minimax.** Within a single depth of iterative deepening, the mate question is binary: "does a forced mate exist at this depth?" Alpha-beta's score range tracking is unnecessary — the solver only needs short-circuit semantics: attacker returns true on first child success, defender returns false on first child refutation. This matches KOTH's `solve_koth` pattern exactly. Iterative deepening still finds the shortest mate (depth 1 before 3 before 5).
-
-**Atomic node budget removed.** The 100K node budget used `AtomicUsize::fetch_sub` + two `AtomicBool` loads per node (~15-20ns overhead). This was unnecessary — mate search is depth-limited (max depth 5) and heavily pruned by checks-only filtering + geometric pruning. The budget never triggered in practice. Replaced with a plain `&mut i32` counter.
-
-**`is_legal_after_move()` before `apply_move_to_board()`.** Previously: `apply_move_to_board(m)` (clones entire Board, ~400 bytes) → `is_legal(move_gen)` → discard if illegal. Now: `is_legal_after_move(m, move_gen)` (no clone, ~200 cycles) → only `apply_move_to_board` if legal. This saves a full board clone for every illegal pseudo-legal move — ~5 per defender ply.
-
-**Redundant `get_piece()` calls removed.** Two call sites checked `board.get_piece(m.from).is_some()` before processing moves from `gen_pseudo_legal_moves` — but pseudo-legal move generation only produces moves from occupied squares, making these 12-bitboard scans per move pure dead code.
-
-These four changes reduced mate search mean time from 608 us to 224 us (2.7x speedup), primarily by reducing mean nodes per call from 954 to 359. The per-node cost dropped to 0.63 us/node.
-
-### Batched per-piece checkmate detection at depth-0 leaves
-
-After the pure minimax rewrite, depth-0 checkmate detection became the dominant cost within mate search. ~95% of nodes in a checks-only search are depth-0 leaves. The original approach called `gen_pseudo_legal_moves` — generating moves for all 6 piece types, allocating ~10 vectors — then iterated until finding one legal move. In the common case (not checkmate), a king move provides the evasion, but the engine still paid for generating knight, bishop, rook, queen, and pawn moves unnecessarily.
-
-The optimization generates moves by piece type in priority order, aborting early when any legal evasion is found:
-
-1. **King moves** (direct bitboard, zero allocation, skip castling since in check): highest evasion probability (~70-80% of cases), cheapest generation. Uses `k_move_bitboard[king_sq] & !friendly_occ` — the same pattern as KOTH direct king-move generation.
-2. **Double check detection** (2 magic lookups + 2 table lookups): if two or more pieces attack the king, only king moves can evade. Since king moves already failed above, it's checkmate — skip all 5 remaining piece-type generations entirely. A slider constraint avoids unnecessary work: double check requires at least one slider, so if no slider attacks the king (0 magic hits), it's a single non-slider check and double-check detection is skipped.
-3. **Knight → Bishop → Rook → Queen → Pawn** in increasing generation cost. Each batch aborts on the first legal move found.
-
-An additional optimization: in checks-only mode, the attacker only plays checking moves, so the defender is always in check at depth 0. The `is_check()` call (which scans all 6 attacker piece types for attacks on the king) is skipped entirely.
-
-This reduced mate search from 224 us to 132 us (41% speedup, 0.63 → 0.37 us/node) without changing the search tree — identical node counts confirm no behavioral change. Mate search's share of wall time dropped from 10% to 6%.
-
-**Cumulative mate search optimization:** 608 us → 132 us (4.6x speedup, 78% reduction). Per-node cost: 1.08 → 0.37 us/node (66% reduction). The remaining 2x gap versus KOTH (0.37 vs 0.19 us/node) comes from `gives_check()` filtering on attacker plies and richer move generation needed for full checkmate detection vs. KOTH's simple geometric reachability.
+Cumulative optimization brought mate search from 608 µs to 132 µs per call (4.6×): `gives_check()` pre-filtering to avoid `make_move`/`undo_move` on non-checking moves, stateless `&Board` instead of `&mut BoardStack` (no Zobrist/repetition overhead), pure minimax replacing alpha-beta (binary "does forced mate exist?" needs only short-circuit semantics), `is_legal_after_move()` before `apply_move_to_board()` (skip board clones on illegal moves), and batched per-piece checkmate detection at depth-0 leaves (king moves first for early evasion, double-check detection to skip remaining piece types).
 
 ### KOTH geometric pruning
 
-In King of the Hill, a king that can reach {d4, e4, d5, e5} wins. The gate computes: can the side-to-move's king reach any center square in at most 3 moves, considering blocking pieces and opponent interception? This is pure geometry — no search needed.
+Can the king reach {d4, e4, d5, e5} in at most 3 moves, considering blocking pieces and opponent interception? Pure geometry, no search needed. Direct king-move generation via bitboard intersection (`k_move_bitboard[king_sq] & target_mask & !friendly_occ`) yields exactly the 1-3 valid moves, avoiding full movegen. Per-node cost: 0.19 µs.
 
-### KOTH direct king-move generation
+### Depth scaling
 
-On root-side turns in `solve_koth`, when the king is not already in the required distance ring for the current ply, only king moves toward center matter. The original approach generated all ~35 pseudo-legal moves via `gen_pseudo_legal_moves`, then filtered to king moves landing in the target ring — discarding ~30 non-king moves that were generated unnecessarily.
-
-The optimization skips full move generation entirely on these turns. Instead, it computes valid king destinations directly via bitboard intersection: `k_move_bitboard[king_sq] & target_mask & !friendly_occ`. This yields exactly the 1-3 valid destination squares, each producing a `Move::new(king_sq, to_sq, None)` that goes straight to `apply_move_to_board` + `is_legal`. No post-apply ring check is needed since `target_mask` already constrains destinations. When the king is already in the target ring, full movegen is used with a post-apply ring check — non-king moves are valid in this case (king stays put) and the king might move out of the ring.
-
-This reduced KOTH per-node cost from 0.33 to 0.19 us/node (42% improvement, cumulative 63% from the original 0.52 us/node).
-
-### Depth scaling: why mate-in-5 and KOTH-in-3
-
-Both KOTH and mate search depths are configurable (`koth_depth` and `mate_search_depth` in `TacticalMctsConfig`), but profiling shows the defaults (3 and 5 respectively) sit at a sweet spot. Comparing baseline (KOTH-in-3, mate-in-5) against deeper search (KOTH-in-4, mate-in-6) over 10 self-play games at 400 simulations/move:
-
-| Operation | Mean (us) | Mean nodes | Total (ms) | % wall time |
-|-----------|----------:|----------:|-----------:|------------:|
-| KOTH-in-3 | 149 | 780 | 30,729 | 8% |
-| KOTH-in-4 | 8,250 | 56,643 | 1,713,129 | 83% |
-| Mate-in-5 | 132 | 359 | 22,967 | 6% |
-| Mate-in-6 | 292 | 861 | 50,905 | 12% |
-
-**KOTH-in-4 is catastrophic.** 55x slower per call, 73x more nodes. At depth 4, the root ply's geometric target mask expands to `RING_3` — the entire board border — so the direct king-move pruning that makes KOTH-in-3 fast (intersecting king moves with a small target ring of ~4-12 squares) degenerates to full move generation. KOTH-in-4 alone consumes 5x the NN inference budget, dominating total wall time at 83%. The hit rate for center-in-4 wins that aren't already center-in-3 is low, making the cost unjustifiable.
-
-**Mate-in-6 is cheap but marginal.** Only 2.2x slower (checks-only branching factor ~3-5 keeps each additional depth affordable), moving from 6% to 12% of wall time. However, forced mate-in-6 via pure checks is rare in practice — most deep mates require quiet preparatory moves that checks-only search cannot find.
-
-**Exhaustive mate-in-2: not worth it.** The `exhaustive_mate_depth` parameter enables all-legal-moves search at shallow depths, catching quiet mates (rook lifts, king approaches, clearance moves) that checks-only misses. Profiling exhaustive mate-in-2 (all legal moves for mate-in-1/2, checks-only for mate-in-3+):
-
-| Mate search mode | Mean (us) | Mean nodes | Total (ms) | % wall time |
-|------------------|----------:|----------:|-----------:|------------:|
-| Checks-only (depth 5) | 133 | 359 | 23,169 | 6% |
-| Exhaustive mate-in-2 (depth 5) | 193 | 1,342 | 33,650 | 9% |
-
-Nodes jump 3.7x (from ~3-5 checks to ~35 legal moves at shallow plies), but time only increases 1.46x because the extra nodes are cheap shallow ones. However, the cost is not justified: a quiet mate-in-2 will be found by MCTS within a few simulations anyway — the engine only needs ~2-3 visits to discover the winning line through normal expansion. The safety gate's value comes from catching forced wins that MCTS would take many simulations to prove (deep checks-only mates), not short mates that MCTS handles naturally.
-
-**Current defaults:** Checks-only mate-in-5 and KOTH-in-3, with no exhaustive mate search (`exhaustive_mate_depth: 0`). The geometric pruning that makes KOTH efficient has a hard wall at depth 4, while mate search depth 5 captures the common checks-only forced mates without excessive cost. Exhaustive mate search is available via `--exhaustive-mate-depth` for profiling but disabled in production.
+KOTH-in-4 is catastrophic (55× slower — the target mask expands to the entire board border, defeating geometric pruning). Mate-in-6 is cheap (2.2× slower) but marginal — forced mate-in-6 via pure checks is rare. Current defaults: checks-only mate-in-5 and KOTH-in-3.
 
 ## 3. Tier 2: Quiescence Search and Tactical Ordering
 
-Tier 2's core contribution is `forced_ext_pesto_balance()` — an extended PeSTO piece-square-table quiescence search (depth 20) that runs at every MCTS leaf evaluation to compute $\Delta M$, the tapered positional+material evaluation after all forced tactical sequences resolve. Unlike simple piece counting (`[1,3,3,5,9,0]`), PeSTO uses Texel-tuned piece-square tables (standard RofChade values) that account for piece placement — a knight on e4 is worth more than a knight on a1. This is a classical alpha-beta tree search whose results no neural network can easily replicate: it explores variable-depth exchange sequences to detect hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds into the value function through two paths: as a direct input feature to the value head's FC layer (position-dependent learned modulation) and via the additive $k \cdot \Delta M$ term (global baseline trust), providing the foundation that the NN builds on top of.
+Tier 2's core is `forced_ext_pesto_balance()` — an extended PeSTO quiescence search (depth 20) at every MCTS leaf, computing $\Delta M$: tapered positional+material evaluation after forced tactical sequences resolve. Unlike simple piece counting, PeSTO uses Texel-tuned piece-square tables (RofChade values) accounting for piece placement. This classical alpha-beta search detects hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds into the value function both as a direct input to the value head's FC layer and via the additive $k \cdot \Delta M$ term.
 
 ### Extended quiescence: beyond pure captures
 
-The original Q-search (`pesto_qsearch`) only considered captures and promotions. The extended version (`ext_pesto_qsearch_counted`) adds three innovations: tactical quiet moves, null-move threat detection, and mystery-square fork resolution.
+The extended Q-search adds three innovations beyond captures/promotions:
 
-#### Tactical quiet moves (budget-limited)
+**Tactical quiet moves (budget-limited).** Each side gets one non-capture tactical move per search: non-capture checks (via `gives_check()`), pawn forks (capture bitboard attacks 2+ enemy pieces), or knight forks (attack bitboard hits 2+ of {R, Q, K}). One per side keeps node counts manageable while catching the most common patterns.
 
-Each side gets one non-capture tactical move per search:
+**Null-move threat detection with "deny first choice."** Standard stand-pat assumes you can safely do nothing — a lie when pieces are hanging. The extended Q-search passes the turn, evaluates each opponent response, then denies the opponent's first choice (you'd retreat the best-threatened piece). With 2+ threats (fork), you save one piece but the opponent gets their second-best capture.
 
-- **Non-capture checks**: any quiet move that gives check, detected via `gives_check()` before move application
-- **Pawn forks**: a pawn advance where the pawn's capture bitboard at the destination attacks 2+ enemy pieces in {N, B, R, Q, K}
-- **Knight forks**: a knight move where the knight's attack bitboard at the destination attacks 2+ enemy pieces in {R, Q, K}
+**Mystery-square recapture.** After denying the first-choice capture in a fork, the saved piece "teleports" to recapture on the second-choice square — modeling retreat + recapture (e.g., Bd3 saving bishop, then Bxe4 recapturing the fork pawn). This bends geometry but correctly models practical play.
 
-Budget rules keep the search bounded: each side's single tactical move is tracked via `white_tactic_used`/`black_tactic_used` flags threaded through recursion. Check evasions are free (when in check, all legal moves are generated — no stand-pat).
+**Center fork trick benchmark** (1.e4 e5 2.Nc3 Nf6 3.Bc4 Nxe4 4.Nxe4, Black with d5 fork):
 
-**Why one tactic per side.** Allowing unlimited tactical moves would explode the search tree — every quiet check or fork spawns a subtree. One per side is sufficient to detect the most common tactical patterns (Nc7+ forking K+R, d5 forking two minor pieces) while keeping node counts manageable. The budget ensures the extended Q-search remains effectively free relative to NN inference (<1% of wall time).
+| Q-search variant | Score (Black POV) | Assessment |
+|:---|---:|:---|
+| Basic (captures only) | -2.90 | Misses d5 entirely |
+| Extended (checks + forks) | -2.90 | Finds d5 but can't evaluate it |
+| + Null-move (deny first choice) | +0.10 | Correct — fork equalizes |
 
-**Why these three move types.** Non-capture checks are the highest-value tactical moves: they force the opponent to deal with check (often losing material). Pawn and knight forks are the next most common tactical patterns that pure capture search misses — a knight fork winning an exchange is invisible to capture-only Q-search because the fork move itself is quiet. Bishop and rook forks are rarer and harder to detect without full sliding-piece attack generation, so they're excluded from the budget-limited search.
+Validated on 200+ positions from the 2026 FIDE Candidates (Sindarov, Rounds 1-5): the extended Q-search diverges from basic in 8% of positions, and all major divergences correspond to real tactical features — knight check-forks, connected threats, hanging pieces after forced sequences.
 
-#### Null-move threat detection with "deny first choice"
+### Iterative widening
 
-Standard Q-search has a **stand-pat** assumption: at every node, the side to move can "choose" not to capture and accept the static eval. This is a lie when pieces are hanging — if you "do nothing," the opponent captures them. The extended Q-search replaces blind stand-pat with a **null-move probe**:
+The full extended Q-search can explode (130K nodes worst case). SEE pruning was tried but damaged accuracy — it correctly prunes QxP-when-defended but also prunes NxP-when-defended, which might initiate a fork trick. The solution is iterative widening (controlling captures-per-node): principal exchange first (1 capture, straight line), then cap=1 (adds checks), then cap=2+ (adds forks/null-move), stopping when a node budget is exceeded. Each level gives a complete, valid score; later levels refine it. Stand-pat at every level prevents forcing bad captures.
 
-1. **Pass the turn** to the opponent (one null-move per branch total, tracked by `white_null_used`/`black_null_used`)
-2. **Evaluate each opponent response** — all captures and tactical quiets, each scored recursively
-3. **Deny the opponent's first choice** — the pass represents making a quiet move that addresses the most urgent threat
+### Earlier attempt: Q-search grafting
 
-The "deny first choice" logic handles three cases:
+The first approach grafted Q-search trees onto the MCTS tree at expansion. Too expensive (~10× slower expansions), noisy values from poor alpha/beta bounds, and high complexity. **The lesson:** run Q-search once at leaf evaluation time as `forced_ext_pesto_balance()` — simpler, cheaper, and gives the value function a clean signal.
 
-- **0 threats**: Stand-pat holds. Position is quiet.
-- **1 threat**: Pass fully addresses it — you'd retreat the threatened piece. `adjusted_stand_pat = stand_pat`.
-- **2+ threats (fork)**: You can only save one piece. Deny the opponent's best capture; they get their second-best. The adjusted stand-pat drops accordingly.
+## 4. The Value Function: V = tanh(V\_logit + k · ΔM)
 
-**Why not a full recursive null-move.** The earlier approach ran a single recursive Q-search after the null-move, returning the opponent's best score. This was simpler but had a critical flaw: it assumed "doing nothing" meant losing the *best* piece, when in reality you'd save the best piece and lose the *second-best*. Evaluating captures individually and denying the first choice correctly models fork resolution.
+### Separate what's learnable from what's computable
 
-#### Mystery-square recapture
-
-The "deny first choice" alone still underestimates the side-to-move's resources in a fork. After d5 forks Bc4 and Ne4: deny dxc4 (save bishop), opponent plays dxe4 (capture knight). But the evaluation stops there — it doesn't see that the bishop, now on a "mystery square" after retreating, can recapture the pawn on e4 (e.g., via Bd3, dxe4, Bxe4). Without this recapture, the fork costs a full knight; with it, the fork costs knight minus pawn = one exchange.
-
-When there are 2+ opponent captures, the null-move probe adds a **mystery-square recapture step**:
-
-1. Opponent makes their second-choice capture (the one not denied)
-2. The saved piece (from the denied first-choice's target square) "teleports" to the capture landing square, recapturing the attacker
-3. The resulting position is evaluated with PeSTO
-
-This bends chess geometry — the saved piece moves from its current square to the capture square regardless of whether this is a legal piece move. But it correctly models what happens in practice: the saved piece retreats to *some* square from which it can recapture. In the center fork trick, this is exactly Bd3→Bxe4. In a knight fork of queen and rook, it's Q→(mystery)→Qx(knight's landing square).
-
-The `adjusted_stand_pat` uses the better of the raw second-choice score and the recapture-adjusted score, capped at the original static eval. This means:
-- If the recapture improves the evaluation (common in forks): use the recapture score
-- If the recapture makes things worse (rare): fall back to the raw second-choice
-- If neither threat matters (quiet position): stand-pat holds
-
-**Benchmark: center fork trick** (1.e4 e5 2.Nc3 Nf6 3.Bc4 Nxe4 4.Nxe4, Black to move with d5 fork available):
-
-| Q-search variant | Score (Black POV) | Nodes | Assessment |
-|:---|---:|---:|:---|
-| Basic (captures only) | -2.90 | 1 | Completely wrong — misses d5 |
-| Extended (checks + forks) | -2.90 | 6 | Finds d5 but can't evaluate it |
-| + Null-move (deny first choice) | +0.10 | 251 | Correct — fork equalizes |
-| + Mystery recapture | +0.10 | 251 | Correct with accurate floor |
-
-#### Empirical validation: 2026 FIDE Candidates (Sindarov's first 5 rounds)
-
-To test whether the extended Q-search correctly captures forcing tactical sequences, we evaluated every position in Sindarov's first five games of the 2026 FIDE Candidates tournament (Rounds 1–5, 200+ positions), comparing basic capture-only Q-search against the extended version. Positions where the two diverge by ≥0.5 pawns reveal where the extensions catch tactics that pure capture search misses.
-
-**Divergences found**: 16 out of 200+ positions (8%), broken down as:
-- 3 major (≥2.0 pawns), 5 significant (≥1.0), 8 notable (≥0.5)
-
-**Key findings:**
-
-| Game | Position | Basic | Extended | What the extension caught |
-|:---|:---|---:|---:|:---|
-| R3 (Pragg-Sindarov) | After 35.Qf7?? Rxc2+ | +2.13 | -5.01 | Devastating connected threats: after king evasion, Rxd2/Bxd2+ wins all White's pieces. Basic sees isolated captures; extended sees the chain. |
-| R5 (Nakamura-Sindarov) | After 14...Nxb4 | +1.05 | -2.10 | Knight on b4 has Nc2+ (check+fork) and Nd3+ threats. Basic is blind to non-capture checks; extended catches them immediately. |
-| R1 (Sindarov-Esipenko) | After 41.Re6 (final move) | -0.97 | +0.37 | Null-move detects that Black's pieces are under coordinated pressure; bishop retreat + recapture adjusts the evaluation. |
-| R2 (Sindarov-Bluebaum) | Rh7 (repetition) | +0.00 | +1.00 | Null-move detects rook threats on the 7th rank. Overestimate — position is drawn — but the threat detection itself is correct; the limitation is PeSTO's inability to assess whether the threats are convertible. |
-
-**What the extensions consistently catch:**
-- **Knight check-forks** (R5: Nc2+ forking king and rook) — invisible to capture-only search because the fork move is quiet
-- **Connected tactical threats** (R3: Rxc2+ followed by Rxd2) — basic q-search evaluates each capture in isolation; the null-move probe reveals the combined damage
-- **Hanging pieces after forced sequences** (R1: pieces left en prise after captures resolve)
-
-**What remains correctly outside scope:**
-- **Positional compensation** (R2: Bxf5+ sacrifice evaluated at -1.73 despite the game being drawn — the passed g6 pawn is full compensation, but assessing pawn structure is the NN's job)
-- **Multi-move quiet plans** (R5 pre-14.b4: both basic and extended evaluate the position as only slightly worse for White; discovering that b4 is a blunder requires full search depth, not leaf evaluation)
-
-**Conclusion:** The extended Q-search fires selectively (8% of positions) and is accurate when it fires — the three major divergences all correspond to real tactical features visible to grandmasters. The remaining evaluation gaps (positional compensation, long-range plans) are by design — Tier 3's neural network handles what the Q-search cannot.
-
-#### Iterative widening: bounded Q-search with progressive accuracy
-
-The full extended Q-search (captures + checks + forks + null-move + mystery recapture) can explode in highly tactical positions — 130K nodes in the worst case, because captures are explored at unlimited width. SEE (Static Exchange Evaluation) pruning was tried but damaged accuracy: it correctly prunes QxP-when-defended (-875 centipawns) but also prunes NxP-when-defended (-220 cp), which might initiate a fork trick. SEE evaluates exchanges on one square but is blind to cross-square tactics.
-
-The solution is **iterative widening** — analogous to iterative deepening, but controlling the branching factor (captures per node) instead of depth:
-
-| Level | Captures/node | Checks | Forks/null-move | Typical nodes | What it resolves |
-|:---|:---|:---|:---|:---|:---|
-| **Principal exchange** | 1 (best MVV-LVA only) | No | No | 1–5 | Principal exchange line: "what if both sides keep making the best capture?" A straight line, not a tree. |
-| **Cap=1** | 1 | 1 per side per branch (any move giving check) | No | 5–90 | Principal exchange + one tactical check per side + full check evasions. Catches Nc7+ forking K+R, back-rank mates, etc. |
-| **Cap=2+** | 2+ | 1 per side | Yes (null-move, deny-first-choice, mystery recapture) | 50–500 | Full fork detection, hanging piece threats, cross-square tactics. |
-
-The search runs iteratively: principal exchange first (very cheap), then cap=1 (adds checks), then cap=2 (adds forks/null-move), stopping when cumulative nodes exceed a budget `N_max`. Each level gives a complete, valid score, and later levels refine it.
-
-**Why checks are separate from the capture cap.** A non-capture check (like Nc7+ forking king and rook) is qualitatively different from a capture — it forces a response and often wins material indirectly. It doesn't compete with captures for MVV-LVA slots; it's an additional tactical dimension. At each node (when not in check), the side to move explores up to `cap` captures PLUS one checking move, for `cap+1` children total.
-
-**Why forks require cap≥2.** The deny-first-choice mechanism needs two opponent captures to work: one to deny (save the best piece) and one for the opponent's consolation capture. With cap=1, the null-move probe sees only one opponent capture — the "single threat" rule says the pass fully saves, which is correct for single hanging pieces but can't model forks. Cap=2 activates the full fork machinery.
-
-**Stand-pat at every level.** At all levels, the side to move can "stand pat" — accept the static PeSTO eval and not capture. This prevents the search from forcing bad captures. In the center fork trick setup (after 3.Bc4), Black's Nxe4 has negative SEE (-220 cp, loses a knight for a pawn). The principal exchange correctly rejects it via stand-pat. Only at cap≥2, where the d5 fork follow-up is visible, does the exchange become worthwhile.
-
-**Center fork trick across levels** (1.e4 e5 2.Nc3 Nf6 3.Bc4, Black to move):
-
-| Level | Score (Black POV) | Nodes | What it sees |
-|:---|---:|---:|:---|
-| Principal exchange | -0.22 | 1 | Stand pat. Rejects Nxe4 (loses knight). |
-| Cap=1 | -0.22 | 1 | Same — no checks available for Black. |
-| Cap=2+ (full) | ~-0.10 | ~200 | Nxe4 Nxe4 d5! Fork detected, mystery recapture → near equality. |
-
-The visit-ordering component (MVV-LVA) is a minor addition: captures are visited in Most-Valuable-Victim / Least-Valuable-Attacker order on their first visit. After the first visit, normal UCB selection takes over.
-
-### Earlier attempt: Q-search grafting at expansion
-
-The first approach was more ambitious: at every MCTS expansion, run a Q-search rooted at the expanded position and "graft" the Q-search tree onto the MCTS tree — Q-search leaf values became initial values for MCTS children.
-
-**What went wrong.** Q-search at every expansion was expensive (~10x slower expansions), and the grafted values were noisy — Q-search with alpha-beta in a random MCTS leaf often had poor alpha/beta bounds. The complexity was high (converting Q-search nodes to MCTS nodes, handling transpositions between the two trees) and the benefit was marginal.
-
-**The lesson:** The Q-search doesn't need to run at expansion time or graft into the tree structure. Running it once at leaf evaluation time — as `forced_ext_pesto_balance()` — is simpler, cheaper, and gives the value function a clean positional+material signal. MVV-LVA visit ordering handles the remaining tactical concern (which captures to try first).
-
-## 4. The Value Function: V = tanh(V\_logit + k * DeltaM)
-
-### The insight: separate what's learnable from what's computable
-
-Standard AlphaZero learns everything end-to-end: the NN must discover that material matters, learn piece values, and learn to evaluate positions — all from game outcomes. This works, but it's sample-inefficient. The NN spends millions of games rediscovering that a queen is worth more than a pawn.
-
-**The key idea:** Factor the evaluation into a *computable* component (material after forced exchanges) and a *learnable* component (positional factors the NN must discover).
+Standard AlphaZero learns everything end-to-end, spending millions of games rediscovering that a queen is worth more than a pawn. The key idea: factor evaluation into computable and learnable components.
 
 $$V_{final} = \tanh(V_{logit} + k \cdot \Delta M)$$
 
-- $V_{logit}$ (NN output, unbounded): positional assessment only — piece activity, king safety, pawn structure
-- $\Delta M$ (computed exactly): PeSTO evaluation after forced tactical sequences via `forced_ext_pesto_balance()`
+- $V_{logit}$ (NN output, unbounded): positional assessment — piece activity, king safety, pawn structure
+- $\Delta M$ (computed exactly): PeSTO evaluation after forced exchanges via `forced_ext_pesto_balance()`
 - $k$ (NN output, positive): how much material should matter in this position
 
-### Why forced\_pesto\_balance(), not simple piece counting
-
-A position might have equal material (P=P) but after forced exchanges end up +3 (winning a piece). Simple piece counting misses hanging pieces, discovered attacks, and forced exchange sequences. `forced_ext_pesto_balance()` runs an extended PeSTO piece-square-table quiescence search — tapered positional+material evaluation using standard RofChade PST values, no additional bonuses (bishop pair, king safety, mobility) — to resolve forced captures, non-capture checks, and forks. This gives $\Delta M$ a richer evaluation than raw piece counts: a centralized knight is worth more than a cornered one, a passed pawn on the 7th rank scores higher than one on the 3rd, and a knight fork winning an exchange is detected even though the fork move itself is quiet.
-
-### Why the NN returns V\_logit (unbounded), not tanh(V\_logit)
-
-If the NN returned a bounded value in [-1, 1], adding $k \cdot \Delta M$ would saturate quickly. With unbounded $V_{logit}$, the NN can learn arbitrary positional offsets that interact smoothly with the material term. The final $\tanh$ constrains the output at the end.
+The NN returns $V_{logit}$ unbounded (not pre-squashed) so it can learn arbitrary positional offsets that interact smoothly with the material term. The final $\tanh$ constrains output at the end.
 
 ### Dynamic k: learned confidence in material
 
-Not all positions are equally material-sensitive. In a closed Sicilian with locked pawns, material imbalances matter less than in an open position.
+$k = 0.47 \cdot \text{Softplus}(k_{logit})$ where $k_{logit}$ is a single learned scalar. The 0.47 coefficient is Texel-calibrated so PeSTO centipawn evaluations map to calibrated win probabilities. At initialization ($k_{logit} = 0$): $k \approx 0.326$.
 
-$k$ is computed as $0.47 \cdot \text{Softplus}(k_{logit})$ where $k_{logit}$ is a single learned scalar (`nn.Parameter`). The 0.47 coefficient is Texel-calibrated so that PeSTO centipawn evaluations map through $\tanh$ to calibrated win probabilities. At initialization ($k_{logit} = 0$): $k = 0.47 \cdot \ln 2 \approx 0.326$.
+### k architecture evolution
 
-### k architecture evolution: from per-position networks to a global scalar
+**v1: Per-position from backbone features.** Overfitted to specific positions — deep features encoded too much detail.
 
-The first implementation computed $k$ from the backbone's penultimate features (shared with the value head). This caused $k$ to overfit to specific positions — the deep features encoded too much position-specific detail.
+**v2: Separate shallow input network** (3×3 conv → BN → GAP → FC). Too shallow — a "bag of local patterns" that couldn't reliably detect king safety, pawn structure, or open files.
 
-The second design used a **separate shallow input network** for $k$: a single 3x3 conv → BN → global average pool → two linear layers. This was too shallow — one 3x3 conv + global average pool is a "bag of local patterns" that knows what local patterns exist but not where they are. It cannot reliably detect king safety (diluted to 1/64 of signal), pawn structure (multi-hop), or open files (long-range).
+**v3: Handcrafted features + king patches** (12 scalar features + two 5×5 king-centered patches, ~22K params). Worked well but dynamic king-patch extraction was CUDA-hostile, and the position-dependent modulation could be absorbed by the value head.
 
-The third design used **handcrafted scalar features + king patches**: 12 scalar features (pawn counts, piece counts, queen presence, pawn contacts, castling rights, king rank, bishop square-color presence) + Q-search completion flag + two 5×5 king-centered patches compressed via FC(300→32), combined via FC(77→32→1). Total: ~22k parameters. This worked well but had two drawbacks: (1) the dynamic king-patch extraction (per-sample argmax + 5×5 gather) was hostile to CUDA reimplementation for a future GPU-resident MCTS kernel, and (2) the position-dependent modulation it provided could be absorbed by the value head itself.
+**v4 (current): Global scalar k + q_result as value head input.** K-head removed entirely (−21,536 params). Single `nn.Parameter` scalar plus $\Delta M$ concatenated as a 65th input to the value head FC (widened 64→65). The additive path ($k \cdot \Delta M$) sets a global baseline; the learned path (FC weights on $\Delta M$) provides position-dependent modulation. Making $k$ position-independent is acceptable because the position-dependent part is learned implicitly through the value head.
 
-**Current design: global scalar k + q_result as value head input.** The K-head was removed entirely (−21,536 parameters) and replaced with:
-1. A single `nn.Parameter` scalar $k_{logit}$, initialized to 0 → $k = 0.326$ (Texel-calibrated)
-2. The Q-search result ($\Delta M$) concatenated as a 65th input to the value head's first FC layer (widened from FC(64→256) to FC(65→256))
+### Classical fallback
 
-This preserves both paths for material information to influence the value:
-- **Additive path** ($k \cdot \Delta M$): a global, position-independent baseline trust level
-- **Learned path** ($\Delta M$ as input to FC): the value head learns position-dependent adjustments through its existing weights — in quiet endgames it can learn that $\Delta M$ is uninformative, in sharp middlegames it can learn to rely on it heavily
-
-The key insight: making $k$ position-independent is acceptable because the position-dependent part of "how much to trust material" is learned implicitly through the value head FC layers. The scalar $k$ sets the global operating point; the network adjusts around it.
-
-### Classical fallback: V\_logit=0, k=0.326
-
-With no neural network, the engine uses $V_{logit} = 0$ (no positional knowledge) and $k = 0.326$ (Texel-calibrated material weight), giving $V_{final} = \tanh(0.326 \cdot \Delta M)$. This matches the NN's initialization — a freshly initialized network produces identical values to the classical fallback, ensuring smooth bootstrapping.
+With no NN: $V_{logit} = 0$, $k = 0.326$, so $V_{final} = \tanh(0.326 \cdot \Delta M)$. A freshly initialized network produces identical values, ensuring smooth bootstrapping.
 
 ## 5. OracleNet Architecture
 
-### SE-ResNet backbone
+**SE-ResNet backbone.** Configurable depth and width (default: 6 blocks, 128 channels, ~2M params). SE attention in each block learns per-position channel importance.
 
-Configurable depth and width (default: 6 residual blocks, 128 channels, ~2M params; `--num-blocks 2 --hidden-dim 64` gives ~240K params for faster iteration). Squeeze-and-Excitation (SE) attention in each block lets the network learn which feature channels are important for each position — essentially a per-position "volume knob" for different types of features (material patterns, king safety features, pawn structure features).
+**Board encoding.** 17×8×8 in side-to-move perspective. Planes 0-5: STM pieces; 6-11: opponent; 12: en passant; 13-16: castling (STM-relative). When Black moves, ranks are flipped — the network only learns from one perspective.
 
-### Board encoding: STM perspective
+**Policy head.** 73 planes × 64 squares = 4672 logits (AlphaZero encoding: 56 queen slides + 8 knight + 9 underpromotions).
 
-17x8x8 input tensor in side-to-move (STM) perspective:
-- Planes 0-5: STM pieces (P, N, B, R, Q, K)
-- Planes 6-11: opponent pieces
-- Plane 12: en passant
-- Planes 13-16: castling rights (STM-relative)
+**Value head.** 1×1 conv → BN → flatten (64) → concat($\Delta M$) → FC(65→256) → FC(256→1). Output is unbounded $V_{logit}$.
 
-When Black is to move, ranks are flipped so STM pieces always appear at the "bottom." This halves the effective state space — the network only needs to learn from one perspective.
-
-### Policy head: 4672-move AlphaZero encoding
-
-73 planes x 64 squares = 4672 logits. Planes encode direction (8 queen directions x 7 distances = 56) + 8 knight moves + 9 underpromotions.
-
-### Value head: symbolic residual design
-
-1x1 conv → BN → flatten (64 features) → concat(q_result) → FC(65→256) → FC(256→1). The Q-search result ($\Delta M$) is fed as a direct 65th input feature, giving the value head position-dependent control over material trust. The output is $V_{logit}$ (unbounded). This feeds into the symbolic residual formula with the independently-computed $k$ and $\Delta M$.
-
-### k: global scalar
-
-Single `nn.Parameter` scalar $k_{logit}$, output via $0.47 \cdot \text{softplus}(k_{logit})$ (Texel-calibrated). Sets a global baseline trust level in material. Position-dependent modulation is absorbed by the value head FC which receives $\Delta M$ as a direct input. See Section 4 for the architectural evolution.
-
-### Zero initialization
-
-All output layers ($V_{out}$, policy head) are initialized to zero. $k_{logit}$ is initialized to 0 (giving $k = 0.326$):
-- **Policy:** $\text{softmax}(0, 0, ...) = $ uniform distribution (explore everything equally)
-- **Value:** $V_{logit} = 0$, so $V_{final} = \tanh(k \cdot \Delta M)$ (pure PeSTO evaluation)
-- **k:** $k_{logit} = 0 \Rightarrow k = 0.326$ (Texel-calibrated material weight)
-
-This means a freshly initialized network immediately produces meaningful behavior: uniform exploration with material-aware evaluation.
+**Zero initialization.** All output layers initialized to zero: policy = uniform exploration, value = pure PeSTO evaluation, $k$ = 0.326.
 
 ## 6. Training Pipeline Evolution
 
 ### Gating: from fixed threshold to SPRT
 
-**v1: Fixed threshold (55% winrate).** Simple but noisy — a 55% result in 100 games is barely significant. Promising but weak improvements were rejected, while lucky noise was occasionally accepted.
+**v1: Fixed 55% winrate.** Noisy — barely significant in 100 games. **v2: One-sided binomial (p<0.05).** Better rigor but still problematic with small samples. **v3 (current): SPRT.** Sequential Probability Ratio Test with trinomial GSPRT (matching fishtest). Clear improvements terminate in ~30 games; marginal cases use up to 800. Saves wall-clock time while maintaining statistical rigor.
 
-**v2: One-sided binomial test (p < 0.05).** Better statistical rigor but still problematic with small sample sizes. A candidate winning 6/10 games would be rejected, while one winning 30/50 might be accepted despite similar effect sizes.
+### Replay buffer: from clear-on-accept to Elo-weighted
 
-**v3: SPRT early stopping (current).** Sequential Probability Ratio Test with trinomial GSPRT matching fishtest's implementation. Tests "candidate is ≥ elo1 Elo stronger" vs. "candidate is ≤ elo0 Elo stronger." Clear improvements terminate in ~30 games; marginal cases use up to 800. This saves significant wall-clock time while maintaining statistical rigor.
+**v1: Clear buffer on model acceptance.** Caused severe overfitting on the first post-acceptance iteration. **v2: Sliding window (FIFO).** Stable but uninformed. **v3: Recency-weighted.** Exponential half-life — arbitrary and disconnected from actual strength. **v4 (current): Elo-based strength weighting.** Each acceptance chains the SPRT winrate into cumulative Elo. Training data is weighted by expected score: $w_i = n_i \cdot 2 / (1 + 10^{(\text{Elo}_{max} - \text{Elo}_i) / 400})$. A 55% winrate gap (~35 Elo) yields ~1.2:1 ratio (not 7:1). No data is fully discarded. Eval game data from both sides is ingested, with the losing side tagged at lower Elo.
 
-**Why 800 eval games.** With 100 eval games and a high draw rate (~84% at 100 sims), even a WR of 0.575 yields p ≈ 0.067 — not enough to reject the null hypothesis. A one-sided binomial test needs ~275 games for 80% power to detect a 53% true WR. The default of 800 games provides comfortable statistical power while SPRT early stopping keeps the average cost much lower for clear-cut results.
+### Training data scheduling
 
-### Replay buffer: from clear-on-accept to sliding window
+**v1: Fixed minibatch count.** Overfitting early (small buffer), underfitting late (large buffer). **v2: Adaptive count targeting ~1.5 epochs.** Better, but random sampling with replacement still caused redundant/missed positions. **v3 (current): Epoch-based with Elo-weighted inclusion.** Each epoch iterates the buffer once; each position's inclusion probability is the odds ratio of its model's expected score. Max-Elo data: 100% inclusion. 100 Elo weaker: 56%. 200 Elo: 32%. Every max-Elo position is trained on exactly once per epoch — no wasted or redundant data.
 
-**v1: Clear buffer on model acceptance.** Every time a new model was accepted, the entire replay buffer was cleared. Rationale: old data was generated by a weaker model. Problem: the first training iteration after acceptance had very little data, causing severe overfitting.
+### Adaptive epochs
 
-**v2: Sliding window.** FIFO eviction — oldest games are removed when capacity is exceeded, regardless of model acceptance. The buffer always contains a mix of recent and older data.
+90/10 train/validation split with patience-1 early stopping, up to `--max-epochs` (default 10). Early generations (small buffers) typically select 2-3 epochs; later generations with large buffers need only 1. Automatically adjusts where a fixed count would either underfit early or overfit late.
 
-**v3: Recency-weighted sampling.** Sliding window with exponential half-life decay across model generations. Recent games sampled more frequently, old games still contribute. Problem: the half-life parameter was arbitrary and disconnected from actual model strength — a 55% winrate gap (barely detectable) produced the same 7:1 sampling ratio as a massive strength improvement if the same number of positions separated them.
+### Train-from-latest
 
-**v4: Elo-based strength weighting (current).** Each model acceptance chains the SPRT winrate into a cumulative Elo rating: $\Delta_{Elo} = -400 \cdot \log_{10}(1/WR - 1)$. Training data is weighted by expected score against the current best model:
+When a candidate is rejected by SPRT, it's probably slightly better than the current best — just not provably so. Training the next generation from the last *accepted* checkpoint wastes this incremental progress. Initial experiments confounded train-from-latest with other changes, leading to a temporary revert. Controlled comparison showed train-from-best caused repeated training from the same stale checkpoint (gens 3-5 all from gen_2.pth, progressively worse). **Current approach:** always resume from the most recent candidate. Early stopping prevents cumulative overfitting.
 
-$$w_i = n_i \cdot 2 \cdot \frac{1}{1 + 10^{(Elo_{max} - Elo_i) / 400}}$$
+### Data augmentation
 
-This produces sampling ratios proportional to actual measured strength differences. A 55% winrate gap (~35 Elo) yields a ~1.2:1 ratio (not 7:1). A 200 Elo gap yields ~0.48x weight. No data is ever fully discarded — even data from much weaker models contributes at a reduced rate. The weighting adapts automatically: rapid improvement produces steeper gradients, while plateaus produce near-uniform sampling. Eval game data from both sides is ingested after each evaluation; the losing side's data is tagged with a lower Elo based on the measured winrate, so the odds-ratio weighting automatically downweights it.
+Chess has horizontal flip symmetry when castling rights are absent; pawnless castling-free positions have the full D4 dihedral group (8 transforms). All equivalent transforms are expanded during loading (not randomly sampled). Positions without castling get 2× training signal; pawnless endgames get 8×. This overweighting compensates for their underrepresentation in self-play data and is especially valuable in KOTH where voluntary loss of castling rights is strategically important.
 
-### Training data scheduling: from fixed minibatches to epoch-based inclusion
+### Optimizer
 
-**v1: Fixed minibatch count.** Every generation trained for the same number of minibatches regardless of buffer size. This caused overfitting in early generations (small buffer, many passes over same data) and underfitting in late generations (large buffer, most positions never seen).
-
-**v2: Adaptive minibatch count.** Scaled minibatches to target ~1.5 epochs over the buffer, capped at a configurable maximum. Better, but still used random sampling with replacement — positions could be sampled multiple times while others were never seen. The sampling weights (Elo-based expected score) also didn't prevent high-Elo positions from being trained on repeatedly.
-
-**v3: Epoch-based training with Elo-weighted inclusion (current).** Each epoch iterates over the buffer exactly once, but each position's *inclusion probability* is determined by its model's Elo:
-
-$$p_{include} = \min\left(1, \frac{E_i}{1 - E_i}\right) \quad \text{where} \quad E_i = \frac{1}{1 + 10^{(\text{Elo}_{max} - \text{Elo}_i) / 400}}$$
-
-This is the odds ratio of the expected score — the probability of winning divided by the probability of losing. Max-Elo data has 100% inclusion. At 100 Elo weaker: 56%. At 200 Elo: 32%. At 400 Elo: 10%. The number of epochs per generation is configurable via `--max-epochs` (default: 10), with validation-based early stopping selecting the optimal count automatically.
-
-**Why odds ratio, not expected score.** Expected score ranges from 0.5 (equal) to ~0 (much weaker), which would include only half of max-Elo data. The odds ratio maps equal strength to 1.0 (full inclusion) and decays smoothly to 0 for very weak data, giving the desired semantics: "include this position with probability proportional to how much we trust the model that generated it."
-
-**Why this is better than weighted sampling.** With weighted random sampling, a position from the strongest model might be sampled 3 times while a position from a slightly weaker model is never seen — pure randomness. Epoch-based inclusion guarantees that every max-Elo position is trained on exactly once per epoch, while older data is deterministically downsampled. This eliminates both wasted data (positions evicted before being trained on) and redundant training (positions sampled multiple times in one pass).
-
-**How many epochs?** The optimal number depends on the ratio of model capacity to buffer size. AlphaZero and ELF OpenGo train on thousands of GPUs generating data far faster than they consume it (ELF reports a 13:1 self-play-to-training ratio), so each position is rarely seen twice. Running on a single GPU, we need to extract maximum signal from every position — multiple epochs are the natural lever.
-
-Early experiments with the 2M parameter model at 1 epoch showed rapid initial gains (+67 Elo in 2 generations) followed by 4 consecutive rejections — the model had capacity to learn more but wasn't getting enough gradient updates per generation. Switching to 2 epochs broke through the plateau: the 2-epoch run reached +88 Elo in 3 generations where the 1-epoch run stalled at +67. The risk of overfitting increases with more epochs, but with 100K+ samples and a 2M parameter model that's clearly underfitting, 2 epochs is well within the safe regime.
-
-### Adaptive epochs: validation-based early stopping (current)
-
-Rather than fixing the epoch count as a hyperparameter, the current approach uses a 90/10 train/validation split with patience-1 early stopping. Each generation trains up to `--max-epochs` (default 10), evaluating on the held-out 10% after each epoch. If validation loss fails to improve for 1 epoch, training stops and the best-epoch checkpoint is restored. When `--max-epochs 1` is specified, the validation split is skipped entirely (single epoch trains on 100% of data).
-
-**Why this is better than a fixed count.** The optimal epoch count varies across training: early generations have small buffers and benefit from multiple passes (the model typically selects 2-3 epochs), while later generations with large buffers may need only 1 epoch before validation loss plateaus. A fixed count either underfits early or overfits late. Adaptive selection automatically adjusts.
-
-**Empirical results.** In the 2M parameter scale-up experiment, the adaptive approach consistently selected 2 epochs in early generations (gens 1-6, small buffer) and 1 epoch in later generations (gens 7+, buffer >100K positions). This matched the manually-tuned finding that "2 epochs is about right" while automatically transitioning as the buffer grew.
-
-### Train-from-latest: reverted, then re-enabled
-
-**The hypothesis.** When a candidate is rejected by SPRT, it's probably slightly better than the current best — just not statistically provably so. Discarding it and training the next generation from the last *accepted* checkpoint wastes this incremental progress. Training from the most recent candidate (accepted or rejected) should produce a continuous improvement trajectory.
-
-**First attempt: reverted.** An early "train-from-latest" run with adaptive epochs underperformed a "train-from-best" run with fixed 2 epochs (152 Elo at gen 15 vs 340 Elo at gen 27). The diagnosis was cumulative overfitting: each rejection compounds training on the same data. This led to reverting to train-from-best.
-
-**Re-evaluation.** Later analysis revealed the comparison was confounded — the two runs differed in epoch count (adaptive vs fixed 2), not just resume strategy. A controlled comparison showed train-from-best caused candidates to repeatedly train from the same base without building on previous learning. In one run, gens 3-5 all resumed from gen_2.pth and produced progressively worse candidates (0.482, 0.449 winrate). Meanwhile, runs that used train-from-latest showed the expected pattern: gen 1 rejected at 0.511, gen 2 built on it and jumped to +50.5 Elo with 0.572 winrate.
-
-**Current approach (train-from-latest).** Always resume from the most recent candidate, whether accepted or rejected. Early stopping prevents cumulative overfitting — if the latest candidate is already well-trained on the buffer, validation loss won't improve and training stops after 1 epoch. The key insight: a rejected candidate at 51% winrate is almost certainly better than the current best, just not provably so. Starting over from the accepted checkpoint throws away real learning.
-
-### Data augmentation: exploiting board symmetries
-
-Chess has a horizontal flip symmetry (a-file ↔ h-file) that holds whenever castling rights are absent. Pawnless, castling-free positions additionally have the full D4 dihedral symmetry (4 rotations x 2 reflections = 8 transforms). The augmentation system classifies each training sample into one of three symmetry groups:
-
-- **D4** (no pawns, no castling, no en passant): expand into all 8 dihedral transforms
-- **Horizontal flip** (no castling): expand into original + h-flip (2 samples)
-- **None** (castling rights present): no augmentation
-
-Both the board tensor and the 4672-element policy vector must be transformed consistently — each spatial transform induces a permutation on the policy indices (queen slide directions rotate, knight move indices permute, underpromotion capture directions swap). The permutation tables are precomputed at module load time.
-
-**Full expansion, not random sampling.** The earlier approach randomly selected one of $N$ equivalent transforms and set weight $= 1/N$, which systematically underweighted symmetric positions (expected contribution $1/N$ vs. $1.0$ for non-symmetric positions). The current approach expands each sample into *all* equivalent transforms during chunk loading, with uniform weight. This means positions without castling rights receive 2x the training signal, and rare pawnless endgames receive 8x. This overweighting is a feature: endgames are underrepresented in self-play data (most samples come from openings and middlegames where castling rights exist) and are precisely the positions where accurate evaluation matters most for converting advantages.
-
-**Especially sensible for KOTH.** In King of the Hill, many critical positions involve voluntary loss of castling rights — the king *wants* to be within striking distance of the center squares. These positions are strategically important and benefit from the 2x augmentation. Meanwhile, D4-eligible positions (pawnless, no castling) are even rarer than in standard chess, since many KOTH games end with a king-march victory before reaching a pawnless endgame. So the 8x overweighting applies to a vanishingly small fraction of training data.
-
-### Optimizer: Adam → Muon
-
-Adam was the initial default. Muon (Momentum + Newton-Schulz orthogonalization) converges faster on ResNet-style architectures — it normalizes gradient updates using Newton-Schulz iterations, which helps with the ill-conditioning typical of deep convnets. Falls back to AdamW for 1D parameters (biases, batch norm).
+Adam → Muon (Momentum + Newton-Schulz orthogonalization). Converges faster on ResNet-style architectures by normalizing gradient updates. Falls back to AdamW for 1D parameters.
 
 ### Multi-variant training: tried and retired
 
-**The problem.** Standard joint training updates all three heads (policy, value, k) simultaneously. When a candidate fails SPRT, it's unclear *why* — did the policy get worse? Did the value head overfit? Did improving one head degrade another?
-
-**The experiment.** Each generation trained three variants from the same checkpoint:
-
-- **Policy-only:** freeze value + k heads, train only the policy head
-- **Value-only:** freeze policy head, train only value + k heads
-- **All-heads:** standard joint training
-
-Each variant was evaluated independently via SPRT. The best passing variant was promoted.
-
-**What the data showed.** Over 23 generations of local testing, policy-only was consistently the weakest variant (average WR 0.474 — *worse* than the previous generation). Value-only and all-heads tied for best. Policy-only never outperformed all-heads in a single generation. The diagnostic value was real but the compute cost was not justified: 3 variants × 800 eval games = 2,400 evaluation games per generation, tripling the eval overhead.
-
-**Current default: single-variant (all-heads only).** Joint training is the default (`--multi-variant` flag available to opt back in). This cuts per-generation wall time by ~60% while losing no measurable strength. The lesson: with a well-designed value function ($V_{logit} + k \cdot \Delta M$), joint training is stable — the feared interference between heads didn't materialize.
+Trained three variants per generation (policy-only, value-only, all-heads) to diagnose SPRT failures. Over 23 generations, policy-only was consistently worst (avg WR 0.474). All-heads and value-only tied. The diagnostic value was real but 3× eval cost was not justified. **Current: single-variant (all-heads only).**
 
 ### Evaluation: proportional-or-greedy mixing
 
-**The problem.** AlphaZero-style proportional move selection (sampling from visit counts) adds noise that obscures model differences. Two models might produce very different search trees but — by random sampling — end up playing similar moves, making SPRT evaluation less sensitive.
-
-**v1: Fixed cutoff.** Proportional sampling for the first 10 plies, then pure greedy (most-visited child). Simple and effective, but the hard discontinuity is arbitrary and greedy play after ply 10 produces identical games from identical positions — reducing training data diversity.
-
-**v2: Top-p nucleus sampling (tried and replaced).** Decaying nucleus: p = 0.95^(move-1), sampling from the top-p fraction of moves by visit count. Smooth transition, but nucleus boundaries are arbitrary — with p=0.3, the 2nd-best move might be much weaker than the 1st yet still gets sampled 20% of the time. Empirically, this added too much noise: runs with top-p=0.95 showed 14+ consecutive SPRT rejections at plateaus where the old greedy approach had broken through.
-
-**v3: Proportional-or-greedy mix (current).** With probability p = 0.90^(move-1), play a proportional move (visits-1 distribution over all moves); with probability 1-p, play greedy (most-visited). This has clean semantics: greedy moves provide strong SPRT signal (directly testing strength), while proportional moves add diversity for training data. By move 15, ~80% of moves are greedy. No arbitrary nucleus boundaries — when you explore, you explore broadly; when you exploit, you play the best move. Forced wins are always played deterministically regardless of move number.
+**v1: Fixed cutoff** (proportional for 10 plies, then greedy). Simple but arbitrary. **v2: Top-p nucleus.** Too noisy — 14+ consecutive SPRT rejections at plateaus. **v3 (current): Proportional-or-greedy mix.** With probability $0.90^{(\text{move}-1)}$, play proportional; otherwise greedy. By move 15, ~80% greedy. Clean semantics: greedy tests strength, proportional adds diversity. Forced wins always played deterministically.
 
 ### Evaluation game data reuse
 
-**The problem.** Each generation runs 50-800 MCTS evaluation games (candidate vs current model) purely for gating. These games run full MCTS searches with policy outputs at every move, but all position data is discarded — only W/L/D is kept. This is wasted training data. Worse, eval games actually produce *higher quality* samples than self-play: each move starts a fresh MCTS search (no subtree reuse between moves), making samples more independent.
+Eval games (50-800 per generation) run full MCTS searches but traditionally discard position data. Now both sides' training samples are collected. If the candidate wins SPRT, both sides' data enters the buffer; if rejected, only the current model's data is kept. A typical SPRT evaluation yields ~7,500 training samples at zero marginal cost — ~75% more data per generation.
 
-**The solution.** Evaluation games now collect training samples by default. At each move, the MCTS root's visit-count distribution becomes the policy target and `forced_ext_pesto_balance()` provides the material scalar — the same extraction used by self-play. Samples are partitioned by which model was side-to-move: candidate's moves go to one vector, current model's moves to another.
+### Eval-only mode
 
-**Selective ingestion based on gating outcome.** If the candidate wins SPRT: both sides' data is added to the replay buffer (the candidate is stronger, and the current model's data is still valid). If the candidate loses: only the current model's data is kept — the rejected candidate may be overfit or degenerate, so its policy targets could be harmful. The current model's data is always useful regardless of outcome, since by definition it represents the best known model.
+Since eval games produce training data for free, self-play is redundant after initial buffer seeding. With `--skip-self-play`, the loop after gen 1 becomes: train → eval (up to 800 games, producing data) → gate → ingest. Cuts per-generation wall time roughly in half.
 
-**Elo tagging.** Candidate samples are tagged with the newly accepted model's cumulative Elo, and current samples with the previous model's Elo. This integrates naturally with the Elo-based strength weighting — eval data from a newly accepted model receives proportionally higher sampling weight, while data from the previous model is downweighted by exactly the measured strength gap.
+## 7. GPU-Resident MCTS
 
-**Cost-benefit.** A typical SPRT evaluation (mean ~75 games, ~100 positions per game) yields ~7,500 training samples — roughly equivalent to 75 self-play games but at zero marginal compute cost (the MCTS searches were already being run for evaluation). With 100 self-play games per generation, this represents a ~75% increase in training data per generation for free.
+### Motivation
 
-### Eval-only mode: skipping self-play after gen 1
+In the CPU implementation, each MCTS simulation requires a CPU→GPU round-trip for NN inference. At 400 sims/move, inference dominates wall time (84%). The solution: move the entire MCTS loop onto the GPU as a persistent CUDA kernel — select→expand→evaluate→backup with no CPU interaction during search.
 
-Since eval games produce training data at zero marginal cost, self-play is redundant after the initial buffer seeding. The MCTS training signal (visit-count policy targets, game-outcome value targets) comes from the engine's own search regardless of opponent — the opponent only determines which positions arise. Eval games actually produce *more* data (up to 800 games vs 100 self-play) at higher quality (greedy play after ply 10, fresh MCTS search per move).
+### Architecture simplification
 
-With `--skip-self-play`, the loop after gen 1 becomes: train on buffer → eval (800 games, producing training data) → gate → ingest eval data. Gen 1 always runs self-play to seed the buffer. This cuts per-generation wall time roughly in half by eliminating the self-play phase.
+Deep symbolic searches (mate-in-5, KOTH-in-3) are replaced by lightweight GPU-side gates: mate-in-1 (exact terminal detection) and KOTH-in-1 (king on center or one move away). Deeper patterns are expected to be learned by the NN. The quiescence search uses the principal exchange variant (follow single best MVV-LVA capture — straight line, ~1-5 nodes, zero warp divergence, register-resident PeSTO eval). Full iterative-widening Q-search remains available CPU-side.
 
-## 7. Performance Optimizations
+### SE-ResNet optimization history
 
-### Incremental Zobrist hashing
+The GPU forward pass went through four implementations. The initial warp-cooperative path (32 threads, im2col to global scratch) proved correctness but was 325× slower than projected. Block-cooperative scalar (256 threads, shared-memory activations, direct conv3x3) achieved 9.52 ms — 13.7× faster. TC im2col (wmma FP16 GEMM replacing scalar conv) reached 3.65 ms but im2col gather still dominated. The final TC shifted-copy path decomposes conv3x3 into 9 dense GEMMs by kernel position, building shifted copies via bit operations only — no integer division, no staging. Loop reorder (shifts outer, N_tiles inner) reduced shifted copies from 36→9 per conv. **Result: 1.51 ms forward pass, 1.64 ms/sim** (6.3× faster than scalar). At 36 blocks on RTX 5060 Ti: **19 ms for 400 simulations** (44× faster than CPU+LibTorch baseline of 840 ms).
 
-Each move XOR-updates the hash rather than recomputing from scratch. This makes hash updates O(1) instead of O(number of pieces). Critical for MCTS where millions of positions are hashed per second.
+### Transformer: hybrid TC/scalar
 
-### Clone-free legality checking
+A pre-LayerNorm transformer (current: 12 layers, D=128, 4 heads, FFN 128→512→128, ~2.4M params) runs as an alternative architecture via `--arch transformer`. Same input/output/tiered MCTS integration.
 
-`is_legal_after_move()` checks if a move leaves the king in check without cloning the board. It applies the move, checks legality, then undoes it in-place. This avoids the allocation overhead of `Board::clone()` which was a hot path in move generation.
+The forward pass uses a hybrid TC/scalar approach. Q/K/V projections and FFN use wmma Tensor Cores (FP16 input, FP32 accumulation). QK^T, softmax, and attn×V stay scalar due to workspace memory constraints. The key enabler: `buf_out` (LayerNorm output) is stored in FP16, freeing 16 KB of shared memory for a dedicated TC staging region while keeping total shared memory at 89 KB (under the 99 KB hardware limit). The FP16 intermediate is numerically safe — it only feeds linear projections which convert to FP16 anyway for wmma. LayerNorm and softmax process all 64 tokens in parallel via 4-thread warp-shuffle groups.
 
-### Pseudo-legal move validation
+### Two architectures, two scaling regimes
 
-`is_pseudo_legal()` validates transposition table moves without generating all legal moves. Given a move from the TT, it checks basic consistency (right color piece on source square, target square not occupied by friendly piece, etc.) in O(1). If valid, the move can be used directly.
-
-### SeeBoard for SEE
-
-Static Exchange Evaluation (SEE) uses a lightweight `SeeBoard` struct instead of cloning the full `Board`. `SeeBoard` contains only the minimum state needed for exchange evaluation — occupancy bitboards and piece types.
-
-## 8. GPU-Resident MCTS
-
-### Motivation: CPU→GPU data transfer dominates
-
-In the CPU implementation, each MCTS simulation requires a round-trip: CPU selects a leaf, copies the position tensor to GPU, runs inference, copies the result back. At 400 simulations/move, the 1,765 µs per-inference cost (dominated by GPU forward pass at 1,122 µs) accounts for 84% of wall time. The symbolic checks (mate-in-5 at 132 µs, KOTH-in-3 at 149 µs) are designed to *avoid* NN calls, but they themselves cost more than a batched inference would.
-
-The solution: move the entire MCTS loop onto the GPU. A persistent CUDA kernel runs select→expand→evaluate→backup with no CPU interaction during search.
-
-### Architecture simplification for GPU
-
-The deep symbolic searches (mate-in-5, KOTH-in-3) are replaced by lightweight GPU-side gates:
-- **Mate-in-1**: exact terminal detection at negligible cost. Deeper mates are expected to be learned by the NN from training.
-- **KOTH-in-1**: king already on center, or one legal king move to center.
-
-The K-head (~21K parameters of patch-based FC layers producing position-dependent k) is replaced by a single learned scalar `k_logit`. The quiescence search result is added as a direct input to the value head's first FC layer (65→256 instead of 64→256). This eliminates the CUDA-hostile dynamic king-patch extraction while preserving both the additive `k·ΔM` path and a learned position-dependent channel through the value head FC weights.
-
-### Principal exchange on GPU
-
-The quiescence search uses the principal exchange (PE) variant: follow the single best MVV-LVA capture at each node. This produces a straight line (not a tree), with ~1-5 nodes per call, bounded cost, zero warp divergence, and register-resident PeSTO incremental evaluation. The full iterative-widening q-search (cap=1 checks, cap=2+ forks/null-move) remains available as a CPU-side option via the `--qsearch` flag, but the PE is the GPU-native variant.
-
-### Current implementation status
-
-The GPU MCTS kernel runs in classical mode, NN mode (warp-cooperative, 32 threads), and block mode (256 threads with shared memory activations and Tensor Core conv3x3). All modes validated with trained gen_18 OracleNet weights exported from PyTorch.
-
-**Three inference implementations:**
-
-The *warp-cooperative* path (32 threads) was the correctness proof: im2col materialization to global scratch (374 KB/warp), warp shuffle reductions for BN/SE. Forward pass: 131 ms — 325× slower than projected, because only 32 threads utilize <0.001% of GPU compute and each thread reads full weight rows independently from global memory.
-
-The *block-cooperative scalar* path (256 threads) keeps activations in shared memory throughout: two 32 KB buffers (`buf1`, `buf2`) hold the [128, 64] activation tensors, eliminating global memory round-trips between layers. Direct 3×3 convolution reads weights from global memory into a 1,152-float shared memory tile (one input channel at a time), gathering inputs directly from the shared-memory activation buffer — no im2col materialization. Residual shortcuts are saved in 32 named float registers per thread (avoiding a third 32 KB buffer that would exceed the 96 KB shared memory limit). Forward pass: **9.52 ms** — 13.7× faster than warp mode.
-
-The *block-cooperative TC im2col* path replaces the scalar FP32 conv3x3 with `wmma` 16×16×16 FP16 matrix multiply-accumulate. Conv3x3 is reformulated as GEMM: `C[C_out, 64] = W[C_out, C_in*9] × im2col[C_in*9, 64]`. The im2col matrix is built on-the-fly per [16, 16] tile: 32 threads gather from FP32 shared-memory activations, convert to FP16, and stage in per-warp shared memory for `wmma::load_matrix_sync`. Forward pass: **3.65 ms** — 2.6× faster than scalar block. However, layer profiling revealed conv3x3 was still 90.7% of forward pass time: the per-tile im2col gather (integer division by 9, bounds checks, FP32→FP16 conversion, staging writes) dominates over the near-instant `mma_sync`.
-
-The *block-cooperative TC shifted-copy* path eliminates the im2col gather entirely by decomposing conv3x3 into 9 dense GEMMs by kernel position: `output[C_out, 64] = Σ_{s=0}^{8} W_s[C_out, C_in] × shifted_s[C_in, 64]`. For each kernel offset (ky, kx), all 256 threads cooperatively build a shifted FP16 copy of the input in a 16 KB shared-memory buffer — using only bit shifts and masks (64 and 8 are powers of 2), no integer division. Eight warps then run a standard wmma GEMM where both A (weights, ld=C_in=128) and B (shifted activations, ld=64) load directly via `wmma::load_matrix_sync` from contiguous, aligned memory. No staging buffer, no scatter/gather. Conv weights are pre-split into 9 × [C_out, C_in] FP16 matrices at search start (`ConvWeightsShifted` struct). For C_in=17 (start conv), ld=17 is not a multiple of 8, so A fragments load through staging (same alignment fix as the im2col path). A loop reorder (shifts outer, N_tiles inner) reduced shifted copies from 36 to 9 per conv and `__syncthreads()` from 72 to 18, keeping 4 wmma accumulator fragments live simultaneously. Forward pass: **1.51 ms**, per-sim: **1.64 ms** (including tree ops) — 2.4× faster than TC im2col, 6.3× faster than scalar.
-
-**Multi-block scaling:** Multiple blocks share a single tree via atomic simulation counter, virtual loss for path diversity, and atomicCAS expansion locks. Scaling is near-perfectly linear up to the SM count (36 on RTX 5060 Ti): 36 blocks achieve **19 ms** for 400 simulations (44× faster than the CPU+LibTorch baseline of 840 ms). Node count drops ~17% at 36 blocks from expansion contention — acceptable for the 34× wall-clock speedup.
-
-**Multi-tree eval:** `gpu_mcts_eval_trees` runs N independent MCTS trees in parallel, one block per tree, with partitioned node pools and per-tree allocation counters. Supports both classical mode (no weights) and NN mode.
-
-**Forward pass profiling** (layer-by-layer timing with trained weights, scalar path):
-
-| Layer | Time (ms) | % of Total |
-|---|---|---|
-| 8× conv 3×3 (shared-memory weight tiling) | 5.92 | 61.7% |
-| BN/SE/residual (20 ops) | 0.28 | 2.9% |
-| Other (register save/restore, remaining convs, sync barriers) | 3.38 | 35.2% |
-| **Total (scalar)** | **9.52** | |
-| **Total (TC im2col)** | **3.65** | conv3x3 still 90.7% |
-| **Total (TC shifted-copy)** | **1.51** | per-sim 1.64 ms incl. tree ops |
-
-The scalar conv achieves 12.7 GFLOPS — 0.006% of the RTX 5060 Ti's 200 TFLOPS peak. The TC im2col path reduced conv time 3× but im2col gather still dominated (integer division by 9, bounds checks, staging). The shifted-copy path eliminates the gather entirely: each conv does 9 shifted copies (bit shifts only) + 9 dense contiguous GEMMs. A loop reorder (shifts outer, N_tiles inner) further reduced copies from 36→9 per conv, bringing per-conv from 0.25 ms (TC im2col) to ~0.08 ms.
-
-Tests: 7 tree store + 30 perft + 8 quick checks + 11 q-search + 13 MCTS kernel + 21 NN ops + 5 move encoding + 15 block ops + 11 transformer + 8 transformer-vs-pytorch + 26 selfplay-and-ops + 2 selfplay = 157 CUDA tests + 24 Python tests = 181 total.
-
-### Transformer architecture
-
-A pre-LayerNorm transformer (128×6, 4 heads, FFN 128→512→128, ~1.4M params) runs alongside the SE-ResNet as an alternative architecture selectable via `--arch transformer`. Same input (17 planes), same output (4672 policy + value + k), same tiered MCTS integration.
-
-The transformer forward pass uses a hybrid TC/scalar approach. Q/K/V projections and FFN (the largest GEMMs) use wmma Tensor Cores with FP16 input and FP32 accumulation. QK^T, softmax, and attn×V stay scalar due to workspace memory aliasing constraints. The key enabler: `buf_out` (LayerNorm output) is stored in FP16, freeing 16 KB of shared memory for a dedicated TC staging region. This keeps the total shared memory at 89 KB (under the 99 KB hardware limit) while eliminating the staging/workspace overlap that previously corrupted TC results. The FP16 intermediate is numerically safe — buf_out is only consumed by linear projections (which convert to FP16 anyway for wmma) and never feeds back into the FP32 residual stream. Result: 4.7× speedup over all-scalar (10.9 vs 2.3 samples/sec). LayerNorm and softmax process all 64 tokens in parallel via 4-thread warp-shuffle groups.
+GPU-resident inference (one block per tree, 256 threads) wins for small models where the forward pass fits in shared memory. For larger models, batched inference from the host with cuBLAS/cuDNN would better utilize GPU compute. Current throughput at 12L D=128: **~8,200 positions/sec**. The speed-of-light analysis shows only 2.8% TC utilization — the bottleneck is tiny matrix dimensions (128×64), not code quality. Depth scaling is free in shared memory; the bottleneck is forward pass latency per simulation.
 
 ### GPU self-play
 
-A host-side game loop calls `gpu_mcts_eval_trees_transformer` for batches of 36 concurrent games. Each batch runs one MCTS evaluation for all active positions simultaneously (one block per game, 256 threads per block). The host applies moves, samples from visit count distributions (proportional-or-greedy with explore_base=0.80), detects game termination (checkmate, stalemate, 50-move rule, threefold repetition via Zobrist hashing), and records training data in the binary format consumed by `train.py`.
+A host-side game loop calls `gpu_mcts_eval_trees_transformer` for batches of 36 concurrent games on RTX 5060 Ti. Each batch runs one MCTS evaluation per active position (one block per game, 256 threads). The host handles move application, proportional-or-greedy sampling, game termination (checkmate, stalemate, 50-move, threefold repetition via Zobrist), and training data recording.
 
-**Self-play throughput (trained weights, 36 concurrent games, RTX 5060 Ti, transformer 128×6):** 200 sims/move: 36 games in 37.3 seconds (81.5 samples/sec, ~3,000 training samples). 50 sims/move: 36 games in 17.8 seconds (159 samples/sec).
+**Throughput (12L D=128 transformer, trained weights):** ~8,200 positions/sec. At 200 sims/move with 6L: 81.5 samples/sec (~3,000 training samples per 36-game batch).
 
-## 9. Tournament Design: Adaptive CI-Targeted Pairing
+### Future directions
 
-### The problem: uniform round-robins waste games
+Deeper models (24-48L), async batched inference for large models, and a split value head that could leverage the extended Q-search on GPU.
 
-A standard round-robin plays equal games across all pairings. With 10 models (45 pairs), playing 200 games each costs 9,000 games total — but most of that budget is spent on lopsided matchups (tiered_gen17 vs vanilla_gen0) where the outcome is obvious after 10 games. Meanwhile, the close matchups that actually determine rankings (tiered_gen4 vs tiered_gen17) remain statistically uncertain.
+### Test coverage
 
-### Solution: seed then focus
+157 CUDA + 24 Python + 609 Rust = ~790 total tests.
 
-The tournament runs in two phases:
+## 8. Tournament Design: Adaptive CI-Targeted Pairing
 
-**Seed phase.** An interleaved round-robin plays a small number of games per pair (default 10). This establishes rough rankings cheaply — 450 games for 10 models. Interleaving (playing one batch per pair before starting the next round) means preliminary Elo ratings are available after the first pass through all 45 pairs.
+A standard round-robin wastes games on lopsided matchups. The tournament runs in two phases:
 
-**Focus phase.** The remaining budget targets *ranking uncertainty* directly:
+**Seed phase.** Interleaved round-robin with a small number of games per pair (default 10) to establish rough rankings.
 
-1. Compute MLE Elo ratings, rank models
-2. Bootstrap resample all pairwise results (200 iterations), recompute Elo each time
-3. For each consecutive-rank pair (#1 vs #2, #2 vs #3, ...), measure the 95% CI width of their Elo gap
-4. Play the next batch of games for the consecutive pair with the **widest CI**
-5. Repeat until all consecutive CIs fall below a target (default 50 Elo) or the total game budget is exhausted
+**Focus phase.** Bootstrap resampling (200 iterations) computes 95% CI widths for each consecutive-rank Elo gap. The next batch targets the pair with the widest CI. Games focus exactly where they matter — a pair separated by 400 Elo with CI±30 needs no more games, while a pair at 25 Elo with CI±160 does. Consecutive pairs only, because transitive ordering makes non-adjacent comparisons redundant.
 
-This focuses games exactly where they matter for ranking confidence. A pair separated by 400 Elo with CI±30 doesn't need more games — their relative ranking is settled. But a pair separated by 25 Elo with CI±160 needs many more games before we can confidently order them.
+Pre-seeding from training SPRT data skips hundreds of games on same-type pairs. Results save to JSON after every batch for resume support. Each model plays with the search configuration it was trained with (tiered models with tiers, vanilla models without).
 
-### Why consecutive pairs, not all pairs
+## 9. Applicability Beyond Chess
 
-Ranking confidence depends on *adjacent* comparisons. If #1 vs #2 is settled and #2 vs #3 is settled, then #1 vs #3 is transitively settled — playing more #1 vs #3 games adds no ranking information. By focusing exclusively on consecutive-rank gaps, the algorithm targets exactly the comparisons that could change the final ordering. This also means lopsided cross-type matchups (tiered vs vanilla) naturally get deprioritized once the tiered-vanilla boundary is established.
-
-### Bootstrap details
-
-Each bootstrap iteration resamples every pairwise result independently: given (w, l, d) outcomes for a pair, draw `w+l+d` outcomes from a multinomial with probabilities `(w/total, l/total, d/total)`. This preserves the total game count per pair while varying outcomes. MLE Elo is recomputed from scratch for each resample (1000 iterations, fast in pure Python). The consecutive gaps are measured using the *current* ranking order (not the bootstrap ranking), so the CI reflects uncertainty about whether a specific pair's gap might be negative (i.e., whether their ranking should swap).
-
-### Pre-seeding from training eval data
-
-During training, each generation is evaluated against the current best via SPRT (up to 800 games). For consecutive accepted generations, this produces high-quality head-to-head results using the same search config as the tournament. A seed script (`scripts/seed_tournament_from_training.py`) extracts these eval pairs from training logs and writes a pre-populated results JSON. The tournament then resumes from this seeded data, skipping hundreds of games on same-type consecutive pairs and focusing its budget on cross-type matchups (tiered vs vanilla) where no training data exists.
-
-### Resume support
-
-Results are saved to JSON after every batch. The adaptive phase picks up where it left off — re-run bootstrap on existing results, find the widest CI, continue. No special checkpointing needed. Pre-seeded results from training eval data are loaded identically to partially completed tournament results.
-
-### Model-mode pairing
-
-Each model plays with the search configuration it was trained with. Tiered models use all three tiers; vanilla models disable Tier 1 and material evaluation. The tournament script takes model directories and generation numbers as CLI arguments (`--tiered-dir`, `--tiered-gens`, `--vanilla-dir`, `--vanilla-gens`) and enforces correct per-side tier flags automatically, so mixed matchups are valid comparisons of the full training+search systems.
-
-## 10. Applicability Beyond Chess
-
-The three-tier decomposition is not chess-specific. The pattern — injecting exact solutions for tractable subproblems as terminal MCTS nodes — applies wherever a domain has classical solvers for subproblems:
+The three-tier decomposition is not chess-specific. The pattern applies wherever a domain has classical solvers for subproblems:
 
 | Domain | Tier 1 (Exact) | Tier 2 (Heuristic) | Tier 3 (Learned) |
 |--------|---------------|-------------------|-----------------|
-| **Chess** | Mate search, KOTH geometry | Extended quiescence (captures, checks, forks) + MVV-LVA ordering | Neural positional evaluation |
-| **Mathematical reasoning** | Automated theorem provers (e.g., Lean's `decide`, `omega`) resolving subgoals | Lemma relevance ranking, proof-term similarity | Neural proof step prediction |
-| **Program synthesis** | Type checking, partial evaluation, SMT solvers | API frequency heuristics | Code generation model |
+| **Chess** | Mate search, KOTH geometry | Extended quiescence + MVV-LVA | Neural positional evaluation |
+| **Mathematical reasoning** | Theorem provers (Lean's `decide`, `omega`) | Lemma relevance ranking | Neural proof step prediction |
+| **Program synthesis** | Type checking, partial evaluation, SMT | API frequency heuristics | Code generation model |
 | **Game playing** | Endgame tablebases, solved subgames | Domain heuristics | Value/policy networks |
 
-The key requirement: exactly resolved nodes must be **terminal** in the MCTS tree. If a proven node can be expanded and diluted by approximate child evaluations, the proof is wasted. This terminal semantics insight is the most transferable contribution.
+The key requirement: exactly resolved nodes must be **terminal** in the MCTS tree. If a proven node can be expanded and diluted by approximate child evaluations, the proof is wasted.
 
-The value function factorization ($V = \tanh(V_{learned} + k \cdot V_{computed})$) also transfers: any domain where part of the evaluation can be computed exactly benefits from separating the learnable residual from the computable component. The learned confidence scalar $k$ provides a global trust level in the exact component, while feeding the computed result as a direct input to the value head enables per-position modulation — in chess, the value head learns to rely more on $\Delta M$ in open tactical positions and less in closed strategic ones; in mathematical reasoning, an analogous architecture could modulate trust in a theorem prover's assessment based on how prover-friendly the current subgoal is.
+The value function factorization ($V = \tanh(V_{learned} + k \cdot V_{computed})$) also transfers: any domain where part of the evaluation can be computed exactly benefits from separating the learnable residual from the computable component. The learned confidence scalar $k$ provides a global trust level in the exact component, while feeding the computed result as a direct value head input enables per-position modulation.
 
-## 11. Related Work
+## 10. Related Work
 
-Caissawary draws on and extends several lines of prior work:
+- **AlphaZero** (Silver et al., 2017): pure neural MCTS. Caissawary uses the same framework but decomposes evaluation into learnable and computable components.
+- **MCTS-Solver** (Winands et al., 2008): propagates proven game-theoretic values through MCTS trees. Caissawary extends this to *any* provably resolved node — not just endgame W/L, but also forced mates and KOTH geometric wins detected mid-search.
+- **KataGo** (Wu, 2019): incorporates handcrafted features alongside neural evaluation. Caissawary's $k$ scalar similarly modulates material influence, but as a global learned parameter with position-dependent modulation absorbed by the value head.
+- **MT-MCTS** (Mannen & Wiering, 2012): decomposes games into subgames solved by specialized agents. Caissawary's three-tier structure is a specific instance.
 
-- **AlphaZero** (Silver et al., 2017) established pure neural MCTS for chess, learning everything from self-play. Caissawary uses the same MCTS + self-play framework but decomposes evaluation into learnable and computable components rather than learning end-to-end.
-
-- **MCTS-Solver** (Winands et al., 2008) propagates proven game-theoretic values (wins/losses) through MCTS trees, avoiding the dilution of exact values by approximate backups. Caissawary extends this idea by treating *any* provably resolved node as terminal — not just endgame wins/losses, but also short forced mates and KOTH geometric wins detected mid-search.
-
-- **KataGo** (Wu, 2019) incorporates handcrafted features alongside neural evaluation, including ownership predictions and score estimation. Caissawary's $k$ scalar similarly modulates the influence of a separately computed material balance, but as a global learned parameter rather than a per-position prediction — position-dependent modulation is absorbed by the value head which receives the Q-search result as a direct input feature.
-
-- **MT-MCTS** (Mannen & Wiering, 2012) decomposes games into subgames solved by specialized agents. Caissawary's three-tier structure is a specific instance of this: Tier 1 handles tractable subgames exactly, Tier 2 applies domain heuristics, and Tier 3 handles the uncertain residual with learned evaluation.
-
-The primary novelty is the *combination*: terminal semantics for proven nodes (preventing value dilution), factored value function with a learned confidence scalar, and systematic subgame decomposition — integrated into a single MCTS framework.
+The primary novelty is the *combination*: terminal semantics for proven nodes, factored value function with learned confidence, and systematic subgame decomposition — integrated into a single MCTS framework.
