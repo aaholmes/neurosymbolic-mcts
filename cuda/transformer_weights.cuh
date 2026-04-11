@@ -16,7 +16,7 @@
 // ============================================================
 
 // Transformer architecture constants
-constexpr int TF_NUM_LAYERS   = 6;
+constexpr int TF_NUM_LAYERS   = 12;
 constexpr int TF_NUM_HEADS    = 4;
 constexpr int TF_HEAD_DIM     = 32;   // NN_HIDDEN_DIM / TF_NUM_HEADS
 constexpr int TF_FFN_DIM      = 512;  // 4× expansion

@@ -23,7 +23,7 @@ from model import TransformerNet
 # Architecture constants (must match cuda/transformer_weights.cuh)
 NN_HIDDEN_DIM      = 128
 NN_INPUT_CHANNELS  = 17
-TF_NUM_LAYERS      = 6
+TF_NUM_LAYERS      = 12   # must match cuda/transformer_weights.cuh
 TF_NUM_HEADS       = 4
 TF_HEAD_DIM        = 32
 TF_FFN_DIM         = 512
