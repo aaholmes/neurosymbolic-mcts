@@ -237,14 +237,18 @@ The `--qsearch` flag selects the quiescence search variant: `pe` (principal exch
 
 A fully GPU-resident MCTS implementation in `cuda/`. The entire search loop — tree traversal, node expansion, quick checks, quiescence search, and neural network inference — runs inside a persistent CUDA kernel with no CPU interaction during search. No cuBLAS, no cuDNN, no host round-trips.
 
-### Why GPU-Resident MCTS is Faster
+### Two Inference Architectures
 
-The standard approach (Rust engine + LibTorch) requires a CPU↔GPU round-trip for every NN evaluation: CPU selects a leaf node, copies the position tensor to GPU, runs inference, copies the result back. With batched inference (batch-16 across games), each game must wait for other games to accumulate pending evaluations before a batch can be dispatched. This creates two bottlenecks:
+Both the Rust and CUDA engines support the transformer. Which is faster depends on model size:
 
-1. **Per-simulation transfer overhead:** Each of ~200 simulations requires a CPU↔GPU data transfer (~90 µs round-trip), adding ~18 ms of transfer time per move on top of inference.
-2. **Batching stalls:** Games block each other waiting for a full batch — a game ready for inference must idle until 15 other games also need inference.
+| Architecture | Mechanism | Best for | 6L throughput |
+|---|---|---|---|
+| **GPU-resident MCTS** (CUDA) | Full MCTS loop on GPU, NN inline per-SM | Small models (≤12L D=128) | **81.5 samp/sec** |
+| **CPU MCTS + GPU batched** (Rust+LibTorch) | Rayon threads + InferenceServer batching | Large models (≥24L) | 38 samp/sec |
 
-The GPU-resident kernel eliminates both: each block runs the complete MCTS loop (select→expand→evaluate→backup) for all simulations in shared memory, with inference called inline as a `__device__` function. The only CPU↔GPU transfer is one `BoardState` upload and one result readback per move (not per simulation). With 36 concurrent games running on 36 SMs, there are no batching stalls — each block runs independently.
+**Why GPU-resident wins for small models:** Each SM runs select→expand→evaluate→backup with zero CPU↔GPU transfers. The NN forward pass is tiny (166M FLOPs, 1.4M params) — so small that the transfer overhead of batched inference (904µs forward + 754µs transfer per batch) exceeds the cost of just computing inline on each SM. The GPU is only 2.8% utilized, but it doesn't matter because there's no wasted time on transfers or synchronization.
+
+**Why batched wins for large models:** At 24+ layers (4.8M+ params), the GPU forward pass exceeds 3.6ms per batch — now CPU tree operations (1.5ms/sim) can run during the GPU work, fully hiding the transfer latency. Larger models also don't fit in the 99 KB shared memory limit for GPU-resident (D≥192 is impossible), making batched the only option. See [CUDA_TC_ANALYSIS.md](CUDA_TC_ANALYSIS.md) for the full memory analysis.
 
 ### Performance (RTX 5060 Ti, SE-ResNet 6×128)
 
