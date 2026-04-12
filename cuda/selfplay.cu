@@ -3,6 +3,7 @@
 #include "movegen.cuh"
 #include "apply_move.cuh"
 #include "quiescence.cuh"
+#include "quick_checks.cuh"  // for KOTH_CENTER
 
 #include <cstdio>
 #include <cstring>
@@ -495,7 +496,19 @@ int run_selfplay_games(
                         g.hash_history[g.hash_count++] = h;
 
                     // --- Check game termination ---
+                    // KOTH: did the opponent (who just moved) land their king on center?
+                    if (config.enable_koth) {
+                        // The side that just moved is !g.board.w_to_move (board already flipped)
+                        int prev_color = g.board.w_to_move ? 1 : 0;  // color that just moved
+                        uint64_t king_bb = g.board.pieces[prev_color * 6 + KING];
+                        if (king_bb & KOTH_CENTER) {
+                            // KOTH win for the side that just moved
+                            rec.result = (prev_color == 0) ? 1 : 2;  // white=1, black=2
+                        }
+                    }
+
                     // Generate legal moves for new position
+                    if (rec.result == 0) {
                     cudaMemcpy(d_bs, &g.board, sizeof(BoardState), cudaMemcpyHostToDevice);
                     kernel_gen_legal_moves<<<1, 1>>>(d_bs, d_moves, d_count);
                     int legal_count;
@@ -520,6 +533,7 @@ int run_selfplay_games(
                     } else if (g.move_number > SP_MAX_MOVES_PER_GAME) {
                         rec.result = 3;  // max moves reached
                     }
+                    } // end if (rec.result == 0) after KOTH check
                 } else {
                     // No legal moves from the start
                     rec.result = 3;
@@ -806,6 +820,15 @@ EvalResult run_eval_games(
                 uint64_t h = compute_hash(g.board);
                 if (g.hash_count < SP_MAX_MOVES_PER_GAME) g.hash_history[g.hash_count++] = h;
 
+                // KOTH: did the side that just moved land their king on center?
+                if (config.enable_koth) {
+                    int prev_color = g.board.w_to_move ? 1 : 0;
+                    uint64_t king_bb = g.board.pieces[prev_color * 6 + KING];
+                    if (king_bb & KOTH_CENTER)
+                        game_result = (prev_color == 0) ? 1 : 2;
+                }
+
+                if (game_result == 0) {
                 cudaMemcpy(d_bs, &g.board, sizeof(BoardState), cudaMemcpyHostToDevice);
                 kernel_gen_legal_moves<<<1, 1>>>(d_bs, d_moves, d_count);
                 int legal_count; cudaMemcpy(&legal_count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
@@ -817,6 +840,7 @@ EvalResult run_eval_games(
                 } else if (g.board.halfmove >= 100) game_result = 3;
                 else if (is_threefold(g.hash_history, g.hash_count, h)) game_result = 3;
                 else if (g.move_number > SP_MAX_MOVES_PER_GAME) game_result = 3;
+                }
             } else {
                 game_result = 3;
             }
