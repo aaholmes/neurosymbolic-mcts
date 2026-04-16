@@ -32,7 +32,7 @@ __device__ __forceinline__ const BoardState* node_board_const(const MCTSNode* no
 // Select the child with highest UCB score (PUCT formula).
 __device__ int select_child_puct(int parent_idx, float c_puct) {
     MCTSNode* parent = &g_node_pool[parent_idx];
-    float sqrt_parent_N = sqrtf((float)parent->visit_count + 1.0f);
+    float sqrt_parent_N = sqrtf(fmaxf((float)parent->visit_count, 1.0f));
 
     int best_child = parent->first_child_idx;
     float best_ucb = -1e9f;
@@ -950,7 +950,7 @@ __global__ void mcts_kernel_eval(
             while (is_expanded(cur) && !cur->is_terminal && cur->num_children > 0) {
                 // Select child — children store absolute indices
                 MCTSNode* parent = &g_node_pool[node_idx];
-                float sqrt_parent_N = sqrtf((float)parent->visit_count + 1.0f);
+                float sqrt_parent_N = sqrtf(fmaxf((float)parent->visit_count, 1.0f));
                 int best_child = parent->first_child_idx;
                 float best_ucb = -1e9f;
                 for (int i = 0; i < parent->num_children; i++) {
@@ -1511,7 +1511,7 @@ __global__ void mcts_kernel_eval_transformer(
             MCTSNode* cur = &g_node_pool[node_idx];
             while (is_expanded(cur) && !cur->is_terminal && cur->num_children > 0) {
                 MCTSNode* parent = &g_node_pool[node_idx];
-                float sqrt_parent_N = sqrtf((float)parent->visit_count + 1.0f);
+                float sqrt_parent_N = sqrtf(fmaxf((float)parent->visit_count, 1.0f));
                 int best_child = parent->first_child_idx;
                 float best_ucb = -1e9f;
                 for (int i = 0; i < parent->num_children; i++) {

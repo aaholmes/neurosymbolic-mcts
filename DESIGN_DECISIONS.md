@@ -16,7 +16,20 @@ Standard chess is a poor testbed for Tier 1 safety gates — forced checkmates a
 
 The pattern is always the same: compute what you can exactly, heuristically order what you understand, learn what remains.
 
-## 2. Tier 1: Safety Gates as Terminal Nodes
+## 2. PUCT Fix: sqrt(max(N, 1)) Instead of sqrt(N)
+
+Vanilla AlphaZero PUCT is $U(s,a) = c \cdot P(s,a) \cdot \sqrt{N(s)} / (1 + n(s,a))$. When a node is first expanded, $N(s) = 0$, so $U$ collapses to zero for every child — the first simulation is selected by whatever tiebreaker the move generator happens to impose, which in chess is systematically biased toward structurally poor moves (a-pawn pushes, etc.). That first simulation returns a noisy, often pessimistically-biased value that gets backed up through every ancestor. Because most nodes in a tree receive only a handful of visits, this first-move noise is a meaningful fraction of the evaluation signal at the majority of nodes.
+
+**Fix:** Replace $\sqrt{N}$ with $\sqrt{\max(N, 1)}$.
+
+This strictly dominates vanilla PUCT:
+- **Identical behavior for $N \geq 1$.** No retuning of $c$, no new pathologies.
+- **Correct behavior for $N = 0$.** $U$ becomes proportional to $P(s,a)$, so the first simulation follows the policy prior — exactly what the network was trained to recommend.
+- **Negligible cost.** One `max()` per selection, trivial on GPU.
+
+Applied in both Rust (`calculate_ucb_value` in `src/mcts/selection.rs`) and CUDA (`select_child_puct` and inline selection loops in `cuda/mcts_kernel.cu`).
+
+## 3. Tier 1: Safety Gates as Terminal Nodes
 
 ### The key insight: terminal semantics
 
@@ -38,7 +51,7 @@ Can the king reach {d4, e4, d5, e5} in at most 3 moves, considering blocking pie
 
 KOTH-in-4 is catastrophic (55× slower — the target mask expands to the entire board border, defeating geometric pruning). Mate-in-6 is cheap (2.2× slower) but marginal — forced mate-in-6 via pure checks is rare. Current defaults: checks-only mate-in-5 and KOTH-in-3.
 
-## 3. Tier 2: Quiescence Search and Tactical Ordering
+## 4. Tier 2: Quiescence Search and Tactical Ordering
 
 Tier 2's core is `forced_ext_pesto_balance()` — an extended PeSTO quiescence search (depth 20) at every MCTS leaf, computing $\Delta M$: tapered positional+material evaluation after forced tactical sequences resolve. Unlike simple piece counting, PeSTO uses Texel-tuned piece-square tables (RofChade values) accounting for piece placement. This classical alpha-beta search detects hanging pieces, discovered attacks, and forced promotion lines. $\Delta M$ feeds into the value function both as a direct input to the value head's FC layer and via the additive $k \cdot \Delta M$ term.
 
@@ -70,7 +83,7 @@ The full extended Q-search can explode (130K nodes worst case). SEE pruning was 
 
 The first approach grafted Q-search trees onto the MCTS tree at expansion. Too expensive (~10× slower expansions), noisy values from poor alpha/beta bounds, and high complexity. **The lesson:** run Q-search once at leaf evaluation time as `forced_ext_pesto_balance()` — simpler, cheaper, and gives the value function a clean signal.
 
-## 4. The Value Function: V = tanh(V\_logit + k · ΔM)
+## 5. The Value Function: V = tanh(V\_logit + k · ΔM)
 
 ### Separate what's learnable from what's computable
 
@@ -102,7 +115,7 @@ $k = 0.47 \cdot \text{Softplus}(k_{logit})$ where $k_{logit}$ is a single learne
 
 With no NN: $V_{logit} = 0$, $k = 0.326$, so $V_{final} = \tanh(0.326 \cdot \Delta M)$. A freshly initialized network produces identical values, ensuring smooth bootstrapping.
 
-## 5. OracleNet Architecture
+## 6. OracleNet Architecture
 
 **SE-ResNet backbone.** Configurable depth and width (default: 6 blocks, 128 channels, ~2M params). SE attention in each block learns per-position channel importance.
 
@@ -114,7 +127,7 @@ With no NN: $V_{logit} = 0$, $k = 0.326$, so $V_{final} = \tanh(0.326 \cdot \Del
 
 **Zero initialization.** All output layers initialized to zero: policy = uniform exploration, value = pure PeSTO evaluation, $k$ = 0.326.
 
-## 6. Training Pipeline Evolution
+## 7. Training Pipeline Evolution
 
 ### Gating: from fixed threshold to SPRT
 
@@ -160,7 +173,7 @@ Eval games (50-800 per generation) run full MCTS searches but traditionally disc
 
 Since eval games produce training data for free, self-play is redundant after initial buffer seeding. With `--skip-self-play`, the loop after gen 1 becomes: train → eval (up to 800 games, producing data) → gate → ingest. Cuts per-generation wall time roughly in half.
 
-## 7. GPU-Resident MCTS
+## 8. GPU-Resident MCTS
 
 ### Motivation
 
@@ -198,7 +211,7 @@ Deeper models (24-48L), async batched inference for large models, and a split va
 
 157 CUDA + 24 Python + 609 Rust = ~790 total tests.
 
-## 8. Tournament Design: Adaptive CI-Targeted Pairing
+## 9. Tournament Design: Adaptive CI-Targeted Pairing
 
 A standard round-robin wastes games on lopsided matchups. The tournament runs in two phases:
 
@@ -208,7 +221,7 @@ A standard round-robin wastes games on lopsided matchups. The tournament runs in
 
 Pre-seeding from training SPRT data skips hundreds of games on same-type pairs. Results save to JSON after every batch for resume support. Each model plays with the search configuration it was trained with (tiered models with tiers, vanilla models without).
 
-## 9. Applicability Beyond Chess
+## 10. Applicability Beyond Chess
 
 The three-tier decomposition is not chess-specific. The pattern applies wherever a domain has classical solvers for subproblems:
 
@@ -223,7 +236,7 @@ The key requirement: exactly resolved nodes must be **terminal** in the MCTS tre
 
 The value function factorization ($V = \tanh(V_{learned} + k \cdot V_{computed})$) also transfers: any domain where part of the evaluation can be computed exactly benefits from separating the learnable residual from the computable component. The learned confidence scalar $k$ provides a global trust level in the exact component, while feeding the computed result as a direct value head input enables per-position modulation.
 
-## 10. Related Work
+## 11. Related Work
 
 - **AlphaZero** (Silver et al., 2017): pure neural MCTS. Caissawary uses the same framework but decomposes evaluation into learnable and computable components.
 - **MCTS-Solver** (Winands et al., 2008): propagates proven game-theoretic values through MCTS trees. Caissawary extends this to *any* provably resolved node — not just endgame W/L, but also forced mates and KOTH geometric wins detected mid-search.

@@ -23,6 +23,12 @@ The name is a hybrid, like the engine: **Caissa** (the mythical goddess of chess
 
 Gate-resolved nodes are **terminal** -- identical to checkmate or stalemate -- so proven values propagate through the tree without dilution.
 
+### PUCT Selection
+
+$$U(s,a) = c \cdot P(s,a) \cdot \frac{\sqrt{\max(N(s),\,1)}}{1 + n(s,a)}$$
+
+The denominator uses $\max(N,1)$ instead of vanilla AlphaZero's $N$. When a node is first visited ($N=0$), the standard formula collapses $U$ to zero for every child, so the first simulation is selected by move-generator order — a systematic bias toward structurally poor moves. With $\max(N,1)$, the exploration bonus is proportional to the policy prior $P(s,a)$ from the first visit, so the network's top recommendation is explored first. For $N \geq 1$ the formulas are identical; no retuning of $c$ is needed.
+
 ### Value Function
 
 $$V_{final} = \tanh(V_{logit} + k \cdot \Delta M)$$

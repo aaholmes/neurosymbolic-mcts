@@ -217,7 +217,8 @@ fn select_ucb_with_policy(
             } else {
                 child_ref.total_value / child_ref.visits as f64
             };
-            let u = config.exploration_constant * prior_prob * (parent_visits as f64).sqrt()
+            let u = config.exploration_constant * prior_prob
+                * (parent_visits as f64).max(1.0).sqrt()
                 / (1.0 + child_ref.visits as f64);
             best_details = (q, u, ucb_value);
         }
@@ -263,8 +264,9 @@ pub fn calculate_ucb_value(
         child.total_value / child.visits as f64
     };
 
-    // U Value (PUCT)
-    let u = exploration_constant * prior_prob * (parent_visits as f64).sqrt()
+    // U Value (PUCT): max(N,1) ensures the first simulation follows the policy prior
+    // rather than collapsing to zero and picking by move-generator order.
+    let u = exploration_constant * prior_prob * (parent_visits as f64).max(1.0).sqrt()
         / (1.0 + child.visits as f64);
 
     q + u
