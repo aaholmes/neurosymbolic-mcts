@@ -24,6 +24,7 @@ add_library(caissawary_cuda STATIC
     nn_ops.cu
     nn_forward.cu
     block_ops.cu
+    block_ops_batched.cu
     block_forward.cu
     transformer_weights.cu
     transformer_ops.cu
@@ -111,3 +112,8 @@ set_target_properties(test_layer_timing PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_executable(test_selfplay_and_ops test/test_selfplay_and_ops.cu)
 target_link_libraries(test_selfplay_and_ops caissawary_cuda)
 set_target_properties(test_selfplay_and_ops PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# GPU MCTS v2 Phase 4 go/no-go gate: batched shifted-copy conv scaling
+add_executable(test_batched_conv_scaling test/test_batched_conv_scaling.cu)
+target_link_libraries(test_batched_conv_scaling caissawary_cuda)
+set_target_properties(test_batched_conv_scaling PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
