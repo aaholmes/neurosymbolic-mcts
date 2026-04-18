@@ -1,31 +1,30 @@
 // ============================================================
 // test_batched_conv_scaling — GPU MCTS v2 Phase 4 go/no-go gate
 //
-// Builds a single 128 -> 128 3x3 conv via the shifted-copy
-// 9-GEMM Tensor Core path, at varying batch sizes B, and
-// projects full-forward and v2 sims/sec from the scaling curve.
+// Three kernels are benchmarked side-by-side on a single
+// 128 -> 128 3x3 conv:
+//   K1: existing smem-resident block_conv_3x3_shifted (B=1)
+//   K2: new global-memory block_conv_3x3_shifted_batched
+//   K3: new global-memory chunked variant (holds 4*CHUNK accs
+//       per warp; amortizes weight loads across CHUNK positions
+//       per GEMM pass)
 //
-// TDD order (do not start timing until 1-3 pass under
-// compute-sanitizer):
-//   1. Replication   — B copies of same input give B identical
-//                      outputs, each matching a single-input run.
-//   2. Independence  — B random inputs match B sequential batch-1
-//                      calls through the existing
-//                      block_conv_3x3_shifted kernel
-//                      (atol=1e-2, rtol=5e-3).
-//   3. Shift aliasing — zero all weight slices except s=4 (center)
-//                       then output must equal a 1x1 conv with
-//                       the center weights.
+// The K3/K1 per-position ratio at B=32 is the actual Phase 4
+// go/no-go signal. K1/K2 at B=1 quantify the cost of moving
+// activations from shared to global memory.
 //
-// After correctness: sweep B in {1, 2, 4, 8, 16, 32}, 20 warmup
-// + 100 measured iterations, emit CSV + stdout table, print
-// scaling projection.
+// TDD order (all must pass before timing):
+//   1. Replication       (K2): B copies of same input → B identical outputs.
+//   2. Independence      (K2): B distinct inputs match B single-batch runs of K1.
+//   3. Shift aliasing    (K2): zero all weight slices except center → 1x1 conv.
+//   4. Chunked sanity    (K3): K3 CHUNK=1 matches K2 at same B.
+//   5. Chunked indep.    (K3): K3 CHUNK=4 matches B single-batch runs of K1.
 //
 // Build (run on the GPU host):
 //   cmake --build cuda/build --target test_batched_conv_scaling
 //
 // Run:
-//   ./cuda/build/test_batched_conv_scaling              # run all tests + sweep
+//   ./cuda/build/test_batched_conv_scaling              # all tests + sweep
 //   ./cuda/build/test_batched_conv_scaling --tests      # correctness only
 //   ./cuda/build/test_batched_conv_scaling --bench      # skip correctness
 //
@@ -156,6 +155,27 @@ __global__ void kernel_batched_conv(
     );
 }
 
+// Chunked kernel wrappers — one per CHUNK template instantiation.
+// __launch_bounds__(256, 1) tells the compiler we'll only ever run
+// one block per SM and to prefer spending registers on that block.
+#define CHUNKED_WRAPPER(NAME, C)                                              \
+    __global__ __launch_bounds__(256, 1)                                      \
+    void NAME(const float* act_in, half* const* W_s, float* act_out,          \
+              half* shifted_global, int C_in, int C_out, int B) {             \
+        extern __shared__ unsigned char smem_raw[];                           \
+        half* w_smem = reinterpret_cast<half*>(smem_raw);                     \
+        size_t w_bytes = batched_conv_w_smem_bytes(C_in, C_out);              \
+        float* acc_smem = reinterpret_cast<float*>(smem_raw + w_bytes);       \
+        block_conv_3x3_shifted_batched_chunked<C>(                            \
+            act_in, W_s, act_out, w_smem, acc_smem, shifted_global,           \
+            C_in, C_out, B);                                                  \
+    }
+
+CHUNKED_WRAPPER(kernel_batched_conv_chunked_c1, 1)
+CHUNKED_WRAPPER(kernel_batched_conv_chunked_c2, 2)
+CHUNKED_WRAPPER(kernel_batched_conv_chunked_c4, 4)
+#undef CHUNKED_WRAPPER
+
 // Reference: single-position, smem-resident, existing shifted kernel.
 // Copies one [C_in, 64] input slice into smem, runs block_conv_3x3_shifted,
 // writes back to one [C_out, 64] output slice. Used for the independence test.
@@ -224,6 +244,58 @@ static void run_batched(const BatchedLaunch& L, half** d_slice_ptrs) {
 // + 8 KB (acc_smem) = ~44 KB. Under the default 48 KB limit on most SMs
 // so cudaFuncSetAttribute shouldn't be needed. For future larger configs
 // we'd need MaxDynamicSharedMemorySize opt-in.
+
+// ----- Chunked kernel launch helpers -----
+
+struct ChunkedLaunch {
+    float* d_act_in;
+    float* d_act_out;
+    half*  d_shifted;     // [C_in, 64*CHUNK]
+    int    B, CHUNK, C_in, C_out;
+    size_t smem_bytes;
+};
+
+static ChunkedLaunch alloc_chunked(int B, int CHUNK, int C_in, int C_out) {
+    ChunkedLaunch L{};
+    L.B = B; L.CHUNK = CHUNK; L.C_in = C_in; L.C_out = C_out;
+    CHECK_CUDA(cudaMalloc(&L.d_act_in,  (size_t)B * C_in  * 64 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&L.d_act_out, (size_t)B * C_out * 64 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&L.d_shifted, batched_conv_shifted_bytes_chunked(C_in, CHUNK)));
+    L.smem_bytes = batched_conv_w_smem_bytes(C_in, C_out) + batched_conv_acc_smem_bytes();
+    return L;
+}
+
+static void free_chunked(ChunkedLaunch& L) {
+    cudaFree(L.d_act_in);
+    cudaFree(L.d_act_out);
+    cudaFree(L.d_shifted);
+    L = ChunkedLaunch{};
+}
+
+static void run_chunked(const ChunkedLaunch& L, half** d_slice_ptrs) {
+    // Dispatch on compile-time CHUNK value.
+    dim3 grid(1), block(256);
+    switch (L.CHUNK) {
+        case 1:
+            kernel_batched_conv_chunked_c1<<<grid, block, L.smem_bytes>>>(
+                L.d_act_in, d_slice_ptrs, L.d_act_out, L.d_shifted,
+                L.C_in, L.C_out, L.B);
+            break;
+        case 2:
+            kernel_batched_conv_chunked_c2<<<grid, block, L.smem_bytes>>>(
+                L.d_act_in, d_slice_ptrs, L.d_act_out, L.d_shifted,
+                L.C_in, L.C_out, L.B);
+            break;
+        case 4:
+            kernel_batched_conv_chunked_c4<<<grid, block, L.smem_bytes>>>(
+                L.d_act_in, d_slice_ptrs, L.d_act_out, L.d_shifted,
+                L.C_in, L.C_out, L.B);
+            break;
+        default:
+            fprintf(stderr, "Unsupported CHUNK=%d (only 1, 2, 4)\n", L.CHUNK);
+            abort();
+    }
+}
 
 // ============================================================
 // Correctness tests
@@ -396,200 +468,341 @@ static void test_shift_aliasing(bool& test_failed) {
     free_shifted(sw);
 }
 
+static void test_chunked_sanity(bool& test_failed) {
+    // Kernel 3 at CHUNK=1 must match Kernel 2 (baseline) at the same B.
+    // Structural check on the chunked template before trusting CHUNK=2,4.
+    const int C_in = 128, C_out = 128, B = 4;
+    std::vector<float> h_W((size_t)C_out * C_in * 9);
+    for (size_t i = 0; i < h_W.size(); i++) h_W[i] = det_rand((uint32_t)i, 333);
+    ShiftedWeights sw = alloc_shifted_from_fp32(h_W.data(), C_in, C_out);
+
+    BatchedLaunch L2 = alloc_batched(B, C_in, C_out);
+    ChunkedLaunch L3 = alloc_chunked(B, /*CHUNK=*/1, C_in, C_out);
+
+    std::vector<float> h_input((size_t)B * C_in * 64);
+    for (size_t i = 0; i < h_input.size(); i++) h_input[i] = det_rand((uint32_t)i, 444);
+    CHECK_CUDA(cudaMemcpy(L2.d_act_in, h_input.data(),
+                          h_input.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(L3.d_act_in, h_input.data(),
+                          h_input.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+    run_batched(L2, sw.d_slice_ptrs);
+    run_chunked(L3, sw.d_slice_ptrs);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    std::vector<float> h_out2((size_t)B * C_out * 64), h_out3((size_t)B * C_out * 64);
+    CHECK_CUDA(cudaMemcpy(h_out2.data(), L2.d_act_out, h_out2.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_out3.data(), L3.d_act_out, h_out3.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    int mismatches = 0;
+    float worst_abs = 0.0f;
+    for (size_t i = 0; i < h_out2.size(); i++) {
+        float d = fabsf(h_out2[i] - h_out3[i]);
+        if (d > worst_abs) worst_abs = d;
+        if (d > 1e-3f) mismatches++;
+    }
+    printf("[chunked(CHUNK=1) vs baseline mismatches=%d worst_abs=%.3e] ",
+           mismatches, worst_abs);
+    ASSERT_EQ(mismatches, 0);
+
+    free_batched(L2);
+    free_chunked(L3);
+    free_shifted(sw);
+}
+
+static void test_chunked_independence(bool& test_failed) {
+    // Kernel 3 at CHUNK=4 on B=4 random inputs must match B individual
+    // calls to the existing smem-resident kernel (Kernel 1).
+    const int C_in = 128, C_out = 128, B = 4, CHUNK = 4;
+    std::vector<float> h_W((size_t)C_out * C_in * 9);
+    for (size_t i = 0; i < h_W.size(); i++) h_W[i] = det_rand((uint32_t)i, 555);
+    ShiftedWeights sw = alloc_shifted_from_fp32(h_W.data(), C_in, C_out);
+
+    ChunkedLaunch L = alloc_chunked(B, CHUNK, C_in, C_out);
+    std::vector<float> h_input((size_t)B * C_in * 64);
+    for (size_t i = 0; i < h_input.size(); i++) h_input[i] = det_rand((uint32_t)i, 666);
+    CHECK_CUDA(cudaMemcpy(L.d_act_in, h_input.data(),
+                          h_input.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+    run_chunked(L, sw.d_slice_ptrs);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    std::vector<float> h_out_chunked((size_t)B * C_out * 64);
+    CHECK_CUDA(cudaMemcpy(h_out_chunked.data(), L.d_act_out,
+                          h_out_chunked.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Reference: existing smem-resident kernel, once per batch entry.
+    float *d_in_one, *d_out_one;
+    CHECK_CUDA(cudaMalloc(&d_in_one,  C_in  * 64 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_out_one, C_out * 64 * sizeof(float)));
+    size_t ref_smem_bytes =
+        (size_t)C_in  * 64 * sizeof(float) +
+        (size_t)C_out * 64 * sizeof(float) +
+        (size_t)C_in  * 64 * sizeof(half);
+    cudaFuncSetAttribute(kernel_ref_batch1_conv,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         (int)ref_smem_bytes);
+
+    std::vector<float> h_out_ref((size_t)B * C_out * 64);
+    for (int b = 0; b < B; b++) {
+        CHECK_CUDA(cudaMemcpy(d_in_one, &h_input[(size_t)b * C_in * 64],
+                              C_in * 64 * sizeof(float), cudaMemcpyHostToDevice));
+        kernel_ref_batch1_conv<<<1, 256, ref_smem_bytes>>>(
+            d_in_one, sw.d_slice_ptrs, d_out_one, C_in, C_out);
+        CHECK_CUDA(cudaMemcpy(&h_out_ref[(size_t)b * C_out * 64], d_out_one,
+                              C_out * 64 * sizeof(float), cudaMemcpyDeviceToHost));
+    }
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    int mismatches = 0;
+    float worst_abs = 0.0f, worst_rel = 0.0f;
+    for (int i = 0; i < B * C_out * 64; i++) {
+        float a = h_out_chunked[i], c = h_out_ref[i];
+        float abs_err = fabsf(a - c);
+        float rel_err = abs_err / (fabsf(c) + 1e-6f);
+        if (abs_err > worst_abs) worst_abs = abs_err;
+        if (rel_err > worst_rel) worst_rel = rel_err;
+        if (abs_err > 1e-2f && rel_err > 5e-3f) mismatches++;
+    }
+    printf("[chunked(CHUNK=4) vs smem-ref mismatches=%d worst_abs=%.3e worst_rel=%.3e] ",
+           mismatches, worst_abs, worst_rel);
+    ASSERT_EQ(mismatches, 0);
+
+    cudaFree(d_in_one); cudaFree(d_out_one);
+    free_chunked(L);
+    free_shifted(sw);
+}
+
 // ============================================================
 // Timing sweep + projection
 // ============================================================
 
 struct SweepRow {
+    const char* kernel;       // "K1 smem-ref", "K2 baseline", "K3 CHUNK=N"
+    int   CHUNK;              // 0 for K1/K2, >0 for K3
     int   B;
     float conv_ms;
     float per_pos_ms;
-    float speedup_vs_B1;
-    float proj_full_forward_ms;
-    float proj_sims_per_sec;
+    float speedup_vs_K1;      // ref_k1 per-pos / this per-pos
+    float proj_full_ms;       // 0 if projection suppressed
+    float proj_sims_per_s;    // 0 if projection suppressed
 };
 
 static void run_sweep(bool write_csv, const char* csv_path) {
     const int C_in = 128, C_out = 128;
-    const int Bs[] = {1, 2, 4, 8, 16, 32};
-    const int n_B = sizeof(Bs) / sizeof(int);
     const int WARMUP = 20;
     const int ITERS  = 100;
 
-    // Shared weights (synthetic, random but deterministic).
     std::vector<float> h_W((size_t)C_out * C_in * 9);
     for (size_t i = 0; i < h_W.size(); i++) h_W[i] = det_rand((uint32_t)i, 2024);
     ShiftedWeights sw = alloc_shifted_from_fp32(h_W.data(), C_in, C_out);
 
-    Timer t;
-    std::vector<SweepRow> rows(n_B);
+    Timer timer;
+    std::vector<SweepRow> rows;
 
-    for (int bi = 0; bi < n_B; bi++) {
-        int B = Bs[bi];
+    // ---------- Kernel 1: existing smem-resident kernel, B=1 only ----------
+    float ref_k1_ms = 0.0f;
+    {
+        float *d_in, *d_out;
+        CHECK_CUDA(cudaMalloc(&d_in,  C_in  * 64 * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_out, C_out * 64 * sizeof(float)));
+        std::vector<float> h_in((size_t)C_in * 64);
+        for (size_t i = 0; i < h_in.size(); i++) h_in[i] = det_rand((uint32_t)i, 99);
+        CHECK_CUDA(cudaMemcpy(d_in, h_in.data(),
+                              h_in.size() * sizeof(float), cudaMemcpyHostToDevice));
+        size_t ref_smem_bytes =
+            (size_t)C_in  * 64 * sizeof(float) +
+            (size_t)C_out * 64 * sizeof(float) +
+            (size_t)C_in  * 64 * sizeof(half);
+        cudaFuncSetAttribute(kernel_ref_batch1_conv,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             (int)ref_smem_bytes);
+        auto launch_k1 = [&]() {
+            kernel_ref_batch1_conv<<<1, 256, ref_smem_bytes>>>(
+                d_in, sw.d_slice_ptrs, d_out, C_in, C_out);
+        };
+        for (int i = 0; i < WARMUP; i++) launch_k1();
+        CHECK_CUDA(cudaDeviceSynchronize());
+        ref_k1_ms = timer.measure(ITERS, launch_k1);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        rows.push_back({"K1 smem-ref", 0, 1, ref_k1_ms, ref_k1_ms, 1.0f, 0.0f, 0.0f});
+        cudaFree(d_in); cudaFree(d_out);
+    }
+
+    // ---------- Kernel 2: baseline global-memory, B in {1,2,4,8,16,32} ----------
+    for (int B : {1, 2, 4, 8, 16, 32}) {
         BatchedLaunch L = alloc_batched(B, C_in, C_out);
-
-        // Random input per B (each B gets its own to avoid trivial L2 reuse).
-        std::vector<float> h_input((size_t)B * C_in * 64);
-        for (size_t i = 0; i < h_input.size(); i++)
-            h_input[i] = det_rand((uint32_t)i, 1000u + (uint32_t)B);
-        CHECK_CUDA(cudaMemcpy(L.d_act_in, h_input.data(),
-                              h_input.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-        // Warmup
+        std::vector<float> h_in((size_t)B * C_in * 64);
+        for (size_t i = 0; i < h_in.size(); i++)
+            h_in[i] = det_rand((uint32_t)i, 1000u + (uint32_t)B);
+        CHECK_CUDA(cudaMemcpy(L.d_act_in, h_in.data(),
+                              h_in.size() * sizeof(float), cudaMemcpyHostToDevice));
         for (int i = 0; i < WARMUP; i++) run_batched(L, sw.d_slice_ptrs);
         CHECK_CUDA(cudaDeviceSynchronize());
-
-        // Measure
-        float conv_ms = t.measure(ITERS, [&](){ run_batched(L, sw.d_slice_ptrs); });
+        float ms = timer.measure(ITERS, [&](){ run_batched(L, sw.d_slice_ptrs); });
         CHECK_CUDA(cudaDeviceSynchronize());
-
-        rows[bi].B = B;
-        rows[bi].conv_ms    = conv_ms;
-        rows[bi].per_pos_ms = conv_ms / B;
-
+        float per_pos = ms / B;
+        rows.push_back({"K2 baseline", 0, B, ms, per_pos,
+                        ref_k1_ms / per_pos, 0.0f, 0.0f});
         free_batched(L);
+    }
+
+    // ---------- Kernel 3: chunked, CHUNK in {2, 4} ----------
+    for (int CHUNK : {2, 4}) {
+        const char* label = (CHUNK == 2) ? "K3 CHUNK=2" : "K3 CHUNK=4";
+        for (int B = CHUNK; B <= 32; B *= 2) {
+            ChunkedLaunch L = alloc_chunked(B, CHUNK, C_in, C_out);
+            std::vector<float> h_in((size_t)B * C_in * 64);
+            for (size_t i = 0; i < h_in.size(); i++)
+                h_in[i] = det_rand((uint32_t)i, 2000u + (uint32_t)(100 * CHUNK + B));
+            CHECK_CUDA(cudaMemcpy(L.d_act_in, h_in.data(),
+                                  h_in.size() * sizeof(float), cudaMemcpyHostToDevice));
+            for (int i = 0; i < WARMUP; i++) run_chunked(L, sw.d_slice_ptrs);
+            CHECK_CUDA(cudaDeviceSynchronize());
+            float ms = timer.measure(ITERS, [&](){ run_chunked(L, sw.d_slice_ptrs); });
+            CHECK_CUDA(cudaDeviceSynchronize());
+            float per_pos = ms / B;
+            rows.push_back({label, CHUNK, B, ms, per_pos,
+                            ref_k1_ms / per_pos, 0.0f, 0.0f});
+            free_chunked(L);
+        }
     }
     free_shifted(sw);
 
-    // Derive speedup, scaling fit, full-forward / sims-per-sec projections.
-    float b1_per_pos = rows[0].per_pos_ms;
-    for (int bi = 0; bi < n_B; bi++) {
-        rows[bi].speedup_vs_B1 = b1_per_pos / rows[bi].per_pos_ms;
+    // ---------- Projection (uses measured Kernel 1 as per-conv reference) ----------
+    const int NUM_CONVS = 13;
+    const float FULL_B1_MS = 1.51f;  // production full forward at B=1 (from v2 doc)
+    float ref_conv_total = NUM_CONVS * ref_k1_ms;
+    float non_conv_ms = FULL_B1_MS - ref_conv_total;
+    bool non_conv_trustworthy = (non_conv_ms > 0.05f);
+
+    for (auto& r : rows) {
+        if (!non_conv_trustworthy) continue;
+        float conv_total = NUM_CONVS * r.conv_ms;
+        r.proj_full_ms = conv_total + r.B * non_conv_ms;
+        r.proj_sims_per_s = 36.0f * r.B / (r.proj_full_ms * 1e-3f);
     }
 
-    // Fit t_conv(B) = alpha + beta * B via least-squares on (B, conv_ms).
-    double SB = 0, SBB = 0, ST = 0, SBT = 0;
-    for (int bi = 0; bi < n_B; bi++) {
-        double B = rows[bi].B, T = rows[bi].conv_ms;
-        SB += B; SBB += B*B; ST += T; SBT += B*T;
-    }
-    double n = n_B;
-    double beta  = (n * SBT - SB * ST) / (n * SBB - SB * SB);
-    double alpha = (ST - beta * SB) / n;
-
-    // 6x128 SE-ResNet forward decomposition:
-    //   Measured batch-1 full forward: 1.51 ms (per GPU_MCTS_v2.md, README.md).
-    //   13 conv layers (1 start + 6 * 2 residual). Attribute ~50% of the 1.51 ms
-    //   to conv per the doc. Cross-check by t_conv_measured(B=1) * 13 ~ 0.755 ms.
-    const float FULL_B1_MS     = 1.51f;
-    const int   NUM_CONVS      = 13;
-    float conv_fraction_B1     = (NUM_CONVS * rows[0].conv_ms) / FULL_B1_MS;  // should be ~0.5
-    float non_conv_ms          = FULL_B1_MS - NUM_CONVS * rows[0].conv_ms;
-    // Pessimistic assumption: non-conv time scales linearly with B from its B=1 baseline.
-    float non_conv_per_pos_ms  = non_conv_ms;  // all of non_conv happens once per position
-
-    for (int bi = 0; bi < n_B; bi++) {
-        int B = rows[bi].B;
-        float proj_full = NUM_CONVS * rows[bi].conv_ms + B * non_conv_per_pos_ms;
-        rows[bi].proj_full_forward_ms = proj_full;
-        // v2 sims/sec: 36 blocks, each processing a batch of B positions per forward.
-        rows[bi].proj_sims_per_sec = 36.0f * B / (proj_full * 1e-3f);
-    }
-
-    // --- stdout table ---
+    // ---------- Print comparison table ----------
     printf("\n");
-    printf("===== Batched Shifted-Copy Conv Scaling (128 x 128 x 3x3, single block) =====\n");
-    printf("%4s  %10s  %12s  %10s  %14s  %16s\n",
-           "B", "conv_ms", "per_pos_ms", "speedup", "proj_full_ms", "proj_sims/sec");
-    for (int bi = 0; bi < n_B; bi++) {
-        printf("%4d  %10.4f  %12.4f  %10.2fx  %14.3f  %16.0f\n",
-               rows[bi].B,
-               rows[bi].conv_ms,
-               rows[bi].per_pos_ms,
-               rows[bi].speedup_vs_B1,
-               rows[bi].proj_full_forward_ms,
-               rows[bi].proj_sims_per_sec);
+    printf("===== Conv Scaling Comparison (128 x 128 x 3x3, single block) =====\n");
+    printf("Reference: Kernel 1 (smem-resident) per-conv @ B=1: %.4f ms\n\n", ref_k1_ms);
+    printf("%-14s  %5s  %4s  %10s  %12s  %12s  %14s  %16s\n",
+           "kernel", "CHUNK", "B", "conv_ms", "per_pos_ms",
+           "speedup_K1", "proj_full_ms", "proj_sims/sec");
+    for (auto& r : rows) {
+        if (r.proj_full_ms > 0) {
+            printf("%-14s  %5d  %4d  %10.4f  %12.4f  %11.2fx  %14.3f  %16.0f\n",
+                   r.kernel, r.CHUNK, r.B, r.conv_ms, r.per_pos_ms,
+                   r.speedup_vs_K1, r.proj_full_ms, r.proj_sims_per_s);
+        } else {
+            printf("%-14s  %5d  %4d  %10.4f  %12.4f  %11.2fx  %14s  %16s\n",
+                   r.kernel, r.CHUNK, r.B, r.conv_ms, r.per_pos_ms,
+                   r.speedup_vs_K1, "(suppressed)", "(suppressed)");
+        }
     }
-    printf("\nFit:  t_conv(B)  =  %.4f + %.4f * B  ms\n", alpha, beta);
-    printf("B=1 conv-fraction of 1.51 ms baseline: %.2f  (expected ~0.50)\n", conv_fraction_B1);
-    printf("non-conv time attributed to B=1 baseline: %.3f ms\n", non_conv_ms);
 
-    // Decision thresholds from the plan.
-    //
-    // IMPORTANT: this kernel is a CONSERVATIVE baseline. It implements the
-    // outer-loop-per-batch structure (each pass = one batch element, same
-    // shape as existing block_conv_3x3_shifted). It does NOT implement the
-    // Phase-4 optimizations that the v2 doc's 7-10x projection assumes:
-    //   - Holding 4*CHUNK accumulators alive per warp (amortize weight
-    //     loads over CHUNK batches per GEMM pass).
-    //   - Re-splitting warps across spatial*batch dimension (fill idle
-    //     warps at small B).
-    //
-    // Expected outcome for THIS baseline: speedup close to 1.00x (flat
-    // per-position cost), because per-position work is essentially
-    // identical to running the existing kernel B times. Any speedup above
-    // 1.0x is pure amortization of per-launch overhead + L2 caching of
-    // weights across passes. Typical: 1.1-1.5x at B=32.
-    //
-    // Interpretation of ratio at B=32:
-    //   ~ 1.0-1.5x  Baseline behaves as expected. Build the chunked-
-    //               accumulator variant next to measure Phase-4 headroom.
-    //   > 2x        Better than expected — weight L2 caching or pipeline
-    //               benefits larger than estimated. Good sign for Phase 4.
-    //   << 1x       Regression — something is slower than existing kernel.
-    //               Investigate before Phase 4.
-    // The plan's 6.4x / 4x / <4x thresholds apply to the OPTIMIZED Phase 4
-    // kernel, not this baseline. Do not call go/no-go from this run alone.
-    float ratio = rows[n_B-1].speedup_vs_B1;
-    printf("\nPer-position speedup B=1 -> B=%d: %.2fx  (baseline kernel)\n",
-           Bs[n_B-1], ratio);
-    if (ratio < 0.9f) {
-        printf(">>> REGRESSION vs expected ~1x. Investigate before moving on.\n");
-    } else if (ratio < 1.6f) {
-        printf(">>> EXPECTED for baseline kernel. Next step: implement chunked-\n"
-               "    accumulator variant (hold 4*CHUNK accs per warp) to measure\n"
-               "    Phase-4 headroom before calling go/no-go.\n");
-    } else if (ratio < 4.0f) {
-        printf(">>> BETTER THAN EXPECTED baseline. Positive signal for Phase 4 —\n"
-               "    chunked variant likely to clear the 6.4x threshold.\n");
+    // ---------- Key derived ratios ----------
+    printf("\n--- Key ratios ---\n");
+    float k2_b1 = 0, k2_b32 = 0, k3c2_b32 = 0, k3c4_b32 = 0;
+    for (auto& r : rows) {
+        if (strcmp(r.kernel, "K2 baseline") == 0 && r.B == 1)  k2_b1  = r.per_pos_ms;
+        if (strcmp(r.kernel, "K2 baseline") == 0 && r.B == 32) k2_b32 = r.per_pos_ms;
+        if (r.CHUNK == 2 && r.B == 32) k3c2_b32 = r.per_pos_ms;
+        if (r.CHUNK == 4 && r.B == 32) k3c4_b32 = r.per_pos_ms;
+    }
+    if (k2_b1 > 0) {
+        printf("Global-mem tax: K2 B=1 per-pos / K1 per-pos = %.2fx  (>1 means slower)\n",
+               k2_b1 / ref_k1_ms);
+    }
+    if (k3c2_b32 > 0) {
+        printf("K3 (CHUNK=2, B=32) per-pos vs K1: %.2fx  (>1 means faster than smem-ref)\n",
+               ref_k1_ms / k3c2_b32);
+    }
+    if (k3c4_b32 > 0) {
+        printf("K3 (CHUNK=4, B=32) per-pos vs K1: %.2fx  (>1 means faster than smem-ref)\n",
+               ref_k1_ms / k3c4_b32);
+        if (k2_b1 > 0) {
+            printf("K3 (CHUNK=4, B=32) per-pos vs K2 B=1: %.2fx  (isolates chunking gain)\n",
+                   k2_b1 / k3c4_b32);
+        }
+    }
+
+    // ---------- Decision ----------
+    printf("\n--- Decision ---\n");
+    if (non_conv_trustworthy) {
+        printf("Reference conv fraction of 1.51 ms forward: %.2f (expected ~0.5)\n",
+               ref_conv_total / FULL_B1_MS);
+        printf("Non-conv time attributed to B=1 forward: %.3f ms\n", non_conv_ms);
     } else {
-        printf(">>> EXCELLENT. Baseline already approaches Phase 4 target.\n");
+        printf("NON-CONV COMPUTATION WOULD BE NEGATIVE (%.3f ms). The 1.51 ms full-forward\n"
+               "reference from the v2 doc does not match this GPU's per-conv measurement.\n"
+               "Projections suppressed. Remeasure full forward on this GPU via\n"
+               "test_profile_latency with real weights to calibrate.\n", non_conv_ms);
+    }
+    if (k3c4_b32 > 0 && ref_k1_ms > 0) {
+        float r = ref_k1_ms / k3c4_b32;
+        if (r >= 3.0f) {
+            printf(">>> STRONG GO. K3 (CHUNK=4, B=32) per position is %.2fx faster than\n"
+                   "    the existing smem-resident kernel. Phase 4 commits its thesis.\n", r);
+        } else if (r >= 1.5f) {
+            printf(">>> MODEST GO. K3 (CHUNK=4, B=32) per position is %.2fx faster than\n"
+                   "    the existing kernel. Phase 4 viable; revise throughput\n"
+                   "    projections down before committing downstream work.\n", r);
+        } else if (r >= 0.9f) {
+            printf(">>> MARGINAL. K3 (CHUNK=4, B=32) roughly matches the existing kernel\n"
+                   "    per position. Further kernel work (larger CHUNK, warp\n"
+                   "    redistribution, Winograd) needed before Phase 4 commits.\n");
+        } else {
+            printf(">>> NO-GO. K3 (CHUNK=4, B=32) per position is %.2fx of the existing\n"
+                   "    kernel — global-memory overhead exceeds batching benefit.\n"
+                   "    Rethink Phase 4 memory layout.\n", r);
+        }
     }
 
-    // --- Extrapolation to Leela network sizes (compute-scaling only) ---
-    //   Per-layer compute scales as (C/128)^2. Block count scales linearly.
-    //   Use beta (per-position arithmetic) to extrapolate.
-    struct Net { const char* name; int channels; int blocks; };
-    Net nets[] = {
-        {"6x128 own",     128,  6},
-        {"10x128 Leela",  128, 10},
-        {"15x192 Leela",  192, 15},
-        {"20x256 Leela",  256, 20},
-        {"24x320 Leela",  320, 24},
-    };
-    int B_ref = 32;
-    // Estimate projected conv-only ms at B_ref for each net:
-    //   t_conv_net(B) = t_conv_6x128(B) * (C/128)^2 * (2*blocks+1)/13
-    printf("\n--- Projection to Leela networks at B=%d ---\n", B_ref);
-    printf("%-16s  %10s  %12s  %16s\n",
-           "network", "full_ms", "per_pos_ms", "sims/sec (36 blk)");
-    // Find measured conv_ms at B=B_ref
-    float conv_ms_ref = 0.0f;
-    for (int bi = 0; bi < n_B; bi++) if (rows[bi].B == B_ref) conv_ms_ref = rows[bi].conv_ms;
-    for (auto& net : nets) {
-        float scale_ch    = (float)net.channels / 128.0f;
-        float conv_scale  = scale_ch * scale_ch * (float)(2 * net.blocks + 1) / (float)NUM_CONVS;
-        float conv_tot    = conv_ms_ref * conv_scale;
-        // Assume non-conv overhead scales linearly with batch (same as 6x128 case).
-        // For larger networks the non-conv portion is a small fraction of the total;
-        // keep the same B=1 non_conv estimate (pessimistic).
-        float full_ms     = conv_tot + B_ref * non_conv_per_pos_ms;
-        float per_pos_ms  = full_ms / B_ref;
-        float sims_per_s  = 36.0f * B_ref / (full_ms * 1e-3f);
-        printf("%-16s  %10.3f  %12.4f  %16.0f\n",
-               net.name, full_ms, per_pos_ms, sims_per_s);
+    // ---------- Leela extrapolation using best chunked per-pass time ----------
+    if (k3c4_b32 > 0 && non_conv_trustworthy) {
+        struct Net { const char* name; int channels; int blocks; };
+        Net nets[] = {
+            {"6x128 own",     128,  6},
+            {"10x128 Leela",  128, 10},
+            {"15x192 Leela",  192, 15},
+            {"20x256 Leela",  256, 20},
+            {"24x320 Leela",  320, 24},
+        };
+        float k3_conv_ms_b32 = 0;
+        for (auto& r : rows)
+            if (r.CHUNK == 4 && r.B == 32) k3_conv_ms_b32 = r.conv_ms;
+        int B_ref = 32;
+        printf("\n--- Projection to Leela nets at B=%d (using K3 CHUNK=4 per-conv scaling) ---\n",
+               B_ref);
+        printf("%-16s  %10s  %12s  %16s\n",
+               "network", "full_ms", "per_pos_ms", "sims/sec (36 blk)");
+        for (auto& net : nets) {
+            float scale_ch   = (float)net.channels / 128.0f;
+            float conv_scale = scale_ch * scale_ch *
+                               (float)(2 * net.blocks + 1) / (float)NUM_CONVS;
+            float conv_tot   = k3_conv_ms_b32 * conv_scale;
+            float full_ms    = conv_tot + B_ref * non_conv_ms;
+            float per_pos    = full_ms / B_ref;
+            float sps        = 36.0f * B_ref / (full_ms * 1e-3f);
+            printf("%-16s  %10.3f  %12.4f  %16.0f\n",
+                   net.name, full_ms, per_pos, sps);
+        }
     }
 
-    // --- CSV ---
+    // ---------- CSV ----------
     if (write_csv && csv_path) {
         FILE* f = fopen(csv_path, "w");
         if (f) {
-            fprintf(f, "B,conv_ms,per_pos_ms,speedup_vs_B1,proj_full_forward_ms,proj_sims_per_sec\n");
-            for (int bi = 0; bi < n_B; bi++) {
-                fprintf(f, "%d,%.6f,%.6f,%.4f,%.6f,%.2f\n",
-                        rows[bi].B, rows[bi].conv_ms, rows[bi].per_pos_ms,
-                        rows[bi].speedup_vs_B1, rows[bi].proj_full_forward_ms,
-                        rows[bi].proj_sims_per_sec);
+            fprintf(f, "kernel,CHUNK,B,conv_ms,per_pos_ms,speedup_vs_K1,"
+                       "proj_full_ms,proj_sims_per_s\n");
+            for (auto& r : rows) {
+                fprintf(f, "%s,%d,%d,%.6f,%.6f,%.4f,%.6f,%.2f\n",
+                        r.kernel, r.CHUNK, r.B, r.conv_ms, r.per_pos_ms,
+                        r.speedup_vs_K1, r.proj_full_ms, r.proj_sims_per_s);
             }
             fclose(f);
             printf("\nCSV written: %s\n", csv_path);
@@ -624,6 +837,8 @@ int main(int argc, char** argv) {
         RUN_TEST(test_replication);
         RUN_TEST(test_independence);
         RUN_TEST(test_shift_aliasing);
+        RUN_TEST(test_chunked_sanity);
+        RUN_TEST(test_chunked_independence);
         printf("Tests: %d/%d passed\n", passes, total);
         if (failures > 0) {
             printf("Correctness failures; skipping benchmark.\n");

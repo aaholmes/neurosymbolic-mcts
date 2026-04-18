@@ -1,9 +1,8 @@
 #include "block_ops_batched.cuh"
-#include <mma.h>
 using namespace nvcuda;
 
 // ============================================================
-// Batched shifted-copy 9-GEMM 3x3 convolution.
+// Kernel 2 (baseline): Batched shifted-copy 9-GEMM 3x3 conv.
 //
 // This is the MINIMAL correct extension of block_conv_3x3_shifted
 // to batch B: an outer loop that processes one batch element per
@@ -36,9 +35,6 @@ using namespace nvcuda;
 //   global scratch (reused across passes).
 // ============================================================
 
-__device__ static const int KY_TABLE_B[9] = {-1, -1, -1, 0, 0, 0, 1, 1, 1};
-__device__ static const int KX_TABLE_B[9] = {-1, 0, 1, -1, 0, 1, -1, 0, 1};
-
 __device__ void block_conv_3x3_shifted_batched(
     const float* __restrict__ act_in,
     half* const*             W_s,
@@ -68,8 +64,8 @@ __device__ void block_conv_3x3_shifted_batched(
         for (int t = 0; t < 4; t++) wmma::fill_fragment(acc[t], 0.0f);
 
         for (int s = 0; s < 9; s++) {
-            const int ky = KY_TABLE_B[s];
-            const int kx = KX_TABLE_B[s];
+            const int ky = conv3x3_ky(s);
+            const int kx = conv3x3_kx(s);
             const half* W_slice = W_s[s];
 
             // ----- Build shifted[C_in, 64] FP16 for this (pass, shift) -----
