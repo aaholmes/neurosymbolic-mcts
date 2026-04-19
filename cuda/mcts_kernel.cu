@@ -1277,8 +1277,17 @@ int gpu_mcts_eval_trees(
     // Read back alloc counters to get nodes_allocated per tree
     int h_alloc[64] = {0};
     cudaMemcpyFromSymbol(h_alloc, g_eval_alloc_counters, num_trees * sizeof(int));
-    for (int i = 0; i < num_trees; i++)
+    int watermark = (int)(0.9f * (float)max_nodes_per_tree);
+    for (int i = 0; i < num_trees; i++) {
         h_results[i].nodes_allocated = h_alloc[i];
+        if (h_alloc[i] >= watermark) {
+            fprintf(stderr,
+                    "WARNING [gpu_mcts_eval_trees] tree %d alloc=%d >= 0.9*max=%d "
+                    "(max_nodes_per_tree=%d, sims=%d). Pool exhaustion likely "
+                    "fake-terminalized expansions.\n",
+                    i, h_alloc[i], watermark, max_nodes_per_tree, simulations_per_tree);
+        }
+    }
 
     return num_trees;
 }

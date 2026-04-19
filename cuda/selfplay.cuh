@@ -90,6 +90,23 @@ struct EvalResult {
 };
 
 // ============================================================
+// Pool-size discipline
+//
+// Required: max_nodes_per_tree >= max(8192, sims_per_move * 35).
+// At branching ~30, a 200-sim search needs ~6000 nodes; pool=8192 gives
+// headroom and keeps the per-tree pool below the watermark.
+//
+// Returns true iff config is valid. Caller should refuse to run if false.
+// Reason for failure is printed to stderr.
+// ============================================================
+constexpr int MIN_POOL_PER_TREE = 8192;
+constexpr int POOL_FACTOR_PER_SIM = 35;
+constexpr float POOL_WATERMARK = 0.9f;
+
+bool validate_pool_size(int max_nodes_per_tree, int sims_per_move,
+                        const char* context);
+
+// ============================================================
 // Exposed for testing
 // ============================================================
 

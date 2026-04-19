@@ -69,7 +69,10 @@ static_assert(sizeof(BoardState) == 128, "BoardState must be 128 bytes");
 // Cache line 2 (bytes 128-255): Board state
 // ============================================================
 
-constexpr int MAX_NODES = 65536;
+// Sized to fit SP_MAX_CONCURRENT (36) trees at the new minimum pool of 8192
+// per tree, with headroom: 36 * 8192 = 294912; round up to 524288 (128 MB
+// at 256 B/node) so future per-tree increases don't require a rebuild.
+constexpr int MAX_NODES = 524288;
 
 struct __align__(256) MCTSNode {
     // === Cache line 1: Selection/backprop hot data ===

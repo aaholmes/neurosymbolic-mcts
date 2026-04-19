@@ -12,6 +12,21 @@
 #include <ctime>
 #include <sys/stat.h>
 
+bool validate_pool_size(int max_nodes_per_tree, int sims_per_move,
+                        const char* context) {
+    int required = sims_per_move * POOL_FACTOR_PER_SIM;
+    if (required < MIN_POOL_PER_TREE) required = MIN_POOL_PER_TREE;
+    if (max_nodes_per_tree < required) {
+        fprintf(stderr,
+                "ERROR [%s]: max_nodes_per_tree=%d below required=%d "
+                "(max(%d, sims_per_move=%d * %d)). Increase --pool-size.\n",
+                context, max_nodes_per_tree, required,
+                MIN_POOL_PER_TREE, sims_per_move, POOL_FACTOR_PER_SIM);
+        return false;
+    }
+    return true;
+}
+
 // ============================================================
 // Host-side board encoding: BoardState → [17, 64] float
 // Mirrors block_board_to_planes / tf_board_to_tokens logic
@@ -320,6 +335,10 @@ int run_selfplay_games(
     GameRecord* records,
     int num_games
 ) {
+    if (!validate_pool_size(config.max_nodes_per_tree,
+                            config.sims_per_move, "run_selfplay_games")) {
+        return -1;
+    }
     init_zobrist();
 
     int concurrent = config.max_concurrent;
@@ -629,6 +648,12 @@ int run_selfplay(
     for (int i = 0; i < num_games; i++) { records[i].samples = nullptr; records[i].num_samples = 0; records[i].result = 0; }
 
     int total = run_selfplay_games(d_weights, config, records, num_games);
+    if (total < 0) {
+        delete[] records;
+        if (config.use_resnet) free_nn_weights((OracleNetWeights*)d_weights);
+        else                   free_transformer_weights((TransformerWeights*)d_weights);
+        return -1;
+    }
 
     // Write to output directory
     mkdir(output_dir, 0755);
@@ -695,9 +720,12 @@ EvalResult run_eval_games(
     void* d_weights_b,
     const EvalConfig& config
 ) {
-    init_zobrist();
-
     EvalResult result = {0, 0, 0, 0, 0.0f, "inconclusive"};
+    if (!validate_pool_size(config.max_nodes_per_tree,
+                            config.sims_per_move, "run_eval_games")) {
+        return result;
+    }
+    init_zobrist();
     bool save_data = (config.training_data_dir != nullptr);
     bool do_sprt = (config.sprt_elo1 > config.sprt_elo0);
     bool sprt_decided = false;

@@ -117,3 +117,8 @@ set_target_properties(test_selfplay_and_ops PROPERTIES CUDA_SEPARABLE_COMPILATIO
 add_executable(test_batched_conv_scaling test/test_batched_conv_scaling.cu)
 target_link_libraries(test_batched_conv_scaling caissawary_cuda)
 set_target_properties(test_batched_conv_scaling PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Pool size & alloc-counter assertions
+add_executable(test_pool_assertions test/test_pool_assertions.cu)
+target_link_libraries(test_pool_assertions caissawary_cuda)
+set_target_properties(test_pool_assertions PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
