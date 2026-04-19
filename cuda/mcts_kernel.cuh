@@ -145,18 +145,21 @@ int gpu_mcts_eval_trees(
 // For each tree i:
 //   if fresh_starts[i]:
 //     - zero tree i's partition, upload root_positions[i]
-//     - set game_root_idxs[i] = partition base
+//     - game_root_idxs[i] is overwritten with the partition base
 //     - new_sims = target_visit_count
 //   else:
-//     - keep tree i's partition as-is, root = game_root_idxs[i]
+//     - keep tree i's partition as-is, search root = game_root_idxs[i]
 //     - carried = root.visit_count; new_sims = max(0, target_visit_count - carried)
 //
 // After kernel returns:
-//   - h_results[i] populated (best_move, root_value, nodes_allocated, total_simulations).
-//   - game_root_idxs[i] advanced to the chosen child's absolute pool index.
-//   - new root's parent_idx set to -1.
+//   - h_results[i] populated (best_move = highest-visit child, root_value,
+//     nodes_allocated, total_simulations).
+//   - game_root_idxs[i] is the SEARCH root index (NOT advanced to a child).
 //
-// game_root_idxs and fresh_starts are per-tree arrays of length num_trees.
+// To advance to the next move, the caller picks a child (argmax for greedy,
+// sampled for self-play exploration), computes new_root_idx =
+// search_root.first_child_idx + chosen_local, and calls gpu_patch_subtree_roots
+// to mark that node as the new search root.
 int gpu_mcts_eval_trees_budget(
     const BoardState* root_positions,
     int num_trees,
@@ -171,6 +174,10 @@ int gpu_mcts_eval_trees_budget(
     const bool* fresh_starts,
     ConvWeightsShifted* d_shifted_w_cached = nullptr
 );
+
+// Patch parent_idx = -1 for each given pool index. Use after picking a child
+// to make it the new search root for subsequent budget-reuse calls.
+void gpu_patch_subtree_roots(const int* root_idxs, int num_trees);
 
 // ============================================================
 // Transformer-mode search

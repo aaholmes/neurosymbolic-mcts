@@ -1310,6 +1310,15 @@ __global__ void set_parent_to_root_kernel(const int* root_idxs, int num_trees) {
     }
 }
 
+void gpu_patch_subtree_roots(const int* root_idxs, int num_trees) {
+    if (num_trees <= 0) return;
+    int* d_idxs = nullptr;
+    cudaMalloc(&d_idxs, num_trees * sizeof(int));
+    cudaMemcpy(d_idxs, root_idxs, num_trees * sizeof(int), cudaMemcpyHostToDevice);
+    set_parent_to_root_kernel<<<1, num_trees>>>(d_idxs, num_trees);
+    cudaFree(d_idxs);
+}
+
 // Helper: upload a board state into the MCTSNode at slot offsets[i].
 static void upload_root_to_slot(int slot_idx, const BoardState& pos, void* d_pool_base) {
     MCTSNode h_root;
@@ -1438,8 +1447,8 @@ int gpu_mcts_eval_trees_budget(
         return 0;
     }
 
-    // Read results, advance roots to chosen child, patch new parent_idx = -1.
-    int new_root_idxs[64];
+    // Read results from each search root. The caller is responsible for
+    // picking a child and advancing via gpu_patch_subtree_roots.
     for (int i = 0; i < num_trees; i++) {
         int root_idx = game_root_idxs[i];
         MCTSNode h_root;
@@ -1449,9 +1458,8 @@ int gpu_mcts_eval_trees_budget(
         h_results[i].nodes_allocated = 0; // filled below
 
         if (h_root.num_children > 0 && h_root.first_child_idx >= 0) {
-            int best_local  = 0;
             int best_visits = -1;
-            MCTSNode h_best;
+            MCTSNode h_best = {};
             for (int c = 0; c < h_root.num_children; c++) {
                 MCTSNode h_child;
                 cudaMemcpy(&h_child, (char*)d_pool_base +
@@ -1459,7 +1467,6 @@ int gpu_mcts_eval_trees_budget(
                            sizeof(MCTSNode), cudaMemcpyDeviceToHost);
                 if (h_child.visit_count > best_visits) {
                     best_visits = h_child.visit_count;
-                    best_local  = c;
                     h_best      = h_child;
                 }
             }
@@ -1469,24 +1476,12 @@ int gpu_mcts_eval_trees_budget(
             h_results[i].best_move_promo = GPU_MOVE_PROMO(mv);
             h_results[i].root_value = (h_best.visit_count > 0)
                 ? -(h_best.total_value / (float)h_best.visit_count) : 0.0f;
-            new_root_idxs[i] = h_root.first_child_idx + best_local;
         } else {
             h_results[i].best_move_from  = 0;
             h_results[i].best_move_to    = 0;
             h_results[i].best_move_promo = 0;
             h_results[i].root_value = h_root.is_terminal ? h_root.terminal_value : 0.0f;
-            new_root_idxs[i] = root_idx; // no advance possible
         }
-    }
-
-    // Patch new roots' parent_idx to -1 in a single kernel call.
-    {
-        int* d_new = nullptr;
-        cudaMalloc(&d_new, num_trees * sizeof(int));
-        cudaMemcpy(d_new, new_root_idxs, num_trees * sizeof(int), cudaMemcpyHostToDevice);
-        set_parent_to_root_kernel<<<1, num_trees>>>(d_new, num_trees);
-        cudaFree(d_new);
-        for (int i = 0; i < num_trees; i++) game_root_idxs[i] = new_root_idxs[i];
     }
 
     // Read back alloc counters + watermark check.

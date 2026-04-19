@@ -45,14 +45,16 @@ static int run_selfplay_cmd(int argc, char** argv) {
     config.explore_base = 0.80f;
     config.enable_koth = has_flag(argc, argv, "--koth");
     config.use_resnet = has_flag(argc, argv, "--resnet");
+    config.use_reuse  = has_flag(argc, argv, "--compact-reuse");
     config.c_puct = 1.414f;
     config.max_concurrent = SP_MAX_CONCURRENT;
     config.seed = parse_seed(argc, argv);
 
     int actual = config.num_games < config.max_concurrent ? config.num_games : config.max_concurrent;
-    printf("Self-play: %d games, %d sims/move, %d concurrent, seed=%d%s\n",
+    printf("Self-play: %d games, %d sims/move, %d concurrent, seed=%d%s%s\n",
            config.num_games, config.sims_per_move, actual, config.seed,
-           config.use_resnet ? ", resnet" : ", transformer");
+           config.use_resnet ? ", resnet" : ", transformer",
+           config.use_reuse ? ", reuse" : "");
 
     clock_t start = clock();
     int samples = run_selfplay(argv[2], config, argv[5]);

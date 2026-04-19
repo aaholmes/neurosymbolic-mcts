@@ -21,15 +21,21 @@ constexpr int SP_MAX_CONCURRENT = 36;
 
 struct SelfPlayConfig {
     int num_games;                // total games to play
-    int sims_per_move;            // MCTS simulations per move
-    int max_nodes_per_tree;       // node pool per tree (default 4096)
+    int sims_per_move;            // MCTS simulations per move (target visit count)
+    int max_nodes_per_tree;       // node pool per tree (>= MIN_POOL_PER_TREE)
     float explore_base;           // proportional sampling decay (default 0.80)
     bool enable_koth;             // King of the Hill
     float c_puct;                 // PUCT exploration constant
     int max_concurrent;           // max concurrent games (default 36)
     int seed;                     // base RNG seed (each game gets seed derived from game_idx + this)
     bool use_resnet;              // use SE-ResNet kernel instead of transformer
+    bool use_reuse;               // use gpu_mcts_eval_trees_budget (subtree reuse) — resnet only
 };
+
+// Threshold above which a tree's per-call alloc counter forces fresh restart
+// on the next move tick. Set below the watermark (POOL_WATERMARK = 0.9) so
+// normal reuse cycling never trips the warning.
+constexpr float REUSE_RESTART_THRESHOLD = 0.8f;
 
 struct GameRecord {
     float* samples;    // heap-allocated: SP_MAX_MOVES_PER_GAME * SP_SAMPLE_FLOATS floats

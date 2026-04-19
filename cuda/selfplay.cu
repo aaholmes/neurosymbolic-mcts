@@ -377,12 +377,19 @@ int run_selfplay_games(
         int game_idx;     // index into records[]
         bool white_started;  // for value assignment
         GameRng rng;       // per-game deterministic RNG
+        // Reuse-mode state (used only when config.use_reuse is true):
+        bool fresh_next;     // next tick must start fresh (initial or alloc-counter > 0.8*max)
+        int  last_alloc;     // alloc counter from prior call, for restart-trigger check
     };
 
     ActiveGame* games = new ActiveGame[concurrent];
     int games_started = 0;
     int games_completed = 0;
     int total_samples = 0;
+
+    // Reuse-mode: per-slot search-root index (in pool). Updated each tick.
+    int reuse_root_idxs[SP_MAX_CONCURRENT];
+    memset(reuse_root_idxs, 0, sizeof(reuse_root_idxs));
 
     // Initialize first batch
     auto init_game = [&](ActiveGame& g, int game_idx) {
@@ -392,6 +399,8 @@ int run_selfplay_games(
         g.game_idx = game_idx;
         g.white_started = true;
         g.rng.seed(game_idx, config.seed);
+        g.fresh_next = true;
+        g.last_alloc = 0;
         uint64_t h = compute_hash(g.board);
         g.hash_history[g.hash_count++] = h;
         if (!records[game_idx].samples) records[game_idx].alloc();
@@ -416,7 +425,29 @@ int run_selfplay_games(
         TreeEvalResult results[SP_MAX_CONCURRENT];
         memset(results, 0, sizeof(results));
 
-        if (config.use_resnet) {
+        if (config.use_resnet && config.use_reuse) {
+            // Build per-slot fresh_starts and game_root_idxs from prior state.
+            bool fresh_starts[SP_MAX_CONCURRENT];
+            int  watermark = (int)(REUSE_RESTART_THRESHOLD * (float)config.max_nodes_per_tree);
+            for (int i = 0; i < active_count; i++) {
+                if (games[i].fresh_next || games[i].last_alloc > watermark) {
+                    fresh_starts[i] = true;
+                } else {
+                    fresh_starts[i] = false;
+                }
+            }
+            gpu_mcts_eval_trees_budget(
+                positions, active_count,
+                config.sims_per_move, config.max_nodes_per_tree,
+                config.enable_koth, config.c_puct,
+                (OracleNetWeights*)d_weights, d_policy_bufs, results,
+                reuse_root_idxs, fresh_starts, d_shifted_w
+            );
+            for (int i = 0; i < active_count; i++) {
+                games[i].fresh_next = false;
+                games[i].last_alloc = results[i].nodes_allocated;
+            }
+        } else if (config.use_resnet) {
             gpu_mcts_eval_trees(
                 positions, active_count,
                 config.sims_per_move, config.max_nodes_per_tree,
@@ -467,9 +498,11 @@ int run_selfplay_games(
                 void* d_pool_ptr = nullptr;
                 cudaGetSymbolAddress(&d_pool_ptr, g_node_pool);
 
-                // Find the root for this tree
-                // The eval kernel uses tree offsets: tree i starts at i * max_nodes_per_tree
-                int tree_offset = i * config.max_nodes_per_tree;
+                // Find the search root for this tree. With reuse, this may
+                // not equal the partition base.
+                int tree_offset = config.use_reuse
+                    ? reuse_root_idxs[i]
+                    : i * config.max_nodes_per_tree;
                 MCTSNode h_root;
                 cudaMemcpy(&h_root, (char*)d_pool_ptr + tree_offset * sizeof(MCTSNode),
                            sizeof(MCTSNode), cudaMemcpyDeviceToHost);
@@ -520,6 +553,21 @@ int run_selfplay_games(
                 }
 
                 if (chosen != 0 && num_children > 0) {
+                    // Reuse-mode: advance search root to the chosen child.
+                    // We patch parent_idx via a single-tree call here for clarity;
+                    // could be batched if profiling shows latency dominates.
+                    if (config.use_reuse) {
+                        int chosen_local = -1;
+                        for (int c = 0; c < num_children; c++) {
+                            if (h_moves[c] == chosen) { chosen_local = c; break; }
+                        }
+                        if (chosen_local >= 0) {
+                            int new_root = h_root.first_child_idx + chosen_local;
+                            gpu_patch_subtree_roots(&new_root, 1);
+                            reuse_root_idxs[i] = new_root;
+                        }
+                    }
+
                     // Apply move on host via GPU kernel
                     cudaMemcpy(d_bs, &g.board, sizeof(BoardState), cudaMemcpyHostToDevice);
                     kernel_apply_move<<<1, 1>>>(d_bs, chosen);
@@ -603,10 +651,15 @@ int run_selfplay_games(
                 // Replace with new game if more needed
                 if (games_started < num_games) {
                     init_game(games[i], games_started++);
+                    // The new game must start fresh; init_game already set
+                    // fresh_next=true so reuse_root_idxs[i] will be overwritten
+                    // by the budget call.
                 } else {
                     // Remove from active list by swapping with last
-                    if (i < active_count - 1)
+                    if (i < active_count - 1) {
                         games[i] = games[active_count - 1];
+                        reuse_root_idxs[i] = reuse_root_idxs[active_count - 1];
+                    }
                     active_count--;
                 }
             }
