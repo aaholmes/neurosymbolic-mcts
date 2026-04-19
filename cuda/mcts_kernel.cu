@@ -1153,7 +1153,8 @@ int gpu_mcts_eval_trees(
     float c_puct,
     OracleNetWeights* d_weights,
     float* d_policy_bufs,
-    TreeEvalResult* h_results
+    TreeEvalResult* h_results,
+    ConvWeightsShifted* d_shifted_w_cached
 ) {
     if (num_trees <= 0 || num_trees > 64) return 0;
     if (d_weights != nullptr && d_policy_bufs == nullptr) {
@@ -1213,10 +1214,16 @@ int gpu_mcts_eval_trees(
     cudaFuncSetAttribute(mcts_kernel_eval,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_bytes);
 
-    // Convert weights for shifted-copy Tensor Core conv path
+    // Convert weights for shifted-copy Tensor Core conv path.
+    // Caller may pass a pre-converted cached pointer to skip the per-call
+    // alloc/convert/free overhead.
     ConvWeightsHalf* d_half_w = nullptr;
-    ConvWeightsShifted* d_shifted_w = nullptr;
-    if (d_weights) d_shifted_w = convert_weights_shifted(d_weights);
+    ConvWeightsShifted* d_shifted_w = d_shifted_w_cached;
+    bool own_shifted = false;
+    if (!d_shifted_w && d_weights) {
+        d_shifted_w = convert_weights_shifted(d_weights);
+        own_shifted = true;
+    }
 
     mcts_kernel_eval<<<num_trees, 256, smem_bytes>>>(
         simulations_per_tree, max_nodes_per_tree, enable_koth, c_puct,
@@ -1226,11 +1233,11 @@ int gpu_mcts_eval_trees(
     if (err != cudaSuccess) {
         printf("CUDA multi-tree eval error: %s\n", cudaGetErrorString(err));
         free_half_weights(d_half_w);
-        free_shifted_weights(d_shifted_w);
+        if (own_shifted) free_shifted_weights(d_shifted_w);
         return 0;
     }
     free_half_weights(d_half_w);
-    free_shifted_weights(d_shifted_w);
+    if (own_shifted) free_shifted_weights(d_shifted_w);
 
     // Read back results
     void* d_pool = nullptr;

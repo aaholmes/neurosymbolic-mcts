@@ -123,6 +123,10 @@ struct TreeEvalResult {
 // d_policy_bufs: pre-allocated [num_trees × NN_POLICY_SIZE] floats
 //
 // Returns number of trees processed.
+// d_shifted_w_cached: optional pre-converted FP16 shifted weights (from
+// convert_weights_shifted). If non-null, used directly; if null, converted
+// internally per call. Caller should cache this for the lifetime of d_weights
+// to avoid the per-call alloc/convert/free overhead (~hundreds of µs).
 int gpu_mcts_eval_trees(
     const BoardState* root_positions,
     int num_trees,
@@ -132,7 +136,8 @@ int gpu_mcts_eval_trees(
     float c_puct,
     OracleNetWeights* d_weights,
     float* d_policy_bufs,
-    TreeEvalResult* h_results
+    TreeEvalResult* h_results,
+    ConvWeightsShifted* d_shifted_w_cached = nullptr
 );
 
 // ============================================================

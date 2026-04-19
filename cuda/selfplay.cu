@@ -330,6 +330,13 @@ int run_selfplay_games(
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, concurrent * NN_POLICY_SIZE * sizeof(float));
 
+    // Pre-convert shifted weights once for the lifetime of the run.
+    // Avoids the per-call alloc/convert/free path in gpu_mcts_eval_trees.
+    ConvWeightsShifted* d_shifted_w = nullptr;
+    if (config.use_resnet && d_weights) {
+        d_shifted_w = convert_weights_shifted((OracleNetWeights*)d_weights);
+    }
+
     // GPU buffers for move generation and board operations
     BoardState* d_bs = nullptr;
     cudaMalloc(&d_bs, sizeof(BoardState));
@@ -395,7 +402,8 @@ int run_selfplay_games(
                 positions, active_count,
                 config.sims_per_move, config.max_nodes_per_tree,
                 config.enable_koth, config.c_puct,
-                (OracleNetWeights*)d_weights, d_policy_bufs, results
+                (OracleNetWeights*)d_weights, d_policy_bufs, results,
+                d_shifted_w
             );
         } else {
             gpu_mcts_eval_trees_transformer(
@@ -587,6 +595,7 @@ int run_selfplay_games(
     }
 
     // Cleanup
+    if (d_shifted_w) free_shifted_weights(d_shifted_w);
     cudaFree(d_policy_bufs);
     cudaFree(d_bs);
     cudaFree(d_moves);
@@ -699,6 +708,15 @@ EvalResult run_eval_games(
 
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, concurrent * NN_POLICY_SIZE * sizeof(float));
+
+    // Pre-convert shifted weights once per side (resnet only)
+    ConvWeightsShifted* d_shifted_w_a = nullptr;
+    ConvWeightsShifted* d_shifted_w_b = nullptr;
+    if (config.use_resnet) {
+        if (d_weights_a) d_shifted_w_a = convert_weights_shifted((OracleNetWeights*)d_weights_a);
+        if (d_weights_b) d_shifted_w_b = convert_weights_shifted((OracleNetWeights*)d_weights_b);
+    }
+
     BoardState* d_bs = nullptr; cudaMalloc(&d_bs, sizeof(BoardState));
     GPUMove* d_moves = nullptr; cudaMalloc(&d_moves, 256 * sizeof(GPUMove));
     int* d_count = nullptr; cudaMalloc(&d_count, sizeof(int));
@@ -769,7 +787,8 @@ EvalResult run_eval_games(
             if (config.use_resnet) {
                 gpu_mcts_eval_trees(positions_a, count_a, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
-                    (OracleNetWeights*)d_weights_a, d_policy_bufs, mcts_a);
+                    (OracleNetWeights*)d_weights_a, d_policy_bufs, mcts_a,
+                    d_shifted_w_a);
             } else {
                 gpu_mcts_eval_trees_transformer(positions_a, count_a, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
@@ -781,7 +800,8 @@ EvalResult run_eval_games(
             if (config.use_resnet) {
                 gpu_mcts_eval_trees(positions_b, count_b, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
-                    (OracleNetWeights*)d_weights_b, d_policy_bufs, mcts_b);
+                    (OracleNetWeights*)d_weights_b, d_policy_bufs, mcts_b,
+                    d_shifted_w_b);
             } else {
                 gpu_mcts_eval_trees_transformer(positions_b, count_b, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
@@ -958,6 +978,8 @@ EvalResult run_eval_games(
     if (records_a) { for (int i = 0; i < config.num_games; i++) records_a[i].free_buf(); delete[] records_a; }
     if (records_b) { for (int i = 0; i < config.num_games; i++) records_b[i].free_buf(); delete[] records_b; }
 
+    if (d_shifted_w_a) free_shifted_weights(d_shifted_w_a);
+    if (d_shifted_w_b) free_shifted_weights(d_shifted_w_b);
     cudaFree(d_policy_bufs); cudaFree(d_bs); cudaFree(d_moves);
     cudaFree(d_count); cudaFree(d_check); cudaFree(d_pe);
     delete[] games;
