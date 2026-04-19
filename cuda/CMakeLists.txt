@@ -122,3 +122,8 @@ set_target_properties(test_batched_conv_scaling PROPERTIES CUDA_SEPARABLE_COMPIL
 add_executable(test_pool_assertions test/test_pool_assertions.cu)
 target_link_libraries(test_pool_assertions caissawary_cuda)
 set_target_properties(test_pool_assertions PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Budget-capped reuse tests
+add_executable(test_budget_reuse test/test_budget_reuse.cu)
+target_link_libraries(test_budget_reuse caissawary_cuda)
+set_target_properties(test_budget_reuse PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

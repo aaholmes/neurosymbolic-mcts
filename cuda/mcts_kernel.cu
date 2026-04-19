@@ -904,9 +904,7 @@ GPUMctsResult gpu_mcts_search_nn_block(
 // Block b manages tree b. Each tree has its own node pool partition
 // and simulation counter. Trees do not interact.
 
-__device__ int32_t g_eval_sim_counters[64];  // max 64 trees
-__device__ int     g_eval_tree_offsets[64];   // node pool offset per tree
-__device__ int     g_eval_alloc_counters[64]; // per-tree node allocator
+// Multi-tree eval globals are defined in tree_store.cu (TREE_STORE_IMPL).
 
 
 __global__ void mcts_kernel_eval(
@@ -929,15 +927,16 @@ __global__ void mcts_kernel_eval(
 
     float* my_policy = global_policy_bufs ? global_policy_bufs + (size_t)bid * NN_POLICY_SIZE : nullptr;
 
+    int sim_budget = g_eval_sim_budgets[bid];
     while (true) {
         if (tid == 0) {
             sh_comm[0] = (float)atomicAdd(&g_eval_sim_counters[bid], 1);
         }
         __syncthreads();
-        if ((int)sh_comm[0] >= max_simulations) break;
+        if ((int)sh_comm[0] >= sim_budget) break;
 
         if (tid == 0) {
-            int node_idx = g_eval_tree_offsets[bid]; // absolute index of root
+            int node_idx = g_eval_tree_roots[bid]; // absolute index of search root
             int path[256];
             int path_len = 0;
             float value = 0.0f;
@@ -1171,14 +1170,20 @@ int gpu_mcts_eval_trees(
     // Reset sim counters and alloc counters (start alloc at 1 to skip root slot)
     int h_zero[64] = {0};
     int h_one[64];
-    for (int i = 0; i < num_trees; i++) h_one[i] = 1;
+    int h_budgets[64];
+    for (int i = 0; i < num_trees; i++) {
+        h_one[i] = 1;
+        h_budgets[i] = simulations_per_tree;
+    }
     cudaMemcpyToSymbol(g_eval_sim_counters, h_zero, num_trees * sizeof(int));
     cudaMemcpyToSymbol(g_eval_alloc_counters, h_one, num_trees * sizeof(int));
+    cudaMemcpyToSymbol(g_eval_sim_budgets, h_budgets, num_trees * sizeof(int));
 
-    // Set tree offsets
+    // Set tree offsets and roots (fresh-start: root == partition base)
     int offsets[64];
     for (int i = 0; i < num_trees; i++) offsets[i] = i * max_nodes_per_tree;
     cudaMemcpyToSymbol(g_eval_tree_offsets, offsets, num_trees * sizeof(int));
+    cudaMemcpyToSymbol(g_eval_tree_roots, offsets, num_trees * sizeof(int));
 
     // Zero the node pool regions we'll use — use cudaMemcpyToSymbol to get device address
     // Actually, we need a host-side memset of device memory. Use cudaMemset with the symbol.
@@ -1286,6 +1291,215 @@ int gpu_mcts_eval_trees(
                     "(max_nodes_per_tree=%d, sims=%d). Pool exhaustion likely "
                     "fake-terminalized expansions.\n",
                     i, h_alloc[i], watermark, max_nodes_per_tree, simulations_per_tree);
+        }
+    }
+
+    return num_trees;
+}
+
+// ============================================================
+// Budget-capped multi-tree eval with subtree reuse
+// ============================================================
+//
+// Tiny utility kernel: set parent_idx = -1 for advanced-root nodes so the
+// kernel's "is this the search root" check (parent_idx < 0) holds.
+__global__ void set_parent_to_root_kernel(const int* root_idxs, int num_trees) {
+    int tid = threadIdx.x;
+    if (tid < num_trees) {
+        g_node_pool[root_idxs[tid]].parent_idx = -1;
+    }
+}
+
+// Helper: upload a board state into the MCTSNode at slot offsets[i].
+static void upload_root_to_slot(int slot_idx, const BoardState& pos, void* d_pool_base) {
+    MCTSNode h_root;
+    memset(&h_root, 0, sizeof(h_root));
+    h_root.parent_idx = -1;
+    memcpy(h_root.pieces, pos.pieces, sizeof(h_root.pieces));
+    memcpy(h_root.pieces_occ, pos.pieces_occ, sizeof(h_root.pieces_occ));
+    h_root.w_to_move = pos.w_to_move;
+    h_root.en_passant = pos.en_passant;
+    h_root.castling = pos.castling;
+    h_root.halfmove = pos.halfmove;
+    cudaMemcpy((char*)d_pool_base + slot_idx * sizeof(MCTSNode), &h_root,
+               sizeof(MCTSNode), cudaMemcpyHostToDevice);
+}
+
+int gpu_mcts_eval_trees_budget(
+    const BoardState* root_positions,
+    int num_trees,
+    int target_visit_count,
+    int max_nodes_per_tree,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,
+    float* d_policy_bufs,
+    TreeEvalResult* h_results,
+    int* game_root_idxs,
+    const bool* fresh_starts,
+    ConvWeightsShifted* d_shifted_w_cached
+) {
+    if (num_trees <= 0 || num_trees > 64) return 0;
+    if (d_weights != nullptr && d_policy_bufs == nullptr) {
+        printf("gpu_mcts_eval_trees_budget: d_policy_bufs required when d_weights is set\n");
+        return 0;
+    }
+    int total_nodes = num_trees * max_nodes_per_tree;
+    if (total_nodes > MAX_NODES) {
+        printf("Budget multi-tree eval: need %d nodes, have %d\n", total_nodes, MAX_NODES);
+        return 0;
+    }
+
+    void* d_pool_base = nullptr;
+    cudaGetSymbolAddress(&d_pool_base, g_node_pool);
+
+    int offsets[64];
+    for (int i = 0; i < num_trees; i++) offsets[i] = i * max_nodes_per_tree;
+    cudaMemcpyToSymbol(g_eval_tree_offsets, offsets, num_trees * sizeof(int));
+
+    // Read existing alloc counters (for reuse trees we keep them; for fresh
+    // trees we overwrite below).
+    int h_alloc_init[64] = {0};
+    cudaMemcpyFromSymbol(h_alloc_init, g_eval_alloc_counters, num_trees * sizeof(int));
+
+    int h_roots[64];
+    int reuse_root_idxs[64];
+    int num_reuse = 0;
+
+    for (int i = 0; i < num_trees; i++) {
+        if (fresh_starts[i]) {
+            // Zero this tree's partition
+            cudaMemset((char*)d_pool_base + offsets[i] * sizeof(MCTSNode),
+                       0, max_nodes_per_tree * sizeof(MCTSNode));
+            upload_root_to_slot(offsets[i], root_positions[i], d_pool_base);
+            game_root_idxs[i] = offsets[i];
+            h_alloc_init[i]   = 1;
+            h_roots[i]        = offsets[i];
+        } else {
+            h_roots[i] = game_root_idxs[i];
+            reuse_root_idxs[num_reuse++] = game_root_idxs[i];
+        }
+    }
+    cudaMemcpyToSymbol(g_eval_alloc_counters, h_alloc_init, num_trees * sizeof(int));
+    cudaMemcpyToSymbol(g_eval_tree_roots,     h_roots,      num_trees * sizeof(int));
+
+    // For reused trees, ensure the new root's parent_idx is -1 (it may
+    // currently point at the prior root's slot).
+    if (num_reuse > 0) {
+        int* d_root_idxs = nullptr;
+        cudaMalloc(&d_root_idxs, num_reuse * sizeof(int));
+        cudaMemcpy(d_root_idxs, reuse_root_idxs, num_reuse * sizeof(int),
+                   cudaMemcpyHostToDevice);
+        set_parent_to_root_kernel<<<1, num_reuse>>>(d_root_idxs, num_reuse);
+        cudaFree(d_root_idxs);
+    }
+
+    // Read carried visit counts for reuse trees, compute per-tree budget.
+    int h_zero[64] = {0};
+    int h_budgets[64];
+    for (int i = 0; i < num_trees; i++) {
+        if (fresh_starts[i]) {
+            h_budgets[i] = target_visit_count;
+        } else {
+            MCTSNode h_root;
+            cudaMemcpy(&h_root, (char*)d_pool_base + game_root_idxs[i] * sizeof(MCTSNode),
+                       sizeof(MCTSNode), cudaMemcpyDeviceToHost);
+            int carried = h_root.visit_count;
+            int budget  = target_visit_count - carried;
+            if (budget < 0) budget = 0;
+            h_budgets[i] = budget;
+        }
+    }
+    cudaMemcpyToSymbol(g_eval_sim_counters, h_zero,    num_trees * sizeof(int));
+    cudaMemcpyToSymbol(g_eval_sim_budgets,  h_budgets, num_trees * sizeof(int));
+
+    // Launch kernel (same as the legacy entry — globals carry the new state)
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+    size_t smem_bytes = BLOCK_SMEM_BYTES;
+    cudaFuncSetAttribute(mcts_kernel_eval,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_bytes);
+
+    ConvWeightsShifted* d_shifted_w = d_shifted_w_cached;
+    bool own_shifted = false;
+    if (!d_shifted_w && d_weights) {
+        d_shifted_w = convert_weights_shifted(d_weights);
+        own_shifted = true;
+    }
+
+    mcts_kernel_eval<<<num_trees, 256, smem_bytes>>>(
+        target_visit_count /* unused inside kernel; budget via global */,
+        max_nodes_per_tree, enable_koth, c_puct,
+        d_weights, d_policy_bufs, num_trees, nullptr, nullptr, d_shifted_w
+    );
+    cudaError_t err = cudaDeviceSynchronize();
+    if (own_shifted) free_shifted_weights(d_shifted_w);
+    if (err != cudaSuccess) {
+        printf("CUDA budget multi-tree eval error: %s\n", cudaGetErrorString(err));
+        return 0;
+    }
+
+    // Read results, advance roots to chosen child, patch new parent_idx = -1.
+    int new_root_idxs[64];
+    for (int i = 0; i < num_trees; i++) {
+        int root_idx = game_root_idxs[i];
+        MCTSNode h_root;
+        cudaMemcpy(&h_root, (char*)d_pool_base + root_idx * sizeof(MCTSNode),
+                   sizeof(MCTSNode), cudaMemcpyDeviceToHost);
+        h_results[i].total_simulations = h_root.visit_count;
+        h_results[i].nodes_allocated = 0; // filled below
+
+        if (h_root.num_children > 0 && h_root.first_child_idx >= 0) {
+            int best_local  = 0;
+            int best_visits = -1;
+            MCTSNode h_best;
+            for (int c = 0; c < h_root.num_children; c++) {
+                MCTSNode h_child;
+                cudaMemcpy(&h_child, (char*)d_pool_base +
+                           (h_root.first_child_idx + c) * sizeof(MCTSNode),
+                           sizeof(MCTSNode), cudaMemcpyDeviceToHost);
+                if (h_child.visit_count > best_visits) {
+                    best_visits = h_child.visit_count;
+                    best_local  = c;
+                    h_best      = h_child;
+                }
+            }
+            GPUMove mv = (GPUMove)h_best.move_from_parent;
+            h_results[i].best_move_from  = GPU_MOVE_FROM(mv);
+            h_results[i].best_move_to    = GPU_MOVE_TO(mv);
+            h_results[i].best_move_promo = GPU_MOVE_PROMO(mv);
+            h_results[i].root_value = (h_best.visit_count > 0)
+                ? -(h_best.total_value / (float)h_best.visit_count) : 0.0f;
+            new_root_idxs[i] = h_root.first_child_idx + best_local;
+        } else {
+            h_results[i].best_move_from  = 0;
+            h_results[i].best_move_to    = 0;
+            h_results[i].best_move_promo = 0;
+            h_results[i].root_value = h_root.is_terminal ? h_root.terminal_value : 0.0f;
+            new_root_idxs[i] = root_idx; // no advance possible
+        }
+    }
+
+    // Patch new roots' parent_idx to -1 in a single kernel call.
+    {
+        int* d_new = nullptr;
+        cudaMalloc(&d_new, num_trees * sizeof(int));
+        cudaMemcpy(d_new, new_root_idxs, num_trees * sizeof(int), cudaMemcpyHostToDevice);
+        set_parent_to_root_kernel<<<1, num_trees>>>(d_new, num_trees);
+        cudaFree(d_new);
+        for (int i = 0; i < num_trees; i++) game_root_idxs[i] = new_root_idxs[i];
+    }
+
+    // Read back alloc counters + watermark check.
+    int h_alloc[64] = {0};
+    cudaMemcpyFromSymbol(h_alloc, g_eval_alloc_counters, num_trees * sizeof(int));
+    int watermark = (int)(0.9f * (float)max_nodes_per_tree);
+    for (int i = 0; i < num_trees; i++) {
+        h_results[i].nodes_allocated = h_alloc[i];
+        if (h_alloc[i] >= watermark) {
+            fprintf(stderr,
+                    "WARNING [gpu_mcts_eval_trees_budget] tree %d alloc=%d >= 0.9*max=%d "
+                    "(max_nodes_per_tree=%d, target=%d). Reuse should restart this tree fresh.\n",
+                    i, h_alloc[i], watermark, max_nodes_per_tree, target_visit_count);
         }
     }
 
@@ -1506,16 +1720,17 @@ __global__ void mcts_kernel_eval_transformer(
     if (bid >= num_trees) return;
 
     int tree_offset = g_eval_tree_offsets[bid];
+    int sim_budget  = g_eval_sim_budgets[bid];
     float* my_policy = (global_policy_bufs && weights)
         ? global_policy_bufs + (size_t)bid * NN_POLICY_SIZE : nullptr;
 
     while (true) {
         if (tid == 0) sh_comm[0] = (float)atomicAdd(&g_eval_sim_counters[bid], 1);
         __syncthreads();
-        if ((int)sh_comm[0] >= max_simulations) break;
+        if ((int)sh_comm[0] >= sim_budget) break;
 
         if (tid == 0) {
-            int node_idx = g_eval_tree_offsets[bid];
+            int node_idx = g_eval_tree_roots[bid];
             int path[256];
             int path_len = 0;
             float value = 0.0f;
@@ -1702,13 +1917,19 @@ int gpu_mcts_eval_trees_transformer(
     // Reset counters
     int h_zero[64] = {0};
     int h_one[64];
-    for (int i = 0; i < num_trees; i++) h_one[i] = 1;
+    int h_budgets[64];
+    for (int i = 0; i < num_trees; i++) {
+        h_one[i] = 1;
+        h_budgets[i] = simulations_per_tree;
+    }
     cudaMemcpyToSymbol(g_eval_sim_counters, h_zero, num_trees * sizeof(int));
     cudaMemcpyToSymbol(g_eval_alloc_counters, h_one, num_trees * sizeof(int));
+    cudaMemcpyToSymbol(g_eval_sim_budgets, h_budgets, num_trees * sizeof(int));
 
     int offsets[64];
     for (int i = 0; i < num_trees; i++) offsets[i] = i * max_nodes_per_tree;
     cudaMemcpyToSymbol(g_eval_tree_offsets, offsets, num_trees * sizeof(int));
+    cudaMemcpyToSymbol(g_eval_tree_roots, offsets, num_trees * sizeof(int));
 
     // Zero node pool
     {

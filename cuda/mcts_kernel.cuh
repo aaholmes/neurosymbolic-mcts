@@ -140,6 +140,38 @@ int gpu_mcts_eval_trees(
     ConvWeightsShifted* d_shifted_w_cached = nullptr
 );
 
+// Budget-capped multi-tree eval with subtree reuse.
+//
+// For each tree i:
+//   if fresh_starts[i]:
+//     - zero tree i's partition, upload root_positions[i]
+//     - set game_root_idxs[i] = partition base
+//     - new_sims = target_visit_count
+//   else:
+//     - keep tree i's partition as-is, root = game_root_idxs[i]
+//     - carried = root.visit_count; new_sims = max(0, target_visit_count - carried)
+//
+// After kernel returns:
+//   - h_results[i] populated (best_move, root_value, nodes_allocated, total_simulations).
+//   - game_root_idxs[i] advanced to the chosen child's absolute pool index.
+//   - new root's parent_idx set to -1.
+//
+// game_root_idxs and fresh_starts are per-tree arrays of length num_trees.
+int gpu_mcts_eval_trees_budget(
+    const BoardState* root_positions,
+    int num_trees,
+    int target_visit_count,
+    int max_nodes_per_tree,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,
+    float* d_policy_bufs,
+    TreeEvalResult* h_results,
+    int* game_root_idxs,
+    const bool* fresh_starts,
+    ConvWeightsShifted* d_shifted_w_cached = nullptr
+);
+
 // ============================================================
 // Transformer-mode search
 // ============================================================

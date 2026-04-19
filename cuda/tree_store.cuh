@@ -19,13 +19,40 @@ enum ExpandState : uint32_t {
 #ifdef __CUDACC__
 
 // Node pool and allocator counter.
-// Defined via TREE_STORE_DEFINE_GLOBALS in tree_store.cu; declared extern elsewhere.
+// Defined via TREE_STORE_IMPL in tree_store.cu; declared extern elsewhere.
 #ifdef TREE_STORE_IMPL
 __device__ MCTSNode g_node_pool[MAX_NODES];
 __device__ int32_t  g_next_node_idx = 1;  // 0 is reserved for root
 #else
 extern __device__ MCTSNode g_node_pool[MAX_NODES];
 extern __device__ int32_t  g_next_node_idx;
+#endif
+
+// ============================================================
+// Multi-tree eval state (max 64 concurrent trees)
+//
+//   g_eval_tree_offsets[i] : base index of tree i's partition (allocator base)
+//   g_eval_tree_roots[i]   : absolute index of tree i's CURRENT search root.
+//                            Equal to offsets[i] for fresh-start trees;
+//                            differs for budget-capped reuse.
+//   g_eval_sim_counters[i] : sims completed this call (kernel-side counter)
+//   g_eval_sim_budgets[i]  : sims to do this call. Kernel terminates when
+//                            counter >= budget.
+//   g_eval_alloc_counters[i]: per-tree allocator. Persists across calls
+//                             for reuse-mode trees.
+// ============================================================
+#ifdef TREE_STORE_IMPL
+__device__ int g_eval_tree_offsets[64];
+__device__ int g_eval_tree_roots[64];
+__device__ int g_eval_sim_counters[64];
+__device__ int g_eval_sim_budgets[64];
+__device__ int g_eval_alloc_counters[64];
+#else
+extern __device__ int g_eval_tree_offsets[64];
+extern __device__ int g_eval_tree_roots[64];
+extern __device__ int g_eval_sim_counters[64];
+extern __device__ int g_eval_sim_budgets[64];
+extern __device__ int g_eval_alloc_counters[64];
 #endif
 
 // Allocate n contiguous node slots. Returns base index, or -1 if pool exhausted.
