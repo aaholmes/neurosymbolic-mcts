@@ -19,7 +19,7 @@ bool validate_pool_size(int max_nodes_per_tree, int sims_per_move,
     if (max_nodes_per_tree < required) {
         fprintf(stderr,
                 "ERROR [%s]: max_nodes_per_tree=%d below required=%d "
-                "(max(%d, sims_per_move=%d * %d)). Increase --pool-size.\n",
+                "(max(%d, sims_per_move=%d * %d)).\n",
                 context, max_nodes_per_tree, required,
                 MIN_POOL_PER_TREE, sims_per_move, POOL_FACTOR_PER_SIM);
         return false;
@@ -350,7 +350,7 @@ int run_selfplay_games(
     cudaMalloc(&d_policy_bufs, concurrent * NN_POLICY_SIZE * sizeof(float));
 
     // Pre-convert shifted weights once for the lifetime of the run.
-    // Avoids the per-call alloc/convert/free path in gpu_mcts_eval_trees.
+    // Avoids the per-call alloc/convert/free path inside the eval kernel.
     ConvWeightsShifted* d_shifted_w = nullptr;
     if (config.use_resnet && d_weights) {
         d_shifted_w = convert_weights_shifted((OracleNetWeights*)d_weights);
@@ -377,7 +377,7 @@ int run_selfplay_games(
         int game_idx;     // index into records[]
         bool white_started;  // for value assignment
         GameRng rng;       // per-game deterministic RNG
-        // Reuse-mode state (used only when config.use_reuse is true):
+        // Budget-capped reuse state (resnet path):
         bool fresh_next;     // next tick must start fresh (initial or alloc-counter > 0.8*max)
         int  last_alloc;     // alloc counter from prior call, for restart-trigger check
     };
@@ -425,16 +425,14 @@ int run_selfplay_games(
         TreeEvalResult results[SP_MAX_CONCURRENT];
         memset(results, 0, sizeof(results));
 
-        if (config.use_resnet && config.use_reuse) {
-            // Build per-slot fresh_starts and game_root_idxs from prior state.
+        if (config.use_resnet) {
+            // Budget-capped reuse is the only resnet path. Per-tree fresh
+            // restart is forced when last_alloc exceeded the threshold so
+            // the next call zeros the partition.
             bool fresh_starts[SP_MAX_CONCURRENT];
             int  watermark = (int)(REUSE_RESTART_THRESHOLD * (float)config.max_nodes_per_tree);
             for (int i = 0; i < active_count; i++) {
-                if (games[i].fresh_next || games[i].last_alloc > watermark) {
-                    fresh_starts[i] = true;
-                } else {
-                    fresh_starts[i] = false;
-                }
+                fresh_starts[i] = games[i].fresh_next || games[i].last_alloc > watermark;
             }
             gpu_mcts_eval_trees_budget(
                 positions, active_count,
@@ -447,14 +445,6 @@ int run_selfplay_games(
                 games[i].fresh_next = false;
                 games[i].last_alloc = results[i].nodes_allocated;
             }
-        } else if (config.use_resnet) {
-            gpu_mcts_eval_trees(
-                positions, active_count,
-                config.sims_per_move, config.max_nodes_per_tree,
-                config.enable_koth, config.c_puct,
-                (OracleNetWeights*)d_weights, d_policy_bufs, results,
-                d_shifted_w
-            );
         } else {
             gpu_mcts_eval_trees_transformer(
                 positions, active_count,
@@ -499,8 +489,9 @@ int run_selfplay_games(
                 cudaGetSymbolAddress(&d_pool_ptr, g_node_pool);
 
                 // Find the search root for this tree. With reuse, this may
-                // not equal the partition base.
-                int tree_offset = config.use_reuse
+                // not equal the partition base. Transformer path doesn't use
+                // reuse yet so falls back to the partition base.
+                int tree_offset = config.use_resnet
                     ? reuse_root_idxs[i]
                     : i * config.max_nodes_per_tree;
                 MCTSNode h_root;
@@ -553,10 +544,10 @@ int run_selfplay_games(
                 }
 
                 if (chosen != 0 && num_children > 0) {
-                    // Reuse-mode: advance search root to the chosen child.
-                    // We patch parent_idx via a single-tree call here for clarity;
-                    // could be batched if profiling shows latency dominates.
-                    if (config.use_reuse) {
+                    // Resnet path always uses budget-capped reuse: advance the
+                    // search root to the sampled child so the next call carries
+                    // its subtree.
+                    if (config.use_resnet) {
                         int chosen_local = -1;
                         for (int c = 0; c < num_children; c++) {
                             if (h_moves[c] == chosen) { chosen_local = c; break; }
@@ -863,13 +854,21 @@ EvalResult run_eval_games(
             else           { positions_b[count_b] = games[i].board; idx_b[count_b++] = i; }
         }
 
+        // Eval mode runs each side's tree fresh per tick: the carried subtree
+        // was built by the OTHER network and its Q-values would be misleading.
+        // We still go through the budget API for a single codepath; passing
+        // fresh_starts=true reduces it to fresh-N each call.
+        bool all_fresh[SP_MAX_CONCURRENT];
+        int  side_root_idxs[SP_MAX_CONCURRENT];
+        for (int k = 0; k < SP_MAX_CONCURRENT; k++) all_fresh[k] = true;
+
         if (count_a > 0) {
             memset(mcts_a, 0, count_a * sizeof(TreeEvalResult));
             if (config.use_resnet) {
-                gpu_mcts_eval_trees(positions_a, count_a, config.sims_per_move,
+                gpu_mcts_eval_trees_budget(positions_a, count_a, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
                     (OracleNetWeights*)d_weights_a, d_policy_bufs, mcts_a,
-                    d_shifted_w_a);
+                    side_root_idxs, all_fresh, d_shifted_w_a);
             } else {
                 gpu_mcts_eval_trees_transformer(positions_a, count_a, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
@@ -879,10 +878,10 @@ EvalResult run_eval_games(
         if (count_b > 0) {
             memset(mcts_b, 0, count_b * sizeof(TreeEvalResult));
             if (config.use_resnet) {
-                gpu_mcts_eval_trees(positions_b, count_b, config.sims_per_move,
+                gpu_mcts_eval_trees_budget(positions_b, count_b, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
                     (OracleNetWeights*)d_weights_b, d_policy_bufs, mcts_b,
-                    d_shifted_w_b);
+                    side_root_idxs, all_fresh, d_shifted_w_b);
             } else {
                 gpu_mcts_eval_trees_transformer(positions_b, count_b, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,

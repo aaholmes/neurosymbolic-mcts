@@ -112,35 +112,8 @@ struct TreeEvalResult {
     int nodes_allocated;
 };
 
-// Run N independent MCTS searches on N different root positions.
-// Each tree gets its own block (256 threads) and partitioned node pool.
-// All trees share the same NN weights and policy buffers.
-//
-// num_trees: number of independent trees (typically 8-16)
-// max_nodes_per_tree: node pool size per tree (e.g. 4096)
-// root_positions: host array of N BoardStates
-// h_results: host array of N TreeEvalResult (written on return)
-// d_policy_bufs: pre-allocated [num_trees × NN_POLICY_SIZE] floats
-//
-// Returns number of trees processed.
-// d_shifted_w_cached: optional pre-converted FP16 shifted weights (from
-// convert_weights_shifted). If non-null, used directly; if null, converted
-// internally per call. Caller should cache this for the lifetime of d_weights
-// to avoid the per-call alloc/convert/free overhead (~hundreds of µs).
-int gpu_mcts_eval_trees(
-    const BoardState* root_positions,
-    int num_trees,
-    int simulations_per_tree,
-    int max_nodes_per_tree,
-    bool enable_koth,
-    float c_puct,
-    OracleNetWeights* d_weights,
-    float* d_policy_bufs,
-    TreeEvalResult* h_results,
-    ConvWeightsShifted* d_shifted_w_cached = nullptr
-);
-
-// Budget-capped multi-tree eval with subtree reuse.
+// Budget-capped multi-tree eval with subtree reuse. The only resnet-mode MCTS
+// entry point — fresh-start is a special case (fresh_starts[i] = true).
 //
 // For each tree i:
 //   if fresh_starts[i]:

@@ -50,8 +50,12 @@ void test_watermark_adequate_pool(bool& test_failed) {
 
     TreeEvalResult results[NUM_TREES];
     memset(results, 0, sizeof(results));
-    gpu_mcts_eval_trees(positions, NUM_TREES, SIMS, MAX_NODES_PER_TREE,
-                        false, 1.414f, d_weights, d_policy_bufs, results);
+    int  root_idxs[NUM_TREES];
+    bool fresh[NUM_TREES];
+    for (int i = 0; i < NUM_TREES; i++) fresh[i] = true;
+    gpu_mcts_eval_trees_budget(positions, NUM_TREES, SIMS, MAX_NODES_PER_TREE,
+                               false, 1.414f, d_weights, d_policy_bufs, results,
+                               root_idxs, fresh);
 
     int watermark = (int)(POOL_WATERMARK * (float)MAX_NODES_PER_TREE);
     for (int i = 0; i < NUM_TREES; i++) {
@@ -88,9 +92,13 @@ void test_watermark_undersized_pool_saturates(bool& test_failed) {
 
     TreeEvalResult results[NUM_TREES];
     memset(results, 0, sizeof(results));
+    int  root_idxs[NUM_TREES];
+    bool fresh[NUM_TREES];
+    for (int i = 0; i < NUM_TREES; i++) fresh[i] = true;
     fprintf(stderr, "(expect WARNING below — this test exercises the watermark path)\n");
-    gpu_mcts_eval_trees(positions, NUM_TREES, SIMS, MAX_NODES_PER_TREE,
-                        false, 1.414f, d_weights, d_policy_bufs, results);
+    gpu_mcts_eval_trees_budget(positions, NUM_TREES, SIMS, MAX_NODES_PER_TREE,
+                               false, 1.414f, d_weights, d_policy_bufs, results,
+                               root_idxs, fresh);
 
     int watermark = (int)(POOL_WATERMARK * (float)MAX_NODES_PER_TREE);
     ASSERT_TRUE(results[0].nodes_allocated >= watermark);

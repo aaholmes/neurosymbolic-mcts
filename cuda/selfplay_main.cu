@@ -17,44 +17,33 @@ static bool has_flag(int argc, char** argv, const char* flag) {
     return false;
 }
 
-static int parse_int_flag(int argc, char** argv, const char* flag, int def) {
-    for (int i = 1; i < argc - 1; i++)
-        if (strcmp(argv[i], flag) == 0) return atoi(argv[i + 1]);
-    return def;
-}
-
-static int default_pool_size(int sims_per_move) {
+static int required_pool_size(int sims_per_move) {
     int v = sims_per_move * POOL_FACTOR_PER_SIM;
-    if (v < MIN_POOL_PER_TREE) v = MIN_POOL_PER_TREE;
-    return v;
+    return v < MIN_POOL_PER_TREE ? MIN_POOL_PER_TREE : v;
 }
 
 static int run_selfplay_cmd(int argc, char** argv) {
-    // selfplay <weights.bin> <num_games> <sims> <output_dir> [--seed N] [--koth] [--pool-size N]
     if (argc < 6) {
         printf("Usage: selfplay selfplay <weights.bin> <num_games> <sims_per_move> <output_dir> "
-               "[--seed N] [--koth] [--resnet] [--pool-size N]\n");
+               "[--seed N] [--koth] [--resnet]\n");
         return 1;
     }
 
     SelfPlayConfig config = {};
     config.num_games = atoi(argv[3]);
     config.sims_per_move = atoi(argv[4]);
-    config.max_nodes_per_tree = parse_int_flag(argc, argv, "--pool-size",
-                                               default_pool_size(config.sims_per_move));
+    config.max_nodes_per_tree = required_pool_size(config.sims_per_move);
     config.explore_base = 0.80f;
     config.enable_koth = has_flag(argc, argv, "--koth");
     config.use_resnet = has_flag(argc, argv, "--resnet");
-    config.use_reuse  = has_flag(argc, argv, "--compact-reuse");
     config.c_puct = 1.414f;
     config.max_concurrent = SP_MAX_CONCURRENT;
     config.seed = parse_seed(argc, argv);
 
     int actual = config.num_games < config.max_concurrent ? config.num_games : config.max_concurrent;
-    printf("Self-play: %d games, %d sims/move, %d concurrent, seed=%d%s%s\n",
+    printf("Self-play: %d games, %d sims/move, %d concurrent, seed=%d%s\n",
            config.num_games, config.sims_per_move, actual, config.seed,
-           config.use_resnet ? ", resnet" : ", transformer",
-           config.use_reuse ? ", reuse" : "");
+           config.use_resnet ? ", resnet" : ", transformer");
 
     clock_t start = clock();
     int samples = run_selfplay(argv[2], config, argv[5]);
@@ -90,8 +79,7 @@ static int run_eval_cmd(int argc, char** argv) {
     EvalConfig config = {};
     config.num_games = atoi(argv[4]);
     config.sims_per_move = atoi(argv[5]);
-    config.max_nodes_per_tree = parse_int_flag(argc, argv, "--pool-size",
-                                               default_pool_size(config.sims_per_move));
+    config.max_nodes_per_tree = required_pool_size(config.sims_per_move);
     config.explore_base = 0.90f;
     config.enable_koth = has_flag(argc, argv, "--koth");
     config.use_resnet = has_flag(argc, argv, "--resnet");

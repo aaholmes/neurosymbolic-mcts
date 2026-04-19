@@ -98,9 +98,13 @@ int main(int argc, char** argv) {
     printf("Trees: %d, Simulations per tree: %d, Max nodes/tree: %d\n\n",
            NUM_TREES, SIMS, MAX_NODES_PER_TREE);
 
-    int count = gpu_mcts_eval_trees(positions, NUM_TREES, SIMS,
-                                     MAX_NODES_PER_TREE, false, 1.414f,
-                                     nullptr, nullptr, results);
+    int  root_idxs[NUM_TREES];
+    bool fresh[NUM_TREES];
+    for (int i = 0; i < NUM_TREES; i++) fresh[i] = true;
+    int count = gpu_mcts_eval_trees_budget(positions, NUM_TREES, SIMS,
+                                            MAX_NODES_PER_TREE, false, 1.414f,
+                                            nullptr, nullptr, results,
+                                            root_idxs, fresh);
 
     printf("Processed %d trees:\n", count);
     for (int i = 0; i < count; i++) {
@@ -141,9 +145,11 @@ int main(int argc, char** argv) {
         cudaMalloc(&d_policy_bufs, NUM_TREES * NN_POLICY_SIZE * sizeof(float));
 
         memset(results, 0, sizeof(results));
-        count = gpu_mcts_eval_trees(positions, NUM_TREES, SIMS,
-                                     MAX_NODES_PER_TREE, false, 1.414f,
-                                     d_weights, d_policy_bufs, results);
+        for (int i = 0; i < NUM_TREES; i++) fresh[i] = true;
+        count = gpu_mcts_eval_trees_budget(positions, NUM_TREES, SIMS,
+                                            MAX_NODES_PER_TREE, false, 1.414f,
+                                            d_weights, d_policy_bufs, results,
+                                            root_idxs, fresh);
 
         printf("Processed %d trees (NN mode):\n", count);
         for (int i = 0; i < count; i++) {
