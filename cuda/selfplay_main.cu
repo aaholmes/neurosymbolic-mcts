@@ -30,13 +30,15 @@ static int run_selfplay_cmd(int argc, char** argv) {
     config.max_nodes_per_tree = config.sims_per_move + 100;
     config.explore_base = 0.80f;
     config.enable_koth = has_flag(argc, argv, "--koth");
+    config.use_resnet = has_flag(argc, argv, "--resnet");
     config.c_puct = 1.414f;
     config.max_concurrent = SP_MAX_CONCURRENT;
     config.seed = parse_seed(argc, argv);
 
     int actual = config.num_games < config.max_concurrent ? config.num_games : config.max_concurrent;
-    printf("Self-play: %d games, %d sims/move, %d concurrent, seed=%d\n",
-           config.num_games, config.sims_per_move, actual, config.seed);
+    printf("Self-play: %d games, %d sims/move, %d concurrent, seed=%d%s\n",
+           config.num_games, config.sims_per_move, actual, config.seed,
+           config.use_resnet ? ", resnet" : ", transformer");
 
     clock_t start = clock();
     int samples = run_selfplay(argv[2], config, argv[5]);
@@ -75,6 +77,7 @@ static int run_eval_cmd(int argc, char** argv) {
     config.max_nodes_per_tree = config.sims_per_move + 100;
     config.explore_base = 0.90f;
     config.enable_koth = has_flag(argc, argv, "--koth");
+    config.use_resnet = has_flag(argc, argv, "--resnet");
     config.c_puct = 1.414f;
     config.max_concurrent = SP_MAX_CONCURRENT;
     config.seed = parse_seed(argc, argv);
@@ -89,10 +92,19 @@ static int run_eval_cmd(int argc, char** argv) {
            config.num_games, config.sims_per_move, actual, config.seed);
 
     // Load both weight sets
-    TransformerWeights* d_a = load_transformer_weights(argv[2]);
-    if (!d_a) return 1;
-    TransformerWeights* d_b = load_transformer_weights(argv[3]);
-    if (!d_b) { free_transformer_weights(d_a); return 1; }
+    void* d_a;
+    void* d_b;
+    if (config.use_resnet) {
+        d_a = load_nn_weights(argv[2]);
+        if (!d_a) return 1;
+        d_b = load_nn_weights(argv[3]);
+        if (!d_b) { free_nn_weights((OracleNetWeights*)d_a); return 1; }
+    } else {
+        d_a = load_transformer_weights(argv[2]);
+        if (!d_a) return 1;
+        d_b = load_transformer_weights(argv[3]);
+        if (!d_b) { free_transformer_weights((TransformerWeights*)d_a); return 1; }
+    }
 
     clock_t start = clock();
     EvalResult result = run_eval_games(d_a, d_b, config);
@@ -107,8 +119,13 @@ static int run_eval_cmd(int argc, char** argv) {
            result.games_played, result.llr, result.sprt_result);
     printf("Eval completed in %.1f seconds\n", elapsed);
 
-    free_transformer_weights(d_a);
-    free_transformer_weights(d_b);
+    if (config.use_resnet) {
+        free_nn_weights((OracleNetWeights*)d_a);
+        free_nn_weights((OracleNetWeights*)d_b);
+    } else {
+        free_transformer_weights((TransformerWeights*)d_a);
+        free_transformer_weights((TransformerWeights*)d_b);
+    }
     return 0;
 }
 

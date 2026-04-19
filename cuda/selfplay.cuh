@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.cuh"
+#include "nn_weights.cuh"
 #include "transformer_weights.cuh"
 #include "mcts_kernel.cuh"
 
@@ -27,6 +28,7 @@ struct SelfPlayConfig {
     float c_puct;                 // PUCT exploration constant
     int max_concurrent;           // max concurrent games (default 36)
     int seed;                     // base RNG seed (each game gets seed derived from game_idx + this)
+    bool use_resnet;              // use SE-ResNet kernel instead of transformer
 };
 
 struct GameRecord {
@@ -47,8 +49,9 @@ int run_selfplay(
 );
 
 // Lower-level: play games and return records in memory (for testing)
+// d_weights is OracleNetWeights* when config.use_resnet, TransformerWeights* otherwise.
 int run_selfplay_games(
-    TransformerWeights* d_weights,
+    void* d_weights,
     const SelfPlayConfig& config,
     GameRecord* records,           // array of num_games GameRecords
     int num_games
@@ -67,6 +70,7 @@ struct EvalConfig {
     float c_puct;
     int max_concurrent;
     int seed;
+    bool use_resnet;              // use SE-ResNet kernel instead of transformer
     // SPRT early stopping
     float sprt_elo0;              // H0 Elo difference (typically 0)
     float sprt_elo1;              // H1 Elo difference (typically 10)
@@ -97,8 +101,9 @@ const char* check_sprt(float llr, float alpha, float beta);
 // Play evaluation games between two networks with SPRT early stopping.
 // Half the games have A=white, half have A=black.
 // Optionally saves training data from both players.
+// d_weights_a/b are OracleNetWeights* when config.use_resnet, TransformerWeights* otherwise.
 EvalResult run_eval_games(
-    TransformerWeights* d_weights_a,
-    TransformerWeights* d_weights_b,
+    void* d_weights_a,
+    void* d_weights_b,
     const EvalConfig& config
 );

@@ -315,7 +315,7 @@ int move_to_policy_index_host(GPUMove move, int w_to_move) {
 // ============================================================
 
 int run_selfplay_games(
-    TransformerWeights* d_weights,
+    void* d_weights,
     const SelfPlayConfig& config,
     GameRecord* records,
     int num_games
@@ -390,12 +390,21 @@ int run_selfplay_games(
         TreeEvalResult results[SP_MAX_CONCURRENT];
         memset(results, 0, sizeof(results));
 
-        gpu_mcts_eval_trees_transformer(
-            positions, active_count,
-            config.sims_per_move, config.max_nodes_per_tree,
-            config.enable_koth, config.c_puct,
-            d_weights, d_policy_bufs, results
-        );
+        if (config.use_resnet) {
+            gpu_mcts_eval_trees(
+                positions, active_count,
+                config.sims_per_move, config.max_nodes_per_tree,
+                config.enable_koth, config.c_puct,
+                (OracleNetWeights*)d_weights, d_policy_bufs, results
+            );
+        } else {
+            gpu_mcts_eval_trees_transformer(
+                positions, active_count,
+                config.sims_per_move, config.max_nodes_per_tree,
+                config.enable_koth, config.c_puct,
+                (TransformerWeights*)d_weights, d_policy_bufs, results
+            );
+        }
 
         // Process each active game
         for (int i = active_count - 1; i >= 0; i--) {
@@ -598,7 +607,12 @@ int run_selfplay(
     const SelfPlayConfig& config,
     const char* output_dir
 ) {
-    TransformerWeights* d_weights = load_transformer_weights(weights_path);
+    void* d_weights;
+    if (config.use_resnet) {
+        d_weights = load_nn_weights(weights_path);
+    } else {
+        d_weights = load_transformer_weights(weights_path);
+    }
     if (!d_weights) return -1;
 
     int num_games = config.num_games;
@@ -616,7 +630,10 @@ int run_selfplay(
     if (!f) {
         printf("Failed to open %s for writing\n", path);
         delete[] records;
-        free_transformer_weights(d_weights);
+        if (config.use_resnet)
+            free_nn_weights((OracleNetWeights*)d_weights);
+        else
+            free_transformer_weights((TransformerWeights*)d_weights);
         return -1;
     }
 
@@ -631,7 +648,10 @@ int run_selfplay(
 
     for (int i = 0; i < num_games; i++) records[i].free_buf();
     delete[] records;
-    free_transformer_weights(d_weights);
+    if (config.use_resnet)
+        free_nn_weights((OracleNetWeights*)d_weights);
+    else
+        free_transformer_weights((TransformerWeights*)d_weights);
     return written;
 }
 
@@ -662,8 +682,8 @@ const char* check_sprt(float llr, float alpha, float beta) {
 }
 
 EvalResult run_eval_games(
-    TransformerWeights* d_weights_a,
-    TransformerWeights* d_weights_b,
+    void* d_weights_a,
+    void* d_weights_b,
     const EvalConfig& config
 ) {
     init_zobrist();
@@ -746,15 +766,27 @@ EvalResult run_eval_games(
 
         if (count_a > 0) {
             memset(mcts_a, 0, count_a * sizeof(TreeEvalResult));
-            gpu_mcts_eval_trees_transformer(positions_a, count_a, config.sims_per_move,
-                config.max_nodes_per_tree, config.enable_koth, config.c_puct,
-                d_weights_a, d_policy_bufs, mcts_a);
+            if (config.use_resnet) {
+                gpu_mcts_eval_trees(positions_a, count_a, config.sims_per_move,
+                    config.max_nodes_per_tree, config.enable_koth, config.c_puct,
+                    (OracleNetWeights*)d_weights_a, d_policy_bufs, mcts_a);
+            } else {
+                gpu_mcts_eval_trees_transformer(positions_a, count_a, config.sims_per_move,
+                    config.max_nodes_per_tree, config.enable_koth, config.c_puct,
+                    (TransformerWeights*)d_weights_a, d_policy_bufs, mcts_a);
+            }
         }
         if (count_b > 0) {
             memset(mcts_b, 0, count_b * sizeof(TreeEvalResult));
-            gpu_mcts_eval_trees_transformer(positions_b, count_b, config.sims_per_move,
-                config.max_nodes_per_tree, config.enable_koth, config.c_puct,
-                d_weights_b, d_policy_bufs, mcts_b);
+            if (config.use_resnet) {
+                gpu_mcts_eval_trees(positions_b, count_b, config.sims_per_move,
+                    config.max_nodes_per_tree, config.enable_koth, config.c_puct,
+                    (OracleNetWeights*)d_weights_b, d_policy_bufs, mcts_b);
+            } else {
+                gpu_mcts_eval_trees_transformer(positions_b, count_b, config.sims_per_move,
+                    config.max_nodes_per_tree, config.enable_koth, config.c_puct,
+                    (TransformerWeights*)d_weights_b, d_policy_bufs, mcts_b);
+            }
         }
 
         auto process_game = [&](int slot, TreeEvalResult& res, int tree_idx) {
