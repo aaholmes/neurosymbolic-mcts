@@ -127,3 +127,8 @@ set_target_properties(test_pool_assertions PROPERTIES CUDA_SEPARABLE_COMPILATION
 add_executable(test_budget_reuse test/test_budget_reuse.cu)
 target_link_libraries(test_budget_reuse caissawary_cuda)
 set_target_properties(test_budget_reuse PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Throughput benchmark (uses zero weights — no model file required)
+add_executable(bench_throughput test/bench_throughput.cu)
+target_link_libraries(bench_throughput caissawary_cuda)
+set_target_properties(bench_throughput PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

@@ -82,10 +82,12 @@ A fully GPU-resident MCTS implementation in `cuda/`. The entire search loop -- t
 
 Which is faster depends on model size:
 
-| Architecture | Mechanism | Best for | Throughput |
-|---|---|---|---|
-| **GPU-resident MCTS** (CUDA) | Full MCTS loop on GPU, NN inline per-SM | Small models (<=12L D=128) | ~8,200 pos/sec (12L), ~130 samp/sec |
-| **CPU MCTS + GPU batched** (Rust+LibTorch) | Rayon threads + InferenceServer batching | Large models (>=24L) | ~38 samp/sec (6L) |
+| Architecture | Mechanism | Best for |
+|---|---|---|
+| **GPU-resident MCTS** (CUDA) | Full MCTS loop on GPU, NN inline per-SM | Small models (<=12L D=128) |
+| **CPU MCTS + GPU batched** (Rust+LibTorch) | Rayon threads + InferenceServer batching | Large models (>=24L) |
+
+See [BENCHMARKS.md](BENCHMARKS.md) for throughput measurements.
 
 **GPU-resident wins for small models:** Each SM runs select-expand-evaluate-backup with zero CPU-GPU transfers. At 12L D=128 (2.4M params), transfer overhead of batched inference exceeds the cost of computing inline on each SM.
 
@@ -93,8 +95,7 @@ Which is faster depends on model size:
 
 ### Current Model: 12L Transformer, D=128, 2.4M params
 
-- **Throughput:** ~8,200 positions/sec on RTX 5060 Ti (36 SMs, 200 sims/move)
-- **Self-play:** ~130 samples/sec (36 concurrent games, zero-init shorter games)
+- **Throughput:** see [BENCHMARKS.md](BENCHMARKS.md). At 200 sims/move on SE-ResNet 6×128: 79 samples/sec, 15.8K sims/sec on RTX 5060 Ti (36 concurrent games).
 - **Architecture:** Pre-LayerNorm encoder, 4 attention heads (head_dim=32), FFN 4x expansion
 - **Tensor Cores:** FP16 `buf_out` frees 16 KB for TC staging; Q/K/V projections and FFN use wmma (FP16 in, FP32 accumulate); QK^T, softmax, attn*V stay scalar (workspace aliasing)
 
