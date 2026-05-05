@@ -412,6 +412,57 @@ void test_e2e_selfplay_reuse(bool& test_failed) {
     free_nn_weights(d_weights);
 }
 
+// ============================================================
+// Test 9: pool exhaustion does NOT poison the value backup
+//
+// Before the fix, leaves that couldn't be expanded were marked as
+// terminal with terminal_value=0. That fake-zero got backed up along
+// the path on every visit, dragging the root's value estimate toward
+// 0 regardless of what the actual position evaluates to.
+//
+// We use a clear KQ-vs-K winning position for white (q-search will
+// return strongly positive). Run classical mode (nullptr weights) so
+// the leaf value is just tanh(0.326 * q-search). With a tight pool
+// that forces frequent expansion failures, root_value should still
+// reflect the q-search evaluation, not a poisoned average toward 0.
+// ============================================================
+void test_pool_exhaust_no_value_poison(bool& test_failed) {
+    BoardState pos;
+    memset(&pos, 0, sizeof(pos));
+    pos.pieces[WHITE * 6 + KING]  = 1ULL << 4;   // e1
+    pos.pieces[WHITE * 6 + QUEEN] = 1ULL << 3;   // d1
+    pos.pieces[BLACK * 6 + KING]  = 1ULL << 60;  // e8
+    pos.pieces_occ[WHITE] = pos.pieces[WHITE * 6 + KING] | pos.pieces[WHITE * 6 + QUEEN];
+    pos.pieces_occ[BLACK] = pos.pieces[BLACK * 6 + KING];
+    pos.w_to_move = 1;
+    pos.en_passant = EN_PASSANT_NONE;
+    pos.castling = 0;
+    pos.halfmove = 0;
+
+    const int SIMS = 200;
+
+    int root_big = 0;
+    bool fresh_big = true;
+    TreeEvalResult res_big = {};
+    gpu_mcts_eval_trees_budget(&pos, 1, SIMS, 8192, false, 1.414f,
+                               nullptr, nullptr, &res_big, &root_big, &fresh_big);
+
+    int root_tight = 0;
+    bool fresh_tight = true;
+    TreeEvalResult res_tight = {};
+    fprintf(stderr, "(expect WARNING below — tight pool exercises poisoning fix)\n");
+    gpu_mcts_eval_trees_budget(&pos, 1, SIMS, 300, false, 1.414f,
+                               nullptr, nullptr, &res_tight, &root_tight, &fresh_tight);
+
+    fprintf(stderr, "  big pool root_value=%.3f, tight pool root_value=%.3f\n",
+            res_big.root_value, res_tight.root_value);
+
+    // KQK is a forced win for white; classical q-search should return
+    // strongly positive at any sensible leaf. Both pools must agree.
+    ASSERT_TRUE(res_big.root_value > 0.5f);
+    ASSERT_TRUE(res_tight.root_value > 0.5f);
+}
+
 int main(int argc, char** argv) {
     init_movegen_tables();
 
@@ -424,6 +475,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_parent_idx_invariant);
     RUN_TEST(test_zero_budget_noop);
     RUN_TEST(test_pool_exhaustion_fallback);
+    RUN_TEST(test_pool_exhaust_no_value_poison);
     RUN_TEST(test_e2e_selfplay_reuse);
 
     printf("\n%d/%d tests passed, %d failed\n", passes, total, failures);

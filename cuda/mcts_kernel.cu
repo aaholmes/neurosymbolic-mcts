@@ -1055,9 +1055,15 @@ __global__ void mcts_kernel_eval(
                         }
                     }
                 } else {
-                    // Partition full — mark as terminal to prevent retries
-                    leaf->is_terminal = 1;
-                    leaf->terminal_value = 0.0f;
+                    // Partition full — leave the leaf unexpanded but mark
+                    // expand_lock=EXPANDED so future try_expand attempts skip
+                    // this leaf cleanly. Do NOT fake-terminalize with value=0:
+                    // that poisons the value backup with bogus draws. The leaf
+                    // gets NN-evaluated below like any other unevaluated leaf.
+                    // Re-evaluation on subsequent visits is wasteful but
+                    // correct; the watermark warning at host level signals to
+                    // the user that the pool needs to be larger.
+                    atomicExch(&leaf->expand_lock, 2u);
                 }
 
                 if (!evaluated && first_child >= 0 && leaf->num_children > 0 && !leaf->is_terminal) {
@@ -1656,7 +1662,10 @@ __global__ void mcts_kernel_eval_transformer(
                         }
                     }
                 } else {
-                    leaf->is_terminal = 1; leaf->terminal_value = 0.0f;
+                    // Partition full — see note in mcts_kernel_eval; mark
+                    // EXPANDED to skip future expand retries, do not fake-
+                    // terminalize. Leaf falls through to NN/classical eval.
+                    atomicExch(&leaf->expand_lock, 2u);
                 }
                 if (!evaluated && first_child >= 0 && leaf->num_children > 0 && !leaf->is_terminal) {
                     node_idx = leaf->first_child_idx;
