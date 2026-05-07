@@ -207,6 +207,10 @@ __device__ void block_conv_3x3_tc(
     int M_start = warp_id * 16;
 
     if (M_start >= C_out) {
+        // Active path does 2 __syncthreads after the main K-loops (one
+        // before per-warp FP32 store-staging, one final). Match that count
+        // here so block-wide barriers stay aligned at C_out < 128.
+        __syncthreads();
         __syncthreads();
         return;
     }
@@ -318,31 +322,28 @@ __device__ void block_conv_3x3_shifted(
     bool a_direct = (C_in % 16 == 0);
 
     int M_start = warp_id * 16;
-    if (M_start >= C_out) {
-        for (int s = 0; s < 9; s++) {
-            __syncthreads();
-            __syncthreads();
-        }
-        __syncthreads();
-        return;
-    }
+    bool active = (M_start < C_out);
+    // ALL 256 threads must participate in the cooperative shifted-buffer
+    // build below (each thread strides by 256 over the [C_in, 64] input).
+    // A hard early-return for inactive warps would leave half the buffer
+    // unwritten and produce wrong mma results when C_out < 128. So we keep
+    // every warp live through the shift loop and only gate the per-warp
+    // mma + store on `active`.
 
     // Per-warp staging for A-fragment boundary loads (when C_in % 16 != 0).
-    // Lives just past the shifted buffer; for C_in=128 (residual blocks),
-    // a_direct=true so this region is unused. For C_in=17 (start conv),
-    // total_in=1088 and a_staging at 1088+8*256=3136 < 8192 (aux size).
     half* a_staging = shifted + total_in + warp_id * 256;
 
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[4];
-    for (int t = 0; t < 4; t++) wmma::fill_fragment(acc[t], 0.0f);
+    if (active) {
+        for (int t = 0; t < 4; t++) wmma::fill_fragment(acc[t], 0.0f);
+    }
 
     for (int s = 0; s < 9; s++) {
         int ky = KY_TABLE[s];
         int kx = KX_TABLE[s];
-        const half* W_slice = W_s[s];
+        const half* W_slice = active ? W_s[s] : nullptr;
 
         // --- Build shifted FP16 copy ONCE per kernel position (all 256 threads) ---
-        // Input is already FP16, so this is just a strided copy with shift.
         __syncthreads();
         for (int i = tid; i < total_in; i += 256) {
             int c = i >> 6;
@@ -358,55 +359,58 @@ __device__ void block_conv_3x3_shifted(
         }
         __syncthreads();
 
-        for (int n_tile = 0; n_tile < 4; n_tile++) {
-            int N_start = n_tile * 16;
+        if (active) {
+            for (int n_tile = 0; n_tile < 4; n_tile++) {
+                int N_start = n_tile * 16;
 
-            for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
-                int K_start = k_tile * 16;
+                for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
+                    int K_start = k_tile * 16;
 
-                wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-                if (a_direct && K_start + 16 <= C_in) {
-                    wmma::load_matrix_sync(a_frag, W_slice + M_start * C_in + K_start, C_in);
-                } else {
-                    for (int i = lane; i < 256; i += 32) {
-                        int r = i / 16, c = i % 16;
-                        int m_idx = M_start + r, k_idx = K_start + c;
-                        half v = __float2half(0.0f);
-                        if (m_idx < C_out && k_idx < C_in)
-                            v = W_slice[m_idx * C_in + k_idx];
-                        a_staging[i] = v;
+                    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+                    if (a_direct && K_start + 16 <= C_in) {
+                        wmma::load_matrix_sync(a_frag, W_slice + M_start * C_in + K_start, C_in);
+                    } else {
+                        for (int i = lane; i < 256; i += 32) {
+                            int r = i / 16, c = i % 16;
+                            int m_idx = M_start + r, k_idx = K_start + c;
+                            half v = __float2half(0.0f);
+                            if (m_idx < C_out && k_idx < C_in)
+                                v = W_slice[m_idx * C_in + k_idx];
+                            a_staging[i] = v;
+                        }
+                        __syncwarp();
+                        wmma::load_matrix_sync(a_frag, a_staging, 16);
                     }
-                    __syncwarp();
-                    wmma::load_matrix_sync(a_frag, a_staging, 16);
+
+                    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+                    wmma::load_matrix_sync(b_frag, shifted + K_start * 64 + N_start, 64);
+
+                    wmma::mma_sync(acc[n_tile], a_frag, b_frag, acc[n_tile]);
                 }
-
-                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-                wmma::load_matrix_sync(b_frag, shifted + K_start * 64 + N_start, 64);
-
-                wmma::mma_sync(acc[n_tile], a_frag, b_frag, acc[n_tile]);
             }
         }
     }
 
     // --- Store all 4 accumulators as FP16 ---
     // After the 9-shift loop, the shifted buffer is dead. Repurpose it as
-    // per-warp FP32 staging (8 warps × 256 floats = 2048 floats = 4096 halves).
+    // per-warp FP32 staging (active warps only).
     __syncthreads();
-    float* warp_fp32_stage = ((float*)shifted) + warp_id * 256;
-
-    for (int n_tile = 0; n_tile < 4; n_tile++) {
-        wmma::store_matrix_sync(warp_fp32_stage, acc[n_tile], 16, wmma::mem_row_major);
-        __syncwarp();
-        int N_start = n_tile * 16;
-        for (int i = lane; i < 256; i += 32) {
-            int r = i / 16;
-            int c = i % 16;
-            int oc = M_start + r;
-            int n  = N_start + c;
-            if (oc < C_out && n < 64)
-                output_smem[oc * 64 + n] = __float2half(warp_fp32_stage[i]);
+    if (active) {
+        float* warp_fp32_stage = ((float*)shifted) + warp_id * 256;
+        for (int n_tile = 0; n_tile < 4; n_tile++) {
+            wmma::store_matrix_sync(warp_fp32_stage, acc[n_tile], 16, wmma::mem_row_major);
+            __syncwarp();
+            int N_start = n_tile * 16;
+            for (int i = lane; i < 256; i += 32) {
+                int r = i / 16;
+                int c = i % 16;
+                int oc = M_start + r;
+                int n  = N_start + c;
+                if (oc < C_out && n < 64)
+                    output_smem[oc * 64 + n] = __float2half(warp_fp32_stage[i]);
+            }
+            __syncwarp();
         }
-        __syncwarp();
     }
     __syncthreads();
 }
