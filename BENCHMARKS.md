@@ -91,6 +91,49 @@ Inference scales near-linearly until ~batch=121, where it asymptotes around 215K
 
 Lc0's MCTS uses virtual-loss-driven leaf parallelism — at parallelism=8 it accumulates batches of ~30-100 leaves per backend call, hitting the favorable region of the inference scaling curve.
 
+## Apples-to-apples: Caissawary at 6×64 vs Lc0 + Maia
+
+Measured 2026-05-07 on a temporary experiment branch (not merged) that flipped `NN_HIDDEN_DIM` from 128 to 64 in `cuda/nn_weights.cuh` and re-ran `bench_throughput 100 200 36`. Purpose: remove the network-size confound from the Lc0 comparison and check whether the engine is compute-bound or fixed-overhead-bound at smaller networks.
+
+Median of 3 runs (very tight cluster, all within 0.3% of each other):
+
+| comparison | samples/sec | sims/sec | per-sim time |
+|------------|-------------|----------|--------------|
+| Caissawary 6×64 (this experiment)     | 161.9 | 32,381 | 30.9 µs |
+| Caissawary 6×128 v3 (current main)    | 86.8  | 17,356 | 57.6 µs |
+| Lc0 + Maia 6×64 (measured 2026-05-06) | 368   | 77,468 | 12.9 µs |
+
+**The apples-to-apples gap with Lc0 is 2.4× sims/sec / 2.27× samples/sec, not the 4.7× headline at unequal architectures.** The 6×128-vs-6×64 architecture mismatch was inflating the previously documented gap by roughly 2×.
+
+### Per-sim time decomposition
+
+Linear-system fit (assuming hidden conv FLOPs scale 4× from 6×64 → 6×128, and other MCTS work is constant):
+
+| component | 6×128 | 6×64 |
+|-----------|-------|------|
+| NN forward (estimated) | 35.6 µs (62%) | 8.9 µs (29%) |
+| MCTS overhead (selection / expand / backup) | 22 µs (38%) | 22 µs (71%) |
+| **Total per-sim** | **57.6 µs** | **30.9 µs** |
+
+The MCTS overhead is the unrelievable floor. At smaller networks it dominates.
+
+### Implication for batched inference
+
+If intra-block virtual-loss batching at batch=8 cuts NN forward by ~1.5× (sub-linear Tensor Core utilization scaling from batch=1 → batch=8):
+
+- 6×128: 57.6 → 45.8 µs per sim → **~1.26× speedup** on samples/sec
+- 6×64:  30.9 → 25.0 µs per sim → ~1.24× speedup
+
+This revises the earlier 1.5–2× projection downward to ~1.25–1.4×. The MCTS-overhead floor caps the upside. Batching is still the highest-leverage next step but the magnitude of the win is smaller than originally projected.
+
+### Reproduction notes
+
+Not committed to main. To re-run:
+1. Edit `cuda/nn_weights.cuh`: change `NN_HIDDEN_DIM = 128` to `NN_HIDDEN_DIM = 64` (and `NN_SE_REDUCTION = 16` to `NN_SE_REDUCTION = 8` to keep `NN_SE_INNER = 8`).
+2. Comment out the `static_assert(sizeof(OracleNetWeights) == 7930688, ...)` in `cuda/nn_weights.cu` (export was sized for 6×128).
+3. Parameterize the hardcoded `32`s in `block_forward.cu` (residual save/add) and `block_ops.cu` (`block_conv_3x3_smem_w` accumulator) to use `(NN_HIDDEN_DIM * 64 + 255) / 256`.
+4. Rebuild and run `bench_throughput 100 200 36`.
+
 ## Comparison
 
 At 200 sims/move on a single RTX 5060 Ti, **measured** end-to-end:
