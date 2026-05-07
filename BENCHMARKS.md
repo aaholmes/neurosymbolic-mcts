@@ -52,7 +52,7 @@ Rust uses three-tier tactical search (Tier 1: mate/KOTH; Tier 2: quiescence; Tie
 
 ## Lc0 (Leela Chess Zero) on the same GPU
 
-Measured 2026-05-06 on the same RTX 5060 Ti, lc0 v0.33.0-dev (master, built from source — see `tools/lc0_install_notes.md`). Network: **Maia-1100, a 12×128 SE-ResNet (~3M params)** — twice as deep as Caissawary's 6×128, the smallest publicly hosted Lc0-format network we could find.
+Measured 2026-05-06 on the same RTX 5060 Ti, lc0 v0.33.0-dev (master, built from source — see `tools/lc0_install_notes.md`). Network: **Maia-1100, a 6×64 SE-ResNet (~600K params, FP16)** — about 1/3 the parameter count of Caissawary's 6×128. (Architecture verified by parsing `maia-1100.pb.gz` directly: 6 residual blocks × 64 filters × 112 input planes, SE reduction 8.)
 
 **Pure NN inference (`backendbench`, cuda-fp16):**
 
@@ -83,22 +83,48 @@ Lc0's MCTS uses virtual-loss-driven leaf parallelism — at parallelism=8 it acc
 
 At 200 sims/move on a single RTX 5060 Ti, **measured** end-to-end:
 
-| engine | network | samples/sec | sims/sec | vs Caissawary v2 |
-|--------|---------|-------------|----------|------------------|
-| Caissawary GPU v2 | SE-ResNet 6×128 (~2M) | 79 | 15,800 | 1.0× |
-| Caissawary Rust | SE-ResNet 6×128 | 12.6 | 2,520 | 0.16× |
-| **Lc0 selfplay** | SE-ResNet 12×128 (~3M, 2× deeper) | **368** | **77,468** | **4.7× / 4.9×** |
+| engine | network | precision | samples/sec | sims/sec | vs Caissawary v2 |
+|--------|---------|-----------|-------------|----------|------------------|
+| Caissawary GPU v2 | SE-ResNet 6×128 (~1.98M, 17 input planes) | FP32 | 79 | 15,800 | 1.0× |
+| Caissawary Rust   | SE-ResNet 6×128 | FP32 | 12.6 | 2,520 | 0.16× |
+| **Lc0 selfplay**  | SE-ResNet 6×64 (~600K, 112 input planes) | FP16 | **368** | **77,468** | **4.7× / 4.9×** |
 
-**Lc0 is ~5× faster than Caissawary GPU v2 despite running a 2× larger network.** Extrapolating to the same network size (the 6×128 inference is roughly 2× cheaper than 12×128, all else equal), Lc0 would likely be **~9-10× faster** on identical weights.
+**Lc0 is ~5× faster than Caissawary GPU v2, but it is also running a smaller network in lower precision.** The two effects compound, and need to be separated to extract a useful conclusion.
 
-The earlier design-doc claim of "Caissawary 3-5× faster than Lc0" (CUDA_DESIGN_DOC_v9.md §5.3, §6.1) was a projection based on per-call coordination overhead arguments, never measured. The measurement inverts the claim: **Lc0 wins by ~5× as currently configured**, and probably wins by more on the same network.
+### Compute-throughput decomposition
 
-**Why Lc0 wins:**
-1. **Batched inference at MCTS time.** Lc0's `parallelism=8` with virtual loss accumulates ~30-100 leaves per backend call. Our kernel does batch=1 per block (just 36 batch=1 forwards in parallel via 36 SMs). At Tensor Core utilization, batch=100 is ~30× more arithmetic per memory-bound load than batch=1.
-2. **Mature optimized kernels.** Lc0's CUDA backend uses CUTLASS-tuned conv kernels and cuDNN paths. Our shifted-copy conv is decent but ~50% of cuDNN's per-position throughput at small batch (matches our internal `test_batched_conv_scaling` data).
-3. **MCTS overlap.** CPU walks the tree while GPU computes the forward pass. Our kernel serializes select → expand → forward → backup within each block.
+Approximate per-position FLOPs (hidden + first conv only):
 
-The "no CPU-GPU coordination overhead" advantage Caissawary was designed around does exist, but it's a smaller win than the loss from batch=1 inference. The crossover would happen for *much* smaller networks (e.g. ~1×64) where coordination dominates over compute, or at extremely tight latency budgets — neither matches our actual workload.
+- Maia 6×64 with 112 input planes: ~7M FLOPs/forward
+- Caissawary 6×128 with 17 input planes: ~12.5M FLOPs/forward — about 1.8× heavier per call.
+
+GFLOPs/sec actually achieved on the GPU at MCTS time:
+
+- Lc0 + Maia: 77,468 sims/sec × 7M ≈ **540 GFLOPs/sec**
+- Caissawary:  15,800 sims/sec × 12.5M ≈ **200 GFLOPs/sec**
+
+**Lc0 extracts roughly 2.7× more useful compute per second on the same hardware.** Combined with running a 1.8× cheaper network, this gives the observed 4.9× sims/sec gap.
+
+### Where the 2.7× compute-efficiency gap comes from
+
+These factors don't multiply cleanly, but they're individually estimable:
+
+1. **FP16 vs FP32 (~1.5–2×).** At batch=1 the GPU is memory-bound on weight reads — FP16 halves the bytes per forward.
+2. **Batched inference (~1.5–2×).** Lc0's `parallelism=8` with virtual loss accumulates 30–100 leaves per backend call. We do batch=1 per block. Tensor-Core utilization at batch=64 vs batch=1 is roughly 5–10× per FLOP, but only the matmul portion of the forward benefits, so the end-to-end win is more like 1.5–2×.
+3. **Kernel quality (~1.2–1.5×).** Lc0 uses CUTLASS-tuned conv kernels. Our shifted-copy conv is roughly half the per-position throughput of cuDNN at small batch (matches the internal `batched_conv_scaling` data).
+
+1.7 × 1.7 × 1.3 ≈ 3.8 — comfortably explains the measured 2.7× with room to spare.
+
+### Honest extrapolation
+
+The earlier design-doc claim of "Caissawary 3–5× faster than Lc0" (CUDA_DESIGN_DOC_v9.md §5.3, §6.1) was a projection based on coordination-overhead arguments, never measured. The measurement inverts that direction, but the magnitude needs care:
+
+- If Lc0 ran our 6×128 weights in **FP16** with **batched inference**, it would still beat us by ~2–3× (kernel quality + the fact that we'd lose ~1.8× to the heavier network).
+- If Lc0 ran our 6×128 in **FP32 at batch=1** (the way our kernel does), the kernel-quality gap alone is probably 1.3–1.5×. We might break even or trail by a small constant factor.
+
+So the bulk of the measured 5× gap is not "Lc0's kernels beat ours" — it's **FP16 + batched inference**. Those are the two big architectural wins we're leaving on the table.
+
+The "no CPU-GPU coordination overhead" advantage Caissawary was designed around does exist, but it's a smaller win than the loss from batch=1 FP32 inference. The crossover would happen for *much* smaller networks where coordination dominates over compute, or at extremely tight latency budgets — neither matches our actual workload.
 
 ## Notes
 

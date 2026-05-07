@@ -99,6 +99,7 @@ time /tmp/lc0/build/release/lc0 selfplay \
 
 ## Caveats
 
-- Maia-1100 is a 12×128 SE-ResNet, twice as deep as Caissawary's 6×128. We do not have a publicly-distributed Lc0 network at exactly our size. Lc0 on a 6×128 would likely be ~2× faster than the measured Maia-1100 numbers.
+- Maia-1100 is a **6×64 SE-ResNet (~600K params, 112 input planes, FP16)** — about 1/3 the parameter count of Caissawary's 6×128 (1.98M, 17 input planes, FP32). Architecture verified by parsing `maia-1100.pb.gz` with the Lc0 protobuf schema (residual_blocks=6, filters=64, se_ratio=8). We do not have a publicly distributed Lc0 network at our 6×128 size; on a 6×128 Lc0 would be roughly 1.8× *slower* per forward than on Maia-1100, all else equal.
 - The `cuda-fp16` backend was used (Lc0 itself recommends it over `cuda` fp32 on this hardware).
 - `parallelism=8` was chosen by hand; raising it further might help for very small nets but didn't move the needle in spot checks.
+- See `BENCHMARKS.md` "Compute-throughput decomposition" for how the measured 5× sims/sec gap breaks down across network size, precision (FP16 vs FP32), and batched inference.
