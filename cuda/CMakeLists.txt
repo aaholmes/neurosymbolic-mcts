@@ -132,3 +132,8 @@ set_target_properties(test_budget_reuse PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_executable(bench_throughput test/bench_throughput.cu)
 target_link_libraries(bench_throughput caissawary_cuda)
 set_target_properties(bench_throughput PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# Batched-forward microbenchmark (v4)
+add_executable(bench_forward_b2 test/bench_forward_b2.cu)
+target_link_libraries(bench_forward_b2 caissawary_cuda)
+set_target_properties(bench_forward_b2 PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

@@ -415,6 +415,142 @@ __device__ void block_conv_3x3_shifted(
     __syncthreads();
 }
 
+// ============================================================
+// Batched shifted-copy conv at B=2. Same algorithm as the single-batch
+// version, but the inner WMMA loop loads A once and applies it to both
+// batch elements before advancing — halving weight-memory traffic.
+// ============================================================
+__device__ void block_conv_3x3_shifted_b2(
+    const __half* __restrict__ input_smem_b2,
+    half* const* W_s,
+    __half* __restrict__ output_smem_b2,
+    half* __restrict__ shifted_b2,
+    int C_in, int C_out,
+    int input_batch_stride,
+    int output_batch_stride
+) {
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+    int total_in_per_b = C_in * 64;        // tight packing in shifted_b2
+    int total_out_per_b = C_out * 64;      // tight packing in output (we write out_b at stride)
+    int K_tiles = (C_in + 15) / 16;
+    bool a_direct = (C_in % 16 == 0);
+
+    int M_start = warp_id * 16;
+    bool active = (M_start < C_out);
+
+    // Per-warp staging for A-fragment boundary loads (when C_in % 16 != 0).
+    // Lives just past the doubled shifted buffer.
+    half* a_staging = shifted_b2 + 2 * total_in_per_b + warp_id * 256;
+
+    // 8 accumulators per active warp: 4 N-tiles × 2 batches.
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
+    if (active) {
+        #pragma unroll
+        for (int b = 0; b < 2; b++) {
+            #pragma unroll
+            for (int t = 0; t < 4; t++) wmma::fill_fragment(acc[b][t], 0.0f);
+        }
+    }
+
+    for (int s = 0; s < 9; s++) {
+        int ky = KY_TABLE[s];
+        int kx = KX_TABLE[s];
+        const half* W_slice = active ? W_s[s] : nullptr;
+
+        // ALL 256 threads cooperate: build shifted FP16 copy for both batches.
+        __syncthreads();
+        #pragma unroll
+        for (int b = 0; b < 2; b++) {
+            // Read using caller's stride (e.g. 8192 if buf sized for 6×128)
+            const __half* in_b   = input_smem_b2 + b * input_batch_stride;
+            // Write tight-packed in shifted (we control its layout)
+            half*         out_b  = shifted_b2    + b * total_in_per_b;
+            for (int i = tid; i < total_in_per_b; i += 256) {
+                int c = i >> 6;
+                int n = i & 63;
+                int oy = n >> 3;
+                int ox = n & 7;
+                int iy = oy + ky;
+                int ix = ox + kx;
+                half val = __float2half(0.0f);
+                if ((unsigned)iy < 8u && (unsigned)ix < 8u)
+                    val = in_b[c * 64 + iy * 8 + ix];
+                out_b[i] = val;
+            }
+        }
+        __syncthreads();
+
+        if (active) {
+            for (int n_tile = 0; n_tile < 4; n_tile++) {
+                int N_start = n_tile * 16;
+
+                for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
+                    int K_start = k_tile * 16;
+
+                    // Load A ONCE per (n_tile, k_tile).
+                    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+                    if (a_direct && K_start + 16 <= C_in) {
+                        wmma::load_matrix_sync(a_frag, W_slice + M_start * C_in + K_start, C_in);
+                    } else {
+                        for (int i = lane; i < 256; i += 32) {
+                            int r = i / 16, c = i % 16;
+                            int m_idx = M_start + r, k_idx = K_start + c;
+                            half v = __float2half(0.0f);
+                            if (m_idx < C_out && k_idx < C_in)
+                                v = W_slice[m_idx * C_in + k_idx];
+                            a_staging[i] = v;
+                        }
+                        __syncwarp();
+                        wmma::load_matrix_sync(a_frag, a_staging, 16);
+                    }
+
+                    // Apply A to BOTH batches.
+                    #pragma unroll
+                    for (int b = 0; b < 2; b++) {
+                        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+                        wmma::load_matrix_sync(
+                            b_frag,
+                            shifted_b2 + b * total_in_per_b + K_start * 64 + N_start,
+                            64);
+                        wmma::mma_sync(acc[b][n_tile], a_frag, b_frag, acc[b][n_tile]);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Store all accumulators as FP16 ---
+    // After the 9-shift loop, the shifted buffer is dead. Repurpose it as
+    // per-warp FP32 staging (active warps only). We have 2 × C_in × 64 halves
+    // available; need 8 warps × 512 halves = 4096 halves. Fits when C_in ≥ 32.
+    __syncthreads();
+    if (active) {
+        float* warp_fp32_stage = ((float*)shifted_b2) + warp_id * 256;
+        #pragma unroll
+        for (int b = 0; b < 2; b++) {
+            __half* out_b = output_smem_b2 + b * output_batch_stride;
+            for (int n_tile = 0; n_tile < 4; n_tile++) {
+                wmma::store_matrix_sync(warp_fp32_stage, acc[b][n_tile], 16,
+                                        wmma::mem_row_major);
+                __syncwarp();
+                int N_start = n_tile * 16;
+                for (int i = lane; i < 256; i += 32) {
+                    int r = i / 16;
+                    int c = i % 16;
+                    int oc = M_start + r;
+                    int n  = N_start + c;
+                    if (oc < C_out && n < 64)
+                        out_b[oc * 64 + n] = __float2half(warp_fp32_stage[i]);
+                }
+                __syncwarp();
+            }
+        }
+    }
+    __syncthreads();
+}
+
 __device__ void block_1x1_conv(
     const __half* __restrict__ input_smem,
     const float* __restrict__ weights,

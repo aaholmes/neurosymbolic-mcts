@@ -56,6 +56,45 @@ static_assert((BLOCK_BUF1_OFFSET_H * 2) % 16 == 0, "buf1 offset must be 16-byte 
 static_assert((BLOCK_BUF2_OFFSET_H * 2) % 16 == 0, "buf2 offset must be 16-byte aligned for WMMA");
 
 // ============================================================
+// v4 batched-conv (B=2) smem layout. Two activation buffer sets,
+// two shifted buffers. Tight fit at ~99 KB.
+// ============================================================
+constexpr int B2_BUF_HALVES_PER  = NN_HIDDEN_DIM * 64;          // 8192 per batch
+constexpr int B2_BUF1_OFFSET_H   = 0;                            // [2, 128, 64], 16384 halves
+constexpr int B2_BUF2_OFFSET_H   = 2 * B2_BUF_HALVES_PER;        // 16384, [2, 128, 64]
+constexpr int B2_REDUCE_OFFSET_H = B2_BUF2_OFFSET_H + 2 * B2_BUF_HALVES_PER; // 32768
+constexpr int B2_REDUCE_HALVES   = 512;                          // 256 floats workspace
+constexpr int B2_AUX_OFFSET_H    = B2_REDUCE_OFFSET_H + B2_REDUCE_HALVES;     // 33280
+// Aux holds shifted_b2: 2 × C_in × 64 halves at C_in=128 = 16384 halves = 32 KB.
+// At C_in=17 (start conv) the slow-path a_staging fits in the unused tail of
+// this region (start conv only fills 2*1088=2176 halves of the 16384 available).
+constexpr int B2_AUX_HALVES      = 2 * NN_HIDDEN_DIM * 64;                    // 16384
+constexpr int B2_SMEM_HALVES     = B2_AUX_OFFSET_H + B2_AUX_HALVES;           // 49664
+constexpr int B2_SMEM_BYTES      = B2_SMEM_HALVES * 2;                        // 99,328
+
+static_assert(B2_SMEM_BYTES <= 99 * 1024, "B2 smem must fit 99 KB sm_120 cap");
+
+static_assert((B2_AUX_OFFSET_H * 2) % 16 == 0, "B2 aux offset must be 16-byte aligned");
+static_assert((B2_BUF1_OFFSET_H * 2) % 16 == 0, "B2 buf1 offset must be 16-byte aligned");
+static_assert((B2_BUF2_OFFSET_H * 2) % 16 == 0, "B2 buf2 offset must be 16-byte aligned");
+
+// ============================================================
+// Batched forward at B=2. Two BoardStates, two q_results, two outputs.
+// Same caller-side smem signature pattern (`float* smem`); reinterpreted
+// as `__half*` internally. Caller must supply at least B2_SMEM_BYTES.
+// ============================================================
+__device__ void oracle_net_forward_block_b2(
+    const BoardState* bs0, const BoardState* bs1,
+    float q0, float q1,
+    const OracleNetWeights* weights,
+    float* smem,
+    float* policy_out_b2,    // [2, NN_POLICY_SIZE] FP32 in global memory
+    float* value_out_b2,     // [2] FP32, written by thread 0
+    float* k_out_b2,         // [2] FP32, written by thread 0
+    const ConvWeightsShifted* shifted_w = nullptr
+);
+
+// ============================================================
 // Full SE-ResNet forward pass using 256-thread block cooperation.
 //
 // All 256 threads must participate. Activations live in shared memory.

@@ -246,3 +246,203 @@ __device__ void oracle_net_forward_block(
     }
     __syncthreads();
 }
+
+// ============================================================
+// Batched (B=2) SE-ResNet forward.
+//
+// Smem layout (in halves, all FP16 unless noted):
+//   buf1[2, 128, 64] at H=0          input/work, packed [b, c, spatial]
+//   buf2[2, 128, 64] at H=16384      backbone, packed
+//   smem_reduce: float[256] at H=32768 (FP32 reduction workspace, shared by both batches sequentially)
+//   shifted_b2[2, 128, 64] at H=33280 (aux)
+//
+// Strategy: convs are batched (true WMMA weight reuse via
+// block_conv_3x3_shifted_b2). BN/SE/heads run sequentially per batch on
+// each batch's slice, sharing the FP32 reduce workspace between calls.
+// ============================================================
+
+__device__ void oracle_net_forward_block_b2(
+    const BoardState* bs0, const BoardState* bs1,
+    float q0, float q1,
+    const OracleNetWeights* weights,
+    float* smem,
+    float* policy_out_b2,
+    float* value_out_b2,
+    float* k_out_b2,
+    const ConvWeightsShifted* shifted_w
+) {
+    int tid = threadIdx.x;
+
+    // Reinterpret raw smem as __half* and place sub-buffers by half-offsets.
+    __half* smem_h        = (__half*)smem;
+    __half* buf1_b2       = smem_h + B2_BUF1_OFFSET_H;     // [2, 128, 64]
+    __half* buf2_b2       = smem_h + B2_BUF2_OFFSET_H;     // [2, 128, 64]
+    float*  smem_reduce   = (float*)(smem_h + B2_REDUCE_OFFSET_H);
+    half*   aux_half_b2   = smem_h + B2_AUX_OFFSET_H;       // 2 × C_in × 64
+
+    // SE workspace lives at the start of smem_reduce (FP32, reused between batches)
+    float* smem_se_avg = smem_reduce;                       // [128]
+    float* smem_se_fc1 = smem_reduce + NN_HIDDEN_DIM;       // [8]
+
+    // For now this path requires shifted weights (the production path).
+    // Fallback to the single-batch scalar path is not implemented for b2.
+
+    // === 1. Board encoding -> [2, 17, 64] in buf1 ===
+    block_board_to_planes(bs0, buf1_b2 + 0 * B2_BUF_HALVES_PER);
+    block_board_to_planes(bs1, buf1_b2 + 1 * B2_BUF_HALVES_PER);
+
+    // === 2. Input conv(17->128, k=3) + BN + ReLU per batch ===
+    // Strides are NN_HIDDEN_DIM*64 = 8192 (buf sized for the largest C in the network).
+    block_conv_3x3_shifted_b2(buf1_b2, shifted_w->start_conv, buf2_b2, aux_half_b2,
+                              NN_INPUT_CHANNELS, NN_HIDDEN_DIM,
+                              B2_BUF_HALVES_PER, B2_BUF_HALVES_PER);
+    block_bn_relu(buf2_b2 + 0 * B2_BUF_HALVES_PER,
+                  weights->start_bn.weight, weights->start_bn.bias,
+                  weights->start_bn.running_mean, weights->start_bn.running_var,
+                  NN_HIDDEN_DIM, true);
+    block_bn_relu(buf2_b2 + 1 * B2_BUF_HALVES_PER,
+                  weights->start_bn.weight, weights->start_bn.bias,
+                  weights->start_bn.running_mean, weights->start_bn.running_var,
+                  NN_HIDDEN_DIM, true);
+
+    // === 3. Six residual blocks ===
+    for (int blk_i = 0; blk_i < NN_NUM_BLOCKS; blk_i++) {
+        const ResBlockParams& blk = weights->blocks[blk_i];
+
+        // Save residuals (buf2) in FP32 registers: 32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */ per thread per batch.
+        // 2× the registers vs single batch — at 6×128 each thread holds 64 FP32 (256 bytes), fits in registers.
+        float res0_b0[32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */], res0_b1[32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */];
+        #pragma unroll
+        for (int k = 0; k < 32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */; k++) {
+            res0_b0[k] = __half2float(buf2_b2[0 * B2_BUF_HALVES_PER + tid + k * 256]);
+            res0_b1[k] = __half2float(buf2_b2[1 * B2_BUF_HALVES_PER + tid + k * 256]);
+        }
+
+        // conv1: buf2 -> buf1, BN + ReLU (per batch)
+        block_conv_3x3_shifted_b2(buf2_b2, shifted_w->block_conv1[blk_i], buf1_b2, aux_half_b2,
+                                  NN_HIDDEN_DIM, NN_HIDDEN_DIM,
+                                  B2_BUF_HALVES_PER, B2_BUF_HALVES_PER);
+        block_bn_relu(buf1_b2 + 0 * B2_BUF_HALVES_PER, blk.bn1.weight, blk.bn1.bias,
+                      blk.bn1.running_mean, blk.bn1.running_var, NN_HIDDEN_DIM, true);
+        block_bn_relu(buf1_b2 + 1 * B2_BUF_HALVES_PER, blk.bn1.weight, blk.bn1.bias,
+                      blk.bn1.running_mean, blk.bn1.running_var, NN_HIDDEN_DIM, true);
+
+        // conv2: buf1 -> buf2, BN (no ReLU) (per batch)
+        block_conv_3x3_shifted_b2(buf1_b2, shifted_w->block_conv2[blk_i], buf2_b2, aux_half_b2,
+                                  NN_HIDDEN_DIM, NN_HIDDEN_DIM,
+                                  B2_BUF_HALVES_PER, B2_BUF_HALVES_PER);
+        block_bn_relu(buf2_b2 + 0 * B2_BUF_HALVES_PER, blk.bn2.weight, blk.bn2.bias,
+                      blk.bn2.running_mean, blk.bn2.running_var, NN_HIDDEN_DIM, false);
+        block_bn_relu(buf2_b2 + 1 * B2_BUF_HALVES_PER, blk.bn2.weight, blk.bn2.bias,
+                      blk.bn2.running_mean, blk.bn2.running_var, NN_HIDDEN_DIM, false);
+
+        // SE block in-place on buf2 (per batch)
+        block_se_block(buf2_b2 + 0 * B2_BUF_HALVES_PER,
+                       blk.se.fc1_weight, blk.se.fc2_weight,
+                       NN_HIDDEN_DIM, NN_SE_INNER, smem_se_avg, smem_se_fc1);
+        block_se_block(buf2_b2 + 1 * B2_BUF_HALVES_PER,
+                       blk.se.fc1_weight, blk.se.fc2_weight,
+                       NN_HIDDEN_DIM, NN_SE_INNER, smem_se_avg, smem_se_fc1);
+
+        // Residual add + ReLU (per batch, FP32 register residual + FP16 buf store)
+        #pragma unroll
+        for (int k = 0; k < 32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */; k++) {
+            int idx0 = 0 * B2_BUF_HALVES_PER + tid + k * 256;
+            int idx1 = 1 * B2_BUF_HALVES_PER + tid + k * 256;
+            float v0 = res0_b0[k] + __half2float(buf2_b2[idx0]);
+            float v1 = res0_b1[k] + __half2float(buf2_b2[idx1]);
+            buf2_b2[idx0] = __float2half(fmaxf(0.0f, v0));
+            buf2_b2[idx1] = __float2half(fmaxf(0.0f, v1));
+        }
+        __syncthreads();
+    }
+
+    // === 4. Policy head (per batch) ===
+
+    // Policy conv(128->128, k=3) + BN + ReLU: buf2 -> buf1 (batched)
+    block_conv_3x3_shifted_b2(buf2_b2, shifted_w->p_conv, buf1_b2, aux_half_b2,
+                              NN_HIDDEN_DIM, NN_HIDDEN_DIM,
+                              B2_BUF_HALVES_PER, B2_BUF_HALVES_PER);
+    block_bn_relu(buf1_b2 + 0 * B2_BUF_HALVES_PER, weights->p_bn.weight, weights->p_bn.bias,
+                  weights->p_bn.running_mean, weights->p_bn.running_var, NN_HIDDEN_DIM, true);
+    block_bn_relu(buf1_b2 + 1 * B2_BUF_HALVES_PER, weights->p_bn.weight, weights->p_bn.bias,
+                  weights->p_bn.running_mean, weights->p_bn.running_var, NN_HIDDEN_DIM, true);
+
+    // Policy 1×1 + bias + permute, then log_softmax — sequential per batch.
+    #pragma unroll
+    for (int b = 0; b < 2; b++) {
+        const __half* buf1_b = buf1_b2 + b * B2_BUF_HALVES_PER;
+        float* policy_b = policy_out_b2 + b * NN_POLICY_SIZE;
+        for (int idx = tid; idx < NN_POLICY_SIZE; idx += blockDim.x) {
+            int plane   = idx % NN_POLICY_PLANES;
+            int spatial = idx / NN_POLICY_PLANES;
+            float acc   = 0.0f;
+            const float* w_row = weights->p_head_weight + plane * NN_HIDDEN_DIM;
+            for (int c = 0; c < NN_HIDDEN_DIM; c++) {
+                acc += w_row[c] * __half2float(buf1_b[c * 64 + spatial]);
+            }
+            policy_b[idx] = acc + weights->p_head_bias[plane];
+        }
+        __syncthreads();
+        block_log_softmax(policy_b, NN_POLICY_SIZE, smem_reduce);
+    }
+
+    // === 5. Value head (per batch, FP32 end-to-end) ===
+    #pragma unroll
+    for (int b = 0; b < 2; b++) {
+        const __half* buf2_b = buf2_b2 + b * B2_BUF_HALVES_PER;
+        float q = (b == 0) ? q0 : q1;
+
+        // 1×1 conv (128->1) + bias: read FP16 buf2_b, write FP32 to smem_reduce[0:64]
+        float* v_feat = smem_reduce;
+        for (int idx = tid; idx < 64; idx += blockDim.x) {
+            float sum = 0.0f;
+            for (int c = 0; c < NN_HIDDEN_DIM; c++) {
+                sum += weights->v_conv_weight[c] * __half2float(buf2_b[c * 64 + idx]);
+            }
+            v_feat[idx] = sum + weights->v_conv_bias[0];
+        }
+        __syncthreads();
+
+        block_bn_relu_1ch(v_feat, weights->v_bn.weight, weights->v_bn.bias,
+                          weights->v_bn.running_mean, weights->v_bn.running_var, true);
+
+        // FC1: each thread computes one of 256 outputs.
+        float fc1_local = 0.0f;
+        int my_j = tid;
+        if (my_j < NN_VALUE_FC1_OUT) {
+            for (int i = 0; i < 64; i++) {
+                fc1_local += weights->v_fc_weight[my_j * NN_VALUE_FC1_IN + i] * v_feat[i];
+            }
+            fc1_local += weights->v_fc_weight[my_j * NN_VALUE_FC1_IN + 64] * q;
+            fc1_local += weights->v_fc_bias[my_j];
+            if (fc1_local < 0.0f) fc1_local = 0.0f;
+        }
+        __syncthreads();
+        if (my_j < NN_VALUE_FC1_OUT) {
+            smem_reduce[my_j] = fc1_local;
+        }
+        __syncthreads();
+
+        // FC2 reduction
+        float local_sum = 0.0f;
+        for (int j = tid; j < NN_VALUE_FC1_OUT; j += blockDim.x) {
+            local_sum += weights->v_out_weight[j] * smem_reduce[j];
+        }
+        __syncthreads();
+        smem_reduce[tid] = local_sum;
+        __syncthreads();
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) smem_reduce[tid] += smem_reduce[tid + stride];
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            float v_logit = smem_reduce[0] + weights->v_out_bias[0];
+            float k = 0.47f * logf(1.0f + expf(weights->k_logit));
+            value_out_b2[b] = tanhf(v_logit + k * q);
+            k_out_b2[b]     = k;
+        }
+        __syncthreads();
+    }
+}

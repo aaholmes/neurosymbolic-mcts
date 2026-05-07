@@ -14,6 +14,29 @@ cd cuda/build && cmake --build . --target bench_throughput -j
 
 The benchmark uses zero-initialized SE-ResNet weights (no model file required); throughput depends only on architecture, not weight values.
 
+## GPU MCTS v4 — batched conv microbenchmark (B=2)
+
+Measured 2026-05-07 on the `v4-batched-conv` branch. **Primitive-level benchmark only**; no MCTS integration in this phase. The new `block_conv_3x3_shifted_b2` loads each weight tile A once per (n_tile, k_tile) and applies it to both batch elements before advancing — true batched WMMA with weight-load amortization. The new `oracle_net_forward_block_b2` uses it; BN/SE/heads still run sequentially per batch on each batch's slice.
+
+**Microbenchmark** (`bench_forward_b2 1000` — single block, 256 threads, 1000 iterations after 50-iter warmup, CUDA-event timing):
+
+| mode | smem | per-call | per-sim | per-sim ratio |
+|------|------|---------:|--------:|--------------:|
+| B=1 (existing `oracle_net_forward_block`) | 50,176 B (49 KB) | 1392.7 µs | 1392.7 µs | 1.00× |
+| **B=2 (new `oracle_net_forward_block_b2`)** | 99,328 B (97 KB) | 2339.0 µs | **1169.5 µs** | **1.191×** |
+
+Three runs all hit 1.191× to 4 significant figures (run-to-run variation < 0.1%). The 1.19× per-sim speedup confirms the bottleneck includes a substantial weight-bandwidth component — true batched WMMA halves weight memory traffic, and we observe roughly that fraction of the per-sim wall time recovered.
+
+**Tolerance vs single-batch reference** (`test_block_forward_b2_matches_b1` with non-zero pseudo-random weights, two distinct mid-game positions):
+- batch 0: val Δ = 0.0001, k Δ = 0.0001, max policy diff = 0.0050, mismatches at tol 0.01 = 0
+- batch 1: val Δ = 0.0001, k Δ = 0.0001, max policy diff = 0.0036, mismatches at tol 0.01 = 0
+
+**Note:** these are **single-block** wall times (one game on one of 36 SMs). The high absolute µs (vs the ~35.6 µs implied by 17K sims/sec at 36 concurrent) reflects a microbenchmark on an unsaturated GPU. The **per-sim ratio** is what extrapolates to MCTS throughput. v5 (deferred) will integrate this primitive into multi-explorer or per-warp-tree scheduling and measure the end-to-end samples/sec impact.
+
+**Smem fits 99 KB cap**: 99,328 B with 2 KB headroom for static smem before hitting the per-block hardware cap. Layout in halves: buf1[2,128,64] at 0, buf2[2,128,64] at 16384, reduce[256 floats] at 32768, shifted_b2[2,128,64] at 33280, total 49,664 halves.
+
+The existing single-explorer path is unchanged: `bench_throughput 100 200 36` still reports 86.4 samples/sec on this commit (within 0.1 of the v3 baseline).
+
 ## GPU MCTS v3 (FP16 activation storage)
 
 Measured 2026-05-07 on commit `cb796d9` (with v3 conversion applied). Same architecture as v2 (SE-ResNet 6×128, 36 concurrent, pool = max(8192, sims·35)). Inter-layer activation buffers (`buf1`, `buf2`) converted from FP32 to FP16; matmul math was already FP16 + FP32-accumulator WMMA. BN, SE arithmetic, residual add (in registers), value head FC1/FC2, and final tanh remain FP32 for numerical stability.

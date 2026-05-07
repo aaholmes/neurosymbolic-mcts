@@ -96,6 +96,26 @@ __device__ void block_conv_3x3_shifted(
     int C_in, int C_out
 );
 
+// --- 3x3 conv via shifted-copy GEMM, BATCHED at B=2 (true WMMA batching) ---
+// Loads each weight tile A ONCE per (n_tile, k_tile); applies to both batches.
+// Halves weight memory traffic vs 2× separate B=1 calls.
+//
+// input_smem_b2:   FP16; batch b at offset b*input_batch_stride (only first C_in*64 read)
+// W_s:             9 half* pointers to [C_out, C_in] FP16 in global memory (shared)
+// output_smem_b2:  FP16; batch b at offset b*output_batch_stride (only first C_out*64 written)
+// shifted_b2:      [2, C_in, 64] FP16 workspace, packed tight; reused at end for per-warp FP32 staging
+// input_batch_stride / output_batch_stride: the per-batch offset in halves; typically
+//   NN_HIDDEN_DIM*64 = 8192 when buffers are sized for the largest C in the network.
+__device__ void block_conv_3x3_shifted_b2(
+    const __half* __restrict__ input_smem_b2,
+    half* const* W_s,
+    __half* __restrict__ output_smem_b2,
+    half* __restrict__ shifted_b2,
+    int C_in, int C_out,
+    int input_batch_stride,
+    int output_batch_stride
+);
+
 // --- 1x1 convolution (direct) FP16 in/out ---
 __device__ void block_1x1_conv(
     const __half* __restrict__ input_smem,

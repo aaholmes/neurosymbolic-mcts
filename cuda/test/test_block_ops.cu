@@ -1197,6 +1197,128 @@ void test_block_forward_fp16_activations_vs_fp32(bool& test_failed) {
 }
 
 // ============================================================
+// v4 batched-conv tests
+// ----------------------------------------------------------------
+// True batched WMMA at B=2: oracle_net_forward_block_b2 should produce
+// outputs that match two sequential oracle_net_forward_block calls within
+// FP16 round-off. The matmul accumulator order changes (A loaded once,
+// applied to both batches) — that's the only numerically meaningful diff.
+// Both paths use the same FP16 inputs and FP32 accumulators internally.
+// ============================================================
+
+__global__ void kernel_block_forward_b2(
+    const BoardState* bs0, const BoardState* bs1,
+    float q0, float q1,
+    const OracleNetWeights* w,
+    float* policy_out_b2,    // [2 * NN_POLICY_SIZE]
+    float* value_out_b2,     // [2]
+    float* k_out_b2,         // [2]
+    const ConvWeightsShifted* shifted_w
+) {
+    extern __shared__ __half smem[];
+    oracle_net_forward_block_b2(bs0, bs1, q0, q1, w, (float*)smem,
+                                policy_out_b2, value_out_b2, k_out_b2, shifted_w);
+}
+
+void test_b2_smem_size(bool& test_failed) {
+    printf("[B2_SMEM_BYTES = %d bytes = %.1f KB] ", B2_SMEM_BYTES, B2_SMEM_BYTES / 1024.0f);
+    ASSERT_TRUE(B2_SMEM_BYTES <= 99 * 1024);  // hard cap on sm_120
+    ASSERT_TRUE(B2_SMEM_BYTES > 80 * 1024);   // sanity: must hold 2× buf1+buf2 (64 KB) + aux
+}
+
+void test_block_forward_b2_matches_b1(bool& test_failed) {
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    OracleNetWeights* h_weights = (OracleNetWeights*)malloc(sizeof(OracleNetWeights));
+    fill_pseudo_random_weights(h_weights);
+    cudaMemcpy(d_weights, h_weights, sizeof(OracleNetWeights), cudaMemcpyHostToDevice);
+    ConvWeightsShifted* d_shifted = convert_weights_shifted(d_weights);
+
+    // Two non-trivial mid-game positions to exercise different inputs per batch.
+    BoardState bs0 = parse_fen_blk(
+        "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 1");
+    BoardState bs1 = make_starting_position();
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, 2 * sizeof(BoardState));
+    cudaMemcpy(&d_bs[0], &bs0, sizeof(BoardState), cudaMemcpyHostToDevice);
+    cudaMemcpy(&d_bs[1], &bs1, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float q0 = 0.5f, q1 = -0.3f;
+
+    // === Run b1 path twice (reference) ===
+    float *d_pol_b1, *d_val_b1, *d_k_b1;
+    cudaMalloc(&d_pol_b1, 2 * NN_POLICY_SIZE * 4);
+    cudaMalloc(&d_val_b1, 2 * 4);
+    cudaMalloc(&d_k_b1,   2 * 4);
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    cudaFuncSetAttribute(kernel_block_forward,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, BLOCK_SMEM_BYTES);
+    kernel_block_forward<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        &d_bs[0], q0, d_weights, d_pol_b1 + 0*NN_POLICY_SIZE, d_val_b1 + 0, d_k_b1 + 0);
+    cudaDeviceSynchronize();
+    kernel_block_forward<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        &d_bs[1], q1, d_weights, d_pol_b1 + 1*NN_POLICY_SIZE, d_val_b1 + 1, d_k_b1 + 1);
+    cudaDeviceSynchronize();
+
+    // === Run b2 path once (under test) ===
+    float *d_pol_b2, *d_val_b2, *d_k_b2;
+    cudaMalloc(&d_pol_b2, 2 * NN_POLICY_SIZE * 4);
+    cudaMalloc(&d_val_b2, 2 * 4);
+    cudaMalloc(&d_k_b2,   2 * 4);
+
+    cudaFuncSetAttribute(kernel_block_forward_b2,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, B2_SMEM_BYTES);
+    kernel_block_forward_b2<<<1, 256, B2_SMEM_BYTES>>>(
+        &d_bs[0], &d_bs[1], q0, q1, d_weights,
+        d_pol_b2, d_val_b2, d_k_b2, d_shifted);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    ASSERT_EQ((int)err, (int)cudaSuccess);
+
+    float h_val_b1[2], h_val_b2[2], h_k_b1[2], h_k_b2[2];
+    float* h_pol_b1 = (float*)malloc(2 * NN_POLICY_SIZE * 4);
+    float* h_pol_b2 = (float*)malloc(2 * NN_POLICY_SIZE * 4);
+    cudaMemcpy(h_val_b1, d_val_b1, 8, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_val_b2, d_val_b2, 8, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_k_b1,   d_k_b1,   8, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_k_b2,   d_k_b2,   8, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_pol_b1, d_pol_b1, 2 * NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_pol_b2, d_pol_b2, 2 * NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+
+    int pol_mismatch_per_b[2] = {0, 0};
+    float pol_max_diff_per_b[2] = {0.0f, 0.0f};
+    for (int b = 0; b < 2; b++) {
+        for (int i = 0; i < NN_POLICY_SIZE; i++) {
+            float d = fabsf(h_pol_b1[b * NN_POLICY_SIZE + i] - h_pol_b2[b * NN_POLICY_SIZE + i]);
+            if (d > 0.01f) pol_mismatch_per_b[b]++;
+            if (d > pol_max_diff_per_b[b]) pol_max_diff_per_b[b] = d;
+        }
+    }
+
+    printf("[b0: val %.4f vs %.4f Δ=%.4f, pol_mismatches=%d max_d=%.4f] ",
+           h_val_b1[0], h_val_b2[0], fabsf(h_val_b1[0] - h_val_b2[0]),
+           pol_mismatch_per_b[0], pol_max_diff_per_b[0]);
+    printf("[b1: val %.4f vs %.4f Δ=%.4f, pol_mismatches=%d max_d=%.4f] ",
+           h_val_b1[1], h_val_b2[1], fabsf(h_val_b1[1] - h_val_b2[1]),
+           pol_mismatch_per_b[1], pol_max_diff_per_b[1]);
+
+    ASSERT_NEAR(h_val_b2[0], h_val_b1[0], 0.01f);
+    ASSERT_NEAR(h_val_b2[1], h_val_b1[1], 0.01f);
+    ASSERT_NEAR(h_k_b2[0],   h_k_b1[0],   0.01f);
+    ASSERT_NEAR(h_k_b2[1],   h_k_b1[1],   0.01f);
+    ASSERT_EQ(pol_mismatch_per_b[0], 0);
+    ASSERT_EQ(pol_mismatch_per_b[1], 0);
+
+    free(h_pol_b1); free(h_pol_b2); free(h_weights);
+    cudaFree(d_bs);
+    cudaFree(d_pol_b1); cudaFree(d_val_b1); cudaFree(d_k_b1);
+    cudaFree(d_pol_b2); cudaFree(d_val_b2); cudaFree(d_k_b2);
+    free_shifted_weights(d_shifted);
+    free_nn_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -1223,6 +1345,8 @@ int main() {
     RUN_TEST(test_shifted_conv_start);
     RUN_TEST(test_shifted_forward_zero_weights);
     RUN_TEST(test_block_forward_fp16_activations_vs_fp32);
+    RUN_TEST(test_b2_smem_size);
+    RUN_TEST(test_block_forward_b2_matches_b1);
 
     printf("\nResults: %d/%d passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);
