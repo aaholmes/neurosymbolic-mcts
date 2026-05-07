@@ -177,28 +177,30 @@ CHUNKED_WRAPPER(kernel_batched_conv_chunked_c4, 4)
 #undef CHUNKED_WRAPPER
 
 // Reference: single-position, smem-resident, existing shifted kernel.
-// Copies one [C_in, 64] input slice into smem, runs block_conv_3x3_shifted,
-// writes back to one [C_out, 64] output slice. Used for the independence test.
+// Copies one [C_in, 64] input slice into smem (FP16 post v3), runs
+// block_conv_3x3_shifted, writes FP32 result back to one [C_out, 64] slice.
 __global__ void kernel_ref_batch1_conv(
     const float* act_in_one,    // [C_in, 64] FP32 global
     half* const* W_s,
     float* act_out_one,         // [C_out, 64] FP32 global
     int C_in, int C_out
 ) {
-    extern __shared__ float smem_f[];
-    // Layout: input[C_in*64] | output[C_out*64] | shifted[C_in*64 halves]
-    float* input_smem  = smem_f;
-    float* output_smem = smem_f + (size_t)C_in * 64;
-    half*  shifted_smem = reinterpret_cast<half*>(output_smem + (size_t)C_out * 64);
+    extern __shared__ __half smem_h[];
+    // Layout (halves): input[C_in*64] | output[C_out*64] | shifted[C_in*64]
+    __half* input_smem  = smem_h;
+    __half* output_smem = smem_h + (size_t)C_in * 64;
+    half*   shifted_smem = smem_h + (size_t)C_in * 64 + (size_t)C_out * 64;
 
     int tid = threadIdx.x;
-    for (int i = tid; i < C_in * 64; i += blockDim.x) input_smem[i] = act_in_one[i];
+    for (int i = tid; i < C_in * 64; i += blockDim.x)
+        input_smem[i] = __float2half(act_in_one[i]);
     __syncthreads();
 
     block_conv_3x3_shifted(input_smem, W_s, output_smem, shifted_smem, C_in, C_out);
 
     __syncthreads();
-    for (int i = tid; i < C_out * 64; i += blockDim.x) act_out_one[i] = output_smem[i];
+    for (int i = tid; i < C_out * 64; i += blockDim.x)
+        act_out_one[i] = __half2float(output_smem[i]);
 }
 
 // ============================================================
@@ -371,9 +373,9 @@ static void test_independence(bool& test_failed) {
     CHECK_CUDA(cudaMalloc(&d_in_one,  C_in  * 64 * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_out_one, C_out * 64 * sizeof(float)));
     size_t ref_smem_bytes =
-        (size_t)C_in  * 64 * sizeof(float) +   // input
-        (size_t)C_out * 64 * sizeof(float) +   // output
-        (size_t)C_in  * 64 * sizeof(half);     // shifted (smem)
+        (size_t)C_in  * 64 * sizeof(__half) +  // input (FP16, v3)
+        (size_t)C_out * 64 * sizeof(__half) +  // output (FP16, v3)
+        (size_t)C_in  * 64 * sizeof(__half);   // shifted
     cudaFuncSetAttribute(kernel_ref_batch1_conv,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
                          (int)ref_smem_bytes);

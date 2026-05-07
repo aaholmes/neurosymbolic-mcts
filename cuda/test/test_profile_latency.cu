@@ -26,26 +26,27 @@ void free_shifted_weights(ConvWeightsShifted* d_sw);
 // Max input channels for staging buffer allocation
 constexpr int C_IN_MAX = 128;
 
-// Wrapper kernels for individual op timing
-__global__ void k_board_to_planes(const BoardState* bs, float* planes) {
+// Wrapper kernels for individual op timing (FP16 activation buffers, v3).
+__global__ void k_board_to_planes(const BoardState* bs, __half* planes) {
     block_board_to_planes(bs, planes);
 }
-__global__ void k_conv_3x3_shifted(const float* in, half* const* W_s, float* out, half* staging, int ci, int co) {
+__global__ void k_conv_3x3_shifted(const __half* in, half* const* W_s, __half* out, half* staging, int ci, int co) {
     block_conv_3x3_shifted(in, W_s, out, staging, ci, co);
 }
-__global__ void k_bn_relu(float* data, const float* g, const float* b, const float* m, const float* v, int ch, bool r) {
+__global__ void k_bn_relu(__half* data, const float* g, const float* b, const float* m, const float* v, int ch, bool r) {
     block_bn_relu(data, g, b, m, v, ch, r);
 }
 __global__ void k_bn_relu_1ch(float* data, const float* g, const float* b, const float* m, const float* v, bool r) {
+    // FP32 — value head
     block_bn_relu_1ch(data, g, b, m, v, r);
 }
-__global__ void k_se(float* data, const float* fc1, const float* fc2, int ch, int inner, float* avg, float* fc1_out) {
+__global__ void k_se(__half* data, const float* fc1, const float* fc2, int ch, int inner, float* avg, float* fc1_out) {
     block_se_block(data, fc1, fc2, ch, inner, avg, fc1_out);
 }
 __global__ void k_log_softmax(float* data, int size, float* smem) {
     block_log_softmax(data, size, smem);
 }
-__global__ void k_1x1_conv(const float* in, const float* w, float* out, int ci, int co) {
+__global__ void k_1x1_conv(const __half* in, const float* w, __half* out, int ci, int co) {
     block_1x1_conv(in, w, out, ci, co);
 }
 
@@ -128,8 +129,8 @@ __global__ void kernel_block_forward_pass(
     const OracleNetWeights* weights,
     float* policy_out, float* value_out, float* k_out
 ) {
-    extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out);
+    extern __shared__ __half smem[];
+    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out);
 }
 __global__ void kernel_block_forward_pass_tc(
     const BoardState* bs, float q_result,
@@ -137,8 +138,8 @@ __global__ void kernel_block_forward_pass_tc(
     const ConvWeightsHalf* half_w,
     float* policy_out, float* value_out, float* k_out
 ) {
-    extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out, half_w, nullptr);
+    extern __shared__ __half smem[];
+    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, half_w, nullptr);
 }
 __global__ void kernel_block_forward_pass_shifted(
     const BoardState* bs, float q_result,
@@ -146,8 +147,8 @@ __global__ void kernel_block_forward_pass_shifted(
     const ConvWeightsShifted* shifted_w,
     float* policy_out, float* value_out, float* k_out
 ) {
-    extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out, nullptr, shifted_w);
+    extern __shared__ __half smem[];
+    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, nullptr, shifted_w);
 }
 
 // CUDA event timer helper
@@ -318,14 +319,16 @@ int main(int argc, char** argv) {
     cudaEventCreate(&ev_start);
     cudaEventCreate(&ev_end);
 
-    // Allocate shared memory buffers for timing individual ops
-    float *d_buf1, *d_buf2, *d_planes, *d_reduce;
-    cudaMalloc(&d_buf1, BLOCK_BUF_SIZE * sizeof(float));
-    cudaMalloc(&d_buf2, BLOCK_BUF_SIZE * sizeof(float));
-    cudaMalloc(&d_planes, NN_INPUT_CHANNELS * 64 * sizeof(float));
+    // Allocate device buffers (FP16 activations post v3 conversion)
+    __half *d_buf1, *d_buf2, *d_planes;
+    float  *d_reduce, *d_v_feat;
+    cudaMalloc(&d_buf1, BLOCK_BUF_HALVES * sizeof(__half));
+    cudaMalloc(&d_buf2, BLOCK_BUF_HALVES * sizeof(__half));
+    cudaMalloc(&d_planes, NN_INPUT_CHANNELS * 64 * sizeof(__half));
     cudaMalloc(&d_reduce, BLOCK_REDUCE_SIZE * sizeof(float));
+    cudaMalloc(&d_v_feat, 64 * sizeof(float));   // FP32 scratch for value-head BN1ch
     half *d_shifted_staging;
-    cudaMalloc(&d_shifted_staging, C_IN_MAX * 64 * sizeof(half) + 8 * 256 * sizeof(half));  // shifted + a_staging
+    cudaMalloc(&d_shifted_staging, C_IN_MAX * 64 * sizeof(half) + 8 * 256 * sizeof(half));
 
     auto time_op = [&](const char* name, std::function<void()> fn, int iters = 50) -> float {
         cudaEventRecord(ev_start);
@@ -378,7 +381,8 @@ int main(int argc, char** argv) {
                                NN_HIDDEN_DIM, 1);
     });
     float t_vbn = time_op("value BN+ReLU [1]", [&]() {
-        k_bn_relu_1ch<<<1, 256>>>(d_buf1, d_weights->v_bn.weight, d_weights->v_bn.bias,
+        // Value-head BN1ch operates on FP32 scratch (per v3 conversion).
+        k_bn_relu_1ch<<<1, 256>>>(d_v_feat, d_weights->v_bn.weight, d_weights->v_bn.bias,
                                   d_weights->v_bn.running_mean, d_weights->v_bn.running_var, true);
     });
 
@@ -527,6 +531,8 @@ int main(int argc, char** argv) {
     cudaFree(d_value);
     cudaFree(d_k);
     cudaFree(d_policy_bufs);
+    cudaFree(d_buf1); cudaFree(d_buf2); cudaFree(d_planes);
+    cudaFree(d_reduce); cudaFree(d_v_feat); cudaFree(d_shifted_staging);
     // d_scratch freed below
 
     printf("\nProfiling complete.\n");

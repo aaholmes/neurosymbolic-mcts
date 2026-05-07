@@ -49,16 +49,17 @@ static BoardState parse_fen_blk(const char* fen) {
 __global__ void kernel_block_conv_1ch(
     const float* weights, const float* input, float* output
 ) {
-    extern __shared__ float smem[];
+    extern __shared__ __half smem[];
     int tid = threadIdx.x;
 
-    // Copy input (64 floats) into smem[0:64]
-    for (int i = tid; i < 64; i += blockDim.x) smem[i] = input[i];
+    // Convert FP32 input -> FP16 smem[0:64]
+    for (int i = tid; i < 64; i += blockDim.x) smem[i] = __float2half(input[i]);
     __syncthreads();
 
     block_conv_3x3(smem, weights, smem + 64, 1, 1);
 
-    for (int i = tid; i < 64; i += blockDim.x) output[i] = smem[64 + i];
+    // Convert FP16 smem[64:128] -> FP32 output
+    for (int i = tid; i < 64; i += blockDim.x) output[i] = __half2float(smem[64 + i]);
     __syncthreads();
 }
 
@@ -77,8 +78,8 @@ void test_block_conv_known_values(bool& test_failed) {
     cudaMemcpy(d_w,  h_weights, 9 * 4,  cudaMemcpyHostToDevice);
     cudaMemcpy(d_in, h_input,   64 * 4, cudaMemcpyHostToDevice);
 
-    // smem: input[64] + output[64] = 128 floats
-    kernel_block_conv_1ch<<<1, 256, 128 * 4>>>(d_w, d_in, d_out);
+    // smem: input[64] + output[64] = 128 halves = 256 bytes
+    kernel_block_conv_1ch<<<1, 256, 128 * sizeof(__half)>>>(d_w, d_in, d_out);
     cudaDeviceSynchronize();
     cudaMemcpy(h_output, d_out, 64 * 4, cudaMemcpyDeviceToHost);
 
@@ -106,23 +107,23 @@ __global__ void kernel_warp_conv_ref(
     warp_gemm(weights, col_buf, output, NN_HIDDEN_DIM, 64, NN_HIDDEN_DIM * 9);
 }
 
-// Block-version conv in shared memory
+// Block-version conv in shared memory (FP16 internal, FP32 interface)
 __global__ void kernel_block_conv_128ch(
     const float* weights, const float* input_global, float* output_global
 ) {
-    extern __shared__ float smem[];  // [128*64] input + [128*64] output = 16384 floats
+    extern __shared__ __half smem[];  // [128*64] input + [128*64] output = 16384 halves
     int tid = threadIdx.x;
 
-    // Load input into smem
+    // FP32 -> FP16 input
     for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
-        smem[i] = input_global[i];
+        smem[i] = __float2half(input_global[i]);
     __syncthreads();
 
     block_conv_3x3(smem, weights, smem + NN_HIDDEN_DIM * 64, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
 
-    // Write output to global memory
+    // FP16 -> FP32 output
     for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
-        output_global[i] = smem[NN_HIDDEN_DIM * 64 + i];
+        output_global[i] = __half2float(smem[NN_HIDDEN_DIM * 64 + i]);
     __syncthreads();
 }
 
@@ -154,20 +155,27 @@ void test_block_conv_vs_warp(bool& test_failed) {
     cudaDeviceSynchronize();
     cudaMemcpy(h_out_warp, d_out_warp, N * 4, cudaMemcpyDeviceToHost);
 
-    // Block version (shared memory: 2 × N floats = 64 KB, needs opt-in on sm_89+)
+    // Block version (shared memory: 2 × N halves = 32 KB)
     cudaFuncSetAttribute(kernel_block_conv_128ch,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, 2 * N * 4);
-    kernel_block_conv_128ch<<<1, 256, 2 * N * 4>>>(d_weights, d_input, d_out_block);
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         2 * N * (int)sizeof(__half));
+    kernel_block_conv_128ch<<<1, 256, 2 * N * sizeof(__half)>>>(d_weights, d_input, d_out_block);
     cudaDeviceSynchronize();
     cudaMemcpy(h_out_block, d_out_block, N * 4, cudaMemcpyDeviceToHost);
 
-    // Compare (allow small FP32 rounding differences)
+    // Compare (FP16-input variant: bumped tolerance per FP16 conversion plan).
+    // Reference is warp-FP32; block runs FP16-in/out with FP32 accum, so a few
+    // LSB-level rounding differences are expected at large activations.
     int mismatches = 0;
+    float max_diff = 0.0f;
     for (int i = 0; i < N; i++) {
         float diff = fabsf(h_out_warp[i] - h_out_block[i]);
-        if (diff > 0.05f) mismatches++;
+        float ref = fabsf(h_out_warp[i]);
+        float tol = fmaxf(0.7f, 0.04f * ref);
+        if (diff > tol) mismatches++;
+        if (diff > max_diff) max_diff = diff;
     }
-    printf("[mismatches=%d/%d] ", mismatches, N);
+    printf("[mismatches=%d/%d max_diff=%.3f] ", mismatches, N, max_diff);
     ASSERT_EQ(mismatches, 0);
 
     free(h_input); free(h_weights); free(h_out_warp); free(h_out_block);
@@ -181,12 +189,12 @@ void test_block_conv_vs_warp(bool& test_failed) {
 
 __global__ void kernel_block_bn_relu(float* data, const float* g, const float* b,
                                       const float* m, const float* v, int ch, bool relu) {
-    extern __shared__ float smem[];
+    extern __shared__ __half smem[];
     int tid = threadIdx.x;
-    for (int i = tid; i < ch * 64; i += blockDim.x) smem[i] = data[i];
+    for (int i = tid; i < ch * 64; i += blockDim.x) smem[i] = __float2half(data[i]);
     __syncthreads();
     block_bn_relu(smem, g, b, m, v, ch, relu);
-    for (int i = tid; i < ch * 64; i += blockDim.x) data[i] = smem[i];
+    for (int i = tid; i < ch * 64; i += blockDim.x) data[i] = __half2float(smem[i]);
     __syncthreads();
 }
 
@@ -223,7 +231,7 @@ void test_block_bn_relu_matches_warp(bool& test_failed) {
     kernel_warp_bn_relu_ref<<<1, 32>>>(d_warp, d_g, d_b, d_m, d_v, ch, true);
     cudaDeviceSynchronize();
 
-    kernel_block_bn_relu<<<1, 256, N * 4>>>(d_block, d_g, d_b, d_m, d_v, ch, true);
+    kernel_block_bn_relu<<<1, 256, N * sizeof(__half)>>>(d_block, d_g, d_b, d_m, d_v, ch, true);
     cudaDeviceSynchronize();
 
     float* h_warp  = (float*)malloc(N * 4);
@@ -231,10 +239,16 @@ void test_block_bn_relu_matches_warp(bool& test_failed) {
     cudaMemcpy(h_warp,  d_warp,  N*4, cudaMemcpyDeviceToHost);
     cudaMemcpy(h_block, d_block, N*4, cudaMemcpyDeviceToHost);
 
+    // Tolerance: BN inputs and outputs round-trip through FP16. Worst case
+    // is one ULP at the typical activation magnitude (~1.0).
     int mismatches = 0;
-    for (int i = 0; i < N; i++)
-        if (fabsf(h_warp[i] - h_block[i]) > 1e-5f) mismatches++;
-    printf("[mismatches=%d/%d] ", mismatches, N);
+    float max_diff = 0.0f;
+    for (int i = 0; i < N; i++) {
+        float diff = fabsf(h_warp[i] - h_block[i]);
+        if (diff > 0.01f) mismatches++;
+        if (diff > max_diff) max_diff = diff;
+    }
+    printf("[mismatches=%d/%d max_d=%.4f] ", mismatches, N, max_diff);
     ASSERT_EQ(mismatches, 0);
 
     free(h_data); free(h_gamma); free(h_beta); free(h_mean); free(h_var);
@@ -258,8 +272,8 @@ __global__ void kernel_block_forward(
     const BoardState* bs, float q_result, const OracleNetWeights* w,
     float* policy_out, float* value_out, float* k_out
 ) {
-    extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, w, smem, policy_out, value_out, k_out);
+    extern __shared__ __half smem[];
+    oracle_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out);
 }
 
 void test_block_forward_zero_weights(bool& test_failed) {
@@ -369,9 +383,9 @@ void test_block_forward_q_sensitivity(bool& test_failed) {
 void test_block_smem_size(bool& test_failed) {
     int sz = block_smem_bytes();
     printf("[%d bytes = %.1f KB] ", sz, sz / 1024.0f);
-    // Must fit in 96 KB per SM (standard limit)
-    ASSERT_TRUE(sz > 60 * 1024);   // sanity lower bound
-    ASSERT_TRUE(sz < 96 * 1024);   // must fit
+    // FP16 activations: ~50 KB. Must fit in 96 KB per SM (standard limit).
+    ASSERT_TRUE(sz > 30 * 1024);   // sanity lower bound (rejects degenerate config)
+    ASSERT_TRUE(sz < 96 * 1024);   // must fit per-SM smem budget
 }
 
 // ============================================================
@@ -443,8 +457,8 @@ void test_block_mcts_mate_detection(bool& test_failed) {
 // ============================================================
 
 __global__ void kernel_block_log_softmax(float* data, int size) {
-    extern __shared__ float smem[];
-    block_log_softmax(data, size, smem);
+    extern __shared__ __half smem[];
+    block_log_softmax(data, size, (float*)smem);
 }
 
 void test_block_log_softmax(bool& test_failed) {
@@ -483,52 +497,52 @@ __global__ void test_fp32_to_fp16(const float* src, half* dst, int n) {
     if (i < n) dst[i] = __float2half(src[i]);
 }
 
-// TC conv kernel: loads input into smem, runs TC conv, writes output
+// TC conv kernel: FP16 in/out smem; FP32 interface for testing.
+// smem layout (in halves):
+//   input[128*64=8192] + output[128*64=8192] + staging[8192]  = 24576 halves = 48 KB
+// staging needs to be at least 8192 halves so block_conv_3x3_tc can repurpose
+// it as per-warp FP32 acc-staging (8 warps × 256 floats = 4096 halves) at the end.
 __global__ void kernel_tc_conv_128ch(
     const float* input_global, const half* weights_h, float* output_global
 ) {
-    extern __shared__ float smem[];
+    extern __shared__ __half smem[];
     int tid = threadIdx.x;
 
-    // smem layout: input[128*64] + output[128*64] + staging[1024]
-    float* input_smem  = smem;
-    float* output_smem = smem + NN_HIDDEN_DIM * 64;
-    half*  staging     = (half*)(smem + 2 * NN_HIDDEN_DIM * 64);
+    __half* input_smem  = smem;
+    __half* output_smem = smem + NN_HIDDEN_DIM * 64;
+    half*   staging     = smem + 2 * NN_HIDDEN_DIM * 64;
 
-    // Load input into smem
     for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
-        input_smem[i] = input_global[i];
+        input_smem[i] = __float2half(input_global[i]);
     __syncthreads();
 
     block_conv_3x3_tc(input_smem, weights_h, output_smem, staging,
                       NN_HIDDEN_DIM, NN_HIDDEN_DIM);
 
-    // Write output to global memory
     for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
-        output_global[i] = output_smem[NN_HIDDEN_DIM * 64 * 0 + i];
-    // Note: output_smem starts at smem + 8192, but output_smem var already points there
+        output_global[i] = __half2float(output_smem[i]);
 }
 
-// TC conv for start conv: 17->128 channels
+// TC conv for start conv: 17->128 channels (FP16 in/out smem, FP32 interface)
 __global__ void kernel_tc_conv_start(
     const float* input_global, const half* weights_h, float* output_global
 ) {
-    extern __shared__ float smem[];
+    extern __shared__ __half smem[];
     int tid = threadIdx.x;
 
-    float* input_smem  = smem;                       // [17, 64]
-    float* output_smem = smem + NN_INPUT_CHANNELS * 64;  // [128, 64]
-    half*  staging     = (half*)(smem + NN_INPUT_CHANNELS * 64 + NN_HIDDEN_DIM * 64);
+    __half* input_smem  = smem;
+    __half* output_smem = smem + NN_INPUT_CHANNELS * 64;
+    half*   staging     = smem + NN_INPUT_CHANNELS * 64 + NN_HIDDEN_DIM * 64;
 
     for (int i = tid; i < NN_INPUT_CHANNELS * 64; i += blockDim.x)
-        input_smem[i] = input_global[i];
+        input_smem[i] = __float2half(input_global[i]);
     __syncthreads();
 
     block_conv_3x3_tc(input_smem, weights_h, output_smem, staging,
                       NN_INPUT_CHANNELS, NN_HIDDEN_DIM);
 
     for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
-        output_global[i] = output_smem[i];
+        output_global[i] = __half2float(output_smem[i]);
 }
 
 void test_tc_conv_vs_scalar(bool& test_failed) {
@@ -566,8 +580,9 @@ void test_tc_conv_vs_scalar(bool& test_failed) {
     test_fp32_to_fp16<<<(W + 255) / 256, 256>>>(d_weights, d_weights_h, W);
     cudaDeviceSynchronize();
 
-    // TC version: smem = input[8192] + output[8192] + staging[1024] = 17408 floats
-    size_t smem_tc = (2 * N + 1024) * 4;
+    // TC version: smem = input[8192] + output[8192] + staging[8192] halves
+    // (staging sized to fit per-warp FP32 acc-staging at conv tail)
+    size_t smem_tc = (2 * N + 8192) * sizeof(__half);
     cudaFuncSetAttribute(kernel_tc_conv_128ch,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_tc);
     kernel_tc_conv_128ch<<<1, 256, smem_tc>>>(d_input, d_weights_h, d_out_tc);
@@ -585,15 +600,14 @@ void test_tc_conv_vs_scalar(bool& test_failed) {
 
     cudaMemcpy(h_out_tc, d_out_tc, N * 4, cudaMemcpyDeviceToHost);
 
-    // Compare: FP16 inputs mean ~1e-3 relative error per multiply,
-    // accumulated over 128*9=1152 terms. Allow generous tolerance.
+    // FP16 in/out: ~1e-3 relative error per multiply over 1152 K-loop terms.
+    // Bumped tolerance per the FP16 conversion plan (Phase 3 in CLAUDE plan).
     int mismatches = 0;
     float max_diff = 0.0f;
     for (int i = 0; i < N; i++) {
         float diff = fabsf(h_out_scalar[i] - h_out_tc[i]);
         if (diff > max_diff) max_diff = diff;
-        // Tolerance: relative or absolute
-        float tol = fmaxf(0.5f, 0.02f * fabsf(h_out_scalar[i]));
+        float tol = fmaxf(0.7f, 0.04f * fabsf(h_out_scalar[i]));
         if (diff > tol) mismatches++;
     }
     printf("[mismatches=%d/%d, max_diff=%.3f] ", mismatches, N, max_diff);
@@ -604,24 +618,24 @@ void test_tc_conv_vs_scalar(bool& test_failed) {
     cudaFree(d_out_tc); cudaFree(d_weights_h);
 }
 
-// Scalar GPU conv for arbitrary C_in -> C_out
+// Scalar GPU conv for arbitrary C_in -> C_out (FP16 in/out smem, FP32 interface)
 __global__ void kernel_block_conv_generic(
     const float* weights, const float* input_global, float* output_global,
     int C_in, int C_out
 ) {
-    extern __shared__ float smem[];
+    extern __shared__ __half smem[];
     int tid = threadIdx.x;
     int N_in  = C_in * 64;
     int N_out = C_out * 64;
 
     for (int i = tid; i < N_in; i += blockDim.x)
-        smem[i] = input_global[i];
+        smem[i] = __float2half(input_global[i]);
     __syncthreads();
 
     block_conv_3x3(smem, weights, smem + N_in, C_in, C_out);
 
     for (int i = tid; i < N_out; i += blockDim.x)
-        output_global[i] = smem[N_in + i];
+        output_global[i] = __half2float(smem[N_in + i]);
     __syncthreads();
 }
 
@@ -646,8 +660,8 @@ void test_tc_conv_start(bool& test_failed) {
     cudaMemcpy(d_input,   h_input,   N_in * 4, cudaMemcpyHostToDevice);
     cudaMemcpy(d_weights, h_weights, W * 4,    cudaMemcpyHostToDevice);
 
-    // Scalar GPU reference
-    size_t smem_scalar = (N_in + N_out) * 4;
+    // Scalar GPU reference (FP16 smem internally)
+    size_t smem_scalar = (N_in + N_out) * sizeof(__half);
     cudaFuncSetAttribute(kernel_block_conv_generic,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_scalar);
     kernel_block_conv_generic<<<1, 256, smem_scalar>>>(
@@ -661,8 +675,8 @@ void test_tc_conv_start(bool& test_failed) {
     test_fp32_to_fp16<<<(W + 255) / 256, 256>>>(d_weights, d_weights_h, W);
     cudaDeviceSynchronize();
 
-    // smem = input[17*64] + output[128*64] + staging[1024]
-    size_t smem_tc = (N_in + N_out + 1024) * 4;
+    // smem (halves): input[17*64] + output[128*64] + staging[8192 for acc-stage reuse]
+    size_t smem_tc = (N_in + N_out + 8192) * sizeof(__half);
     cudaFuncSetAttribute(kernel_tc_conv_start,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_tc);
     kernel_tc_conv_start<<<1, 256, smem_tc>>>(d_input, d_weights_h, d_out_tc);
@@ -698,8 +712,8 @@ __global__ void kernel_block_forward_tc(
     const ConvWeightsHalf* half_w,
     float* policy_out, float* value_out, float* k_out
 ) {
-    extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, w, smem, policy_out, value_out, k_out, half_w);
+    extern __shared__ __half smem[];
+    oracle_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out, half_w);
 }
 
 void test_tc_forward_zero_weights(bool& test_failed) {
@@ -779,21 +793,21 @@ void test_tc_forward_zero_weights(bool& test_failed) {
 __global__ void kernel_shifted_conv_128ch(
     const float* input_global, half* const* W_s, float* output_global
 ) {
-    extern __shared__ float smem[];
+    extern __shared__ __half smem[];
     int tid = threadIdx.x;
-    float* input_smem = smem;
-    float* output_smem = smem + NN_HIDDEN_DIM * 64;
-    half*  shifted = (half*)(smem + 2 * NN_HIDDEN_DIM * 64);
+    __half* input_smem  = smem;
+    __half* output_smem = smem + NN_HIDDEN_DIM * 64;
+    half*   shifted     = smem + 2 * NN_HIDDEN_DIM * 64;
 
     for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
-        input_smem[i] = input_global[i];
+        input_smem[i] = __float2half(input_global[i]);
     __syncthreads();
 
     block_conv_3x3_shifted(input_smem, W_s, output_smem, shifted,
                            NN_HIDDEN_DIM, NN_HIDDEN_DIM);
 
     for (int i = tid; i < NN_HIDDEN_DIM * 64; i += blockDim.x)
-        output_global[i] = output_smem[i];
+        output_global[i] = __half2float(output_smem[i]);
 }
 
 void test_shifted_conv_vs_scalar(bool& test_failed) {
@@ -816,8 +830,8 @@ void test_shifted_conv_vs_scalar(bool& test_failed) {
     cudaMemcpy(d_input,   h_input,   N * 4, cudaMemcpyHostToDevice);
     cudaMemcpy(d_weights, h_weights, W * 4, cudaMemcpyHostToDevice);
 
-    // Scalar reference
-    size_t smem_scalar = 2 * N * 4;
+    // Scalar reference (FP16 smem internally)
+    size_t smem_scalar = 2 * N * sizeof(__half);
     cudaFuncSetAttribute(kernel_block_conv_128ch,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_scalar);
     kernel_block_conv_128ch<<<1, 256, smem_scalar>>>(d_weights, d_input, d_out_scalar);
@@ -825,7 +839,6 @@ void test_shifted_conv_vs_scalar(bool& test_failed) {
     cudaMemcpy(h_out_scalar, d_out_scalar, N * 4, cudaMemcpyDeviceToHost);
 
     // Convert weights to shifted layout (9 × [128, 128])
-    // Build on host, copy to device
     half* h_slices[9];
     half* d_slices[9];
     int slice_n = NN_HIDDEN_DIM * NN_HIDDEN_DIM;
@@ -840,13 +853,12 @@ void test_shifted_conv_vs_scalar(bool& test_failed) {
         free(h_slices[s]);
     }
 
-    // Copy pointer array to device
     half** d_W_s;
     cudaMalloc(&d_W_s, 9 * sizeof(half*));
     cudaMemcpy(d_W_s, d_slices, 9 * sizeof(half*), cudaMemcpyHostToDevice);
 
-    // Shifted conv: smem = input[8192] + output[8192] + shifted[4096] = 20480 floats
-    size_t smem_shifted = (2 * N + NN_HIDDEN_DIM * 64 / 2) * 4;
+    // Shifted conv: smem (halves) = input[8192] + output[8192] + shifted[8192] = 24576 halves
+    size_t smem_shifted = (2 * N + NN_HIDDEN_DIM * 64) * sizeof(__half);
     cudaFuncSetAttribute(kernel_shifted_conv_128ch,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_shifted);
     kernel_shifted_conv_128ch<<<1, 256, smem_shifted>>>(d_input, d_W_s, d_out_shifted);
@@ -864,7 +876,7 @@ void test_shifted_conv_vs_scalar(bool& test_failed) {
         for (int i = 0; i < N; i++) {
             float diff = fabsf(h_out_scalar[i] - h_out_shifted[i]);
             if (diff > max_diff) max_diff = diff;
-            float tol = fmaxf(0.5f, 0.02f * fabsf(h_out_scalar[i]));
+            float tol = fmaxf(0.7f, 0.04f * fabsf(h_out_scalar[i]));
             if (diff > tol) mismatches++;
         }
         printf("[mismatches=%d/%d, max_diff=%.3f] ", mismatches, N, max_diff);
@@ -883,30 +895,32 @@ __global__ void kernel_block_forward_shifted(
     const ConvWeightsShifted* shifted_w,
     float* policy_out, float* value_out, float* k_out
 ) {
-    extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, w, smem, policy_out, value_out, k_out,
+    extern __shared__ __half smem[];
+    oracle_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out,
                              nullptr, shifted_w);
 }
 
-// Generic shifted conv kernel for arbitrary C_in/C_out
+// Generic shifted conv kernel for arbitrary C_in/C_out (FP16 in/out smem, FP32 interface)
 __global__ void kernel_shifted_conv_generic(
     const float* input_global, half* const* W_s, float* output_global,
     int C_in, int C_out
 ) {
-    extern __shared__ float smem[];
+    extern __shared__ __half smem[];
     int tid = threadIdx.x;
     int N_in = C_in * 64;
     int N_out = C_out * 64;
-    float* input_smem  = smem;
-    float* output_smem = smem + N_in;
-    half*  shifted     = (half*)(smem + N_in + N_out);
+    __half* input_smem  = smem;
+    __half* output_smem = smem + N_in;
+    half*   shifted     = smem + N_in + N_out;
 
-    for (int i = tid; i < N_in; i += blockDim.x) input_smem[i] = input_global[i];
+    for (int i = tid; i < N_in; i += blockDim.x)
+        input_smem[i] = __float2half(input_global[i]);
     __syncthreads();
 
     block_conv_3x3_shifted(input_smem, W_s, output_smem, shifted, C_in, C_out);
 
-    for (int i = tid; i < N_out; i += blockDim.x) output_global[i] = output_smem[i];
+    for (int i = tid; i < N_out; i += blockDim.x)
+        output_global[i] = __half2float(output_smem[i]);
 }
 
 // Shifted conv for start conv dimensions (C_in=17, C_out=128) — exercises a_staging boundary path
@@ -933,8 +947,8 @@ void test_shifted_conv_start(bool& test_failed) {
     cudaMemcpy(d_input,   h_input,   N_in * 4, cudaMemcpyHostToDevice);
     cudaMemcpy(d_weights, h_weights, W_total * 4, cudaMemcpyHostToDevice);
 
-    // Scalar GPU reference
-    size_t smem_scalar = (N_in + N_out) * 4;
+    // Scalar GPU reference (FP16 smem internally)
+    size_t smem_scalar = (N_in + N_out) * sizeof(__half);
     cudaFuncSetAttribute(kernel_block_conv_generic,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_scalar);
     kernel_block_conv_generic<<<1, 256, smem_scalar>>>(
@@ -959,8 +973,9 @@ void test_shifted_conv_start(bool& test_failed) {
     cudaMalloc(&d_W_s, 9 * sizeof(half*));
     cudaMemcpy(d_W_s, d_slices, 9 * sizeof(half*), cudaMemcpyHostToDevice);
 
-    // Shifted conv: smem = input[17*64] + output[128*64] + shifted[4096 floats]
-    size_t smem_shifted = (N_in + N_out + BLOCK_SHIFTED_SIZE) * 4;
+    // Shifted conv: smem (halves) = input[N_in] + output[N_out] + shifted-aux[8192]
+    // (shifted-aux sized for [128, 64] at C_in=128, fits 1088-half C_in=17 too)
+    size_t smem_shifted = (N_in + N_out + 8192) * sizeof(__half);
     cudaFuncSetAttribute(kernel_shifted_conv_generic,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_shifted);
     kernel_shifted_conv_generic<<<1, 256, smem_shifted>>>(
@@ -979,7 +994,7 @@ void test_shifted_conv_start(bool& test_failed) {
         for (int i = 0; i < N_out; i++) {
             float diff = fabsf(h_out_scalar[i] - h_out_shifted[i]);
             if (diff > max_diff) max_diff = diff;
-            float tol = fmaxf(0.5f, 0.02f * fabsf(h_out_scalar[i]));
+            float tol = fmaxf(0.7f, 0.04f * fabsf(h_out_scalar[i]));
             if (diff > tol) mismatches++;
         }
         printf("[mismatches=%d/%d, max_diff=%.3f] ", mismatches, N_out, max_diff);
@@ -1061,6 +1076,127 @@ void test_shifted_forward_zero_weights(bool& test_failed) {
 }
 
 // ============================================================
+// Block forward vs warp forward, NON-ZERO weights
+// ----------------------------------------------------------------
+// This is the load-bearing test for the FP16-activation conversion.
+// Zero weights pass any precision change trivially. With small
+// pseudo-random non-zero weights and a non-trivial board position,
+// any drift introduced by FP16 storage in inter-layer activation
+// buffers will surface here at tolerance v=0.05, k=0.01, policy=0.05
+// (matching the existing warp-vs-block tolerances).
+// ============================================================
+
+static void fill_pseudo_random_weights(OracleNetWeights* h_w) {
+    // Small symmetric weights so activations stay in safe range
+    // through 6 residual blocks. Pattern: ((i*11 + 5) % 13 - 6) / 130
+    // gives values in roughly [-0.046, 0.054].
+    auto rval = [](int i) { return (((i * 11 + 5) % 13) - 6) / 130.0f; };
+
+    float* w = (float*)h_w;
+    size_t n_floats = sizeof(OracleNetWeights) / sizeof(float);
+    for (size_t i = 0; i < n_floats; i++) w[i] = rval((int)i);
+
+    // Override BN params: gamma=1, beta=0, mean=0, var=1 (identity BN).
+    // Keeps activations from blowing up while still exercising every code path.
+    auto fix_bn = [](BNParams& bn) {
+        for (int c = 0; c < NN_HIDDEN_DIM; c++) {
+            bn.weight[c]       = 1.0f;
+            bn.bias[c]         = 0.0f;
+            bn.running_mean[c] = 0.0f;
+            bn.running_var[c]  = 1.0f;
+        }
+    };
+    fix_bn(h_w->start_bn);
+    for (int b = 0; b < NN_NUM_BLOCKS; b++) {
+        fix_bn(h_w->blocks[b].bn1);
+        fix_bn(h_w->blocks[b].bn2);
+    }
+    fix_bn(h_w->p_bn);
+    h_w->v_bn.weight[0] = 1.0f;
+    h_w->v_bn.bias[0]   = 0.0f;
+    h_w->v_bn.running_mean[0] = 0.0f;
+    h_w->v_bn.running_var[0]  = 1.0f;
+
+    // k_logit moderate so k stays small (~0.4)
+    h_w->k_logit = 0.0f;
+}
+
+void test_block_forward_fp16_activations_vs_fp32(bool& test_failed) {
+    // Allocate device weights via the existing allocator (sets running_var=1
+    // by default), then overwrite with our pseudo-random non-zero pattern.
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    OracleNetWeights* h_weights = (OracleNetWeights*)malloc(sizeof(OracleNetWeights));
+    fill_pseudo_random_weights(h_weights);
+    cudaMemcpy(d_weights, h_weights, sizeof(OracleNetWeights), cudaMemcpyHostToDevice);
+
+    float* d_scratch = alloc_nn_scratch(1);
+
+    // Use a non-trivial mid-game position: Italian Game.
+    BoardState bs = parse_fen_blk(
+        "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 1");
+    BoardState* d_bs;
+    cudaMalloc(&d_bs, sizeof(BoardState));
+    cudaMemcpy(d_bs, &bs, sizeof(BoardState), cudaMemcpyHostToDevice);
+
+    float *d_pol_w, *d_val_w, *d_k_w;
+    float *d_pol_b, *d_val_b, *d_k_b;
+    cudaMalloc(&d_pol_w, NN_POLICY_SIZE * 4); cudaMalloc(&d_val_w, 4); cudaMalloc(&d_k_w, 4);
+    cudaMalloc(&d_pol_b, NN_POLICY_SIZE * 4); cudaMalloc(&d_val_b, 4); cudaMalloc(&d_k_b, 4);
+
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    float q_result = 0.5f;
+
+    // Warp-forward: FP32 reference (all storage and arithmetic FP32).
+    kernel_warp_forward<<<1, 32>>>(d_bs, q_result, d_weights, d_scratch,
+                                    d_pol_w, d_val_w, d_k_w);
+    cudaDeviceSynchronize();
+
+    // Block-forward: under test (FP16 inter-layer activations after conversion).
+    cudaFuncSetAttribute(kernel_block_forward,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, BLOCK_SMEM_BYTES);
+    kernel_block_forward<<<1, 256, BLOCK_SMEM_BYTES>>>(
+        d_bs, q_result, d_weights, d_pol_b, d_val_b, d_k_b);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    ASSERT_EQ((int)err, (int)cudaSuccess);
+
+    float h_val_w, h_val_b, h_k_w, h_k_b;
+    float* h_pol_w = (float*)malloc(NN_POLICY_SIZE * 4);
+    float* h_pol_b = (float*)malloc(NN_POLICY_SIZE * 4);
+    cudaMemcpy(&h_val_w, d_val_w, 4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_val_b, d_val_b, 4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_k_w,   d_k_w,   4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_k_b,   d_k_b,   4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_pol_w, d_pol_w, NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_pol_b, d_pol_b, NN_POLICY_SIZE * 4, cudaMemcpyDeviceToHost);
+
+    int pol_mismatch = 0;
+    float pol_max_diff = 0.0f;
+    for (int i = 0; i < NN_POLICY_SIZE; i++) {
+        float d = fabsf(h_pol_w[i] - h_pol_b[i]);
+        if (d > 0.05f) pol_mismatch++;
+        if (d > pol_max_diff) pol_max_diff = d;
+    }
+
+    printf("[val: warp=%.4f block=%.4f Δ=%.4f, k: %.4f vs %.4f Δ=%.4f, pol_mismatches=%d max_d=%.4f] ",
+           h_val_w, h_val_b, fabsf(h_val_w - h_val_b),
+           h_k_w, h_k_b, fabsf(h_k_w - h_k_b),
+           pol_mismatch, pol_max_diff);
+
+    ASSERT_NEAR(h_val_b, h_val_w, 0.05f);
+    ASSERT_NEAR(h_k_b,   h_k_w,   0.01f);
+    ASSERT_EQ(pol_mismatch, 0);
+
+    free(h_pol_w); free(h_pol_b); free(h_weights);
+    cudaFree(d_bs);
+    cudaFree(d_pol_w); cudaFree(d_val_w); cudaFree(d_k_w);
+    cudaFree(d_pol_b); cudaFree(d_val_b); cudaFree(d_k_b);
+    free_nn_scratch(d_scratch); free_nn_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -1086,6 +1222,7 @@ int main() {
     RUN_TEST(test_shifted_conv_vs_scalar);
     RUN_TEST(test_shifted_conv_start);
     RUN_TEST(test_shifted_forward_zero_weights);
+    RUN_TEST(test_block_forward_fp16_activations_vs_fp32);
 
     printf("\nResults: %d/%d passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);

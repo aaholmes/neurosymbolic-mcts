@@ -14,9 +14,21 @@ cd cuda/build && cmake --build . --target bench_throughput -j
 
 The benchmark uses zero-initialized SE-ResNet weights (no model file required); throughput depends only on architecture, not weight values.
 
-## GPU MCTS v2 (current main, post-pool-fix)
+## GPU MCTS v3 (FP16 activation storage)
 
-Measured 2026-05-05 on commit `f5278d8`. Architecture: SE-ResNet 6×128 (~2M params), 36 concurrent games, pool = max(8192, sims·35).
+Measured 2026-05-07 on commit `cb796d9` (with v3 conversion applied). Same architecture as v2 (SE-ResNet 6×128, 36 concurrent, pool = max(8192, sims·35)). Inter-layer activation buffers (`buf1`, `buf2`) converted from FP32 to FP16; matmul math was already FP16 + FP32-accumulator WMMA. BN, SE arithmetic, residual add (in registers), value head FC1/FC2, and final tanh remain FP32 for numerical stability.
+
+| sims/move | games | wall time | samples/sec | sims/sec | vs v2 |
+|-----------|-------|-----------|-------------|----------|-------|
+| 200       | 100   | 133.9 s   | 86.8        | 17,356   | 1.07× |
+
+Three-run median; runs were 133.7s, 133.9s, 134.1s — within 0.3% of each other. Tolerance vs FP32 warp-forward reference (per `test_block_forward_fp16_activations_vs_fp32`): value Δ=0.0000, k Δ=0.0000, max policy Δ=0.0035 — well below the 0.05 tolerance bar.
+
+**Smem footprint**: 82,944 bytes (81 KB) → 50,176 bytes (49 KB), a 39% reduction. The throughput gain is modest because the hot conv path was already FP16-WMMA at v2; the headline savings come from removing the per-conv FP32→FP16 conversion and halving activation-buffer bandwidth. The 32 KB freed unblocks the next planned step — intra-block virtual-loss batched inference, where batch=8 activations at FP32 (~256 KB) exceed the 99 KB smem cap but at FP16 (~128 KB) become approachable with smarter tiling.
+
+## GPU MCTS v2 (post-pool-fix, pre-FP16)
+
+Measured 2026-05-05 on commit `f5278d8`. Architecture: SE-ResNet 6×128 (~2M params), 36 concurrent games, pool = max(8192, sims·35), FP32 inter-layer activations.
 
 | sims/move | games | wall time | samples/sec | sims/sec |
 |-----------|-------|-----------|-------------|----------|
@@ -85,6 +97,7 @@ At 200 sims/move on a single RTX 5060 Ti, **measured** end-to-end:
 
 | engine | network | precision | samples/sec | sims/sec | vs Caissawary v2 |
 |--------|---------|-----------|-------------|----------|------------------|
+| Caissawary GPU v3 | SE-ResNet 6×128 (~1.98M, 17 input planes) | FP16 act, FP32 BN/SE/heads | 86.8 | 17,356 | 1.07× |
 | Caissawary GPU v2 | SE-ResNet 6×128 (~1.98M, 17 input planes) | FP32 | 79 | 15,800 | 1.0× |
 | Caissawary Rust   | SE-ResNet 6×128 | FP32 | 12.6 | 2,520 | 0.16× |
 | **Lc0 selfplay**  | SE-ResNet 6×64 (~600K, 112 input planes) | FP16 | **368** | **77,468** | **4.7× / 4.9×** |

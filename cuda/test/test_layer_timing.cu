@@ -82,32 +82,32 @@ __global__ void kernel_block_forward_pass(
     const OracleNetWeights* weights,
     float* policy_out, float* value_out, float* k_out
 ) {
-    extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out);
+    extern __shared__ __half smem[];
+    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out);
 }
 
 // Individual kernels for timing each operation
-__global__ void k_board_to_planes(const BoardState* bs, float* planes) {
+// Activation buffers are FP16 (post v3 conversion). Helper kernels take
+// __half* and the host code allocates FP16 device buffers below.
+__global__ void k_board_to_planes(const BoardState* bs, __half* planes) {
     block_board_to_planes(bs, planes);
 }
 
-__global__ void k_conv_3x3(const float* in, const float* w, float* out, int ci, int co) {
+__global__ void k_conv_3x3(const __half* in, const float* w, __half* out, int ci, int co) {
     block_conv_3x3(in, w, out, ci, co);
 }
 
-__global__ void k_conv_3x3_smem(const float* in, const float* w, float* out, float* sw, int ci, int co) {
+__global__ void k_conv_3x3_smem(const __half* in, const float* w, __half* out, float* sw, int ci, int co) {
     block_conv_3x3_smem_w(in, w, out, sw, ci, co);
 }
 
-__global__ void k_conv_3x3_tc(const float* in, const half* w, float* out, int ci, int co) {
-    extern __shared__ float smem[];
+__global__ void k_conv_3x3_tc(const __half* in, const half* w, __half* out, int ci, int co) {
+    extern __shared__ __half smem[];
     int tid = threadIdx.x;
-    // Load input into smem
     for (int i = tid; i < ci * 64; i += blockDim.x) smem[i] = in[i];
     __syncthreads();
-    half* staging = (half*)(smem + ci * 64 + co * 64);
+    half* staging = smem + ci * 64 + co * 64;
     block_conv_3x3_tc(smem, w, smem + ci * 64, staging, ci, co);
-    // Write output
     for (int i = tid; i < co * 64; i += blockDim.x) out[i] = smem[ci * 64 + i];
     __syncthreads();
 }
@@ -117,21 +117,22 @@ __global__ void kernel_block_forward_tc(
     const OracleNetWeights* weights, const ConvWeightsHalf* half_w,
     float* policy_out, float* value_out, float* k_out
 ) {
-    extern __shared__ float smem[];
-    oracle_net_forward_block(bs, q_result, weights, smem, policy_out, value_out, k_out, half_w);
+    extern __shared__ __half smem[];
+    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, half_w);
 }
 
-__global__ void k_bn_relu(float* data, const float* g, const float* b,
+__global__ void k_bn_relu(__half* data, const float* g, const float* b,
                           const float* m, const float* v, int ch, bool r) {
     block_bn_relu(data, g, b, m, v, ch, r);
 }
 
 __global__ void k_bn_relu_1ch(float* data, const float* g, const float* b,
                               const float* m, const float* v, bool r) {
+    // Value head's 1ch BN stays FP32 in the v3 path.
     block_bn_relu_1ch(data, g, b, m, v, r);
 }
 
-__global__ void k_se(float* data, const float* fc1, const float* fc2,
+__global__ void k_se(__half* data, const float* fc1, const float* fc2,
                      int ch, int inner, float* avg, float* fc1_out) {
     block_se_block(data, fc1, fc2, ch, inner, avg, fc1_out);
 }
@@ -140,7 +141,7 @@ __global__ void k_log_softmax(float* data, int size, float* smem) {
     block_log_softmax(data, size, smem);
 }
 
-__global__ void k_1x1_conv(const float* in, const float* w, float* out, int ci, int co) {
+__global__ void k_1x1_conv(const __half* in, const float* w, __half* out, int ci, int co) {
     block_1x1_conv(in, w, out, ci, co);
 }
 
@@ -151,16 +152,17 @@ int main(int argc, char** argv) {
     OracleNetWeights* d_weights = load_nn_weights(argv[1]);
     if (!d_weights) return 1;
 
-    // Allocate shared memory sized buffers
-    float *d_buf1, *d_buf2, *d_planes, *d_reduce;
-    cudaMalloc(&d_buf1, BLOCK_BUF_SIZE * sizeof(float));
-    cudaMalloc(&d_buf2, BLOCK_BUF_SIZE * sizeof(float));
-    cudaMalloc(&d_planes, NN_INPUT_CHANNELS * 64 * sizeof(float));
+    // Allocate device buffers (FP16 activation buffers post v3 conversion).
+    __half *d_buf1, *d_buf2, *d_planes;
+    float  *d_reduce;
+    cudaMalloc(&d_buf1, BLOCK_BUF_HALVES * sizeof(__half));
+    cudaMalloc(&d_buf2, BLOCK_BUF_HALVES * sizeof(__half));
+    cudaMalloc(&d_planes, NN_INPUT_CHANNELS * 64 * sizeof(__half));
     cudaMalloc(&d_reduce, BLOCK_REDUCE_SIZE * sizeof(float));
 
-    // Shared memory weight buffer (needs dynamic smem kernel)
-    float *d_weights_smem_host;
-    cudaHostAlloc(&d_weights_smem_host, BLOCK_WEIGHTS_SIZE * sizeof(float), 0);
+    // Value head's BN1ch operates on FP32; allocate a small FP32 scratch.
+    float* d_v_feat;
+    cudaMalloc(&d_v_feat, 64 * sizeof(float));
 
     BoardState bs = parse_fen(test_fen);
     BoardState* d_bs;
@@ -258,7 +260,8 @@ int main(int argc, char** argv) {
     printf("  %-30s %8.2f ms\n", "value_conv_1x1 [128→1]", ms_vconv);
 
     float ms_vbn = t.measure(ITERS, [&]() {
-        k_bn_relu_1ch<<<1, 256>>>(d_buf1, d_weights->v_bn.weight, d_weights->v_bn.bias,
+        // Value-head BN1ch operates on FP32 (per v3 conversion), not on FP16 d_buf1.
+        k_bn_relu_1ch<<<1, 256>>>(d_v_feat, d_weights->v_bn.weight, d_weights->v_bn.bias,
                                   d_weights->v_bn.running_mean, d_weights->v_bn.running_var, true);
     });
     printf("  %-30s %8.2f ms\n", "value_BN+ReLU [1]", ms_vbn);
@@ -386,8 +389,7 @@ int main(int argc, char** argv) {
 
     cudaFree(d_bs); cudaFree(d_buf1); cudaFree(d_buf2); cudaFree(d_planes);
     cudaFree(d_reduce); cudaFree(d_policy); cudaFree(d_value); cudaFree(d_k);
-    cudaFree(d_conv_smem);
-    cudaFreeHost(d_weights_smem_host);
+    cudaFree(d_conv_smem); cudaFree(d_v_feat);
     free_nn_weights(d_weights);
 
     return 0;

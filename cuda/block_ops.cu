@@ -5,9 +5,11 @@ using namespace nvcuda;
 
 // All functions assume blockDim.x == 256 and all 256 threads participate.
 // Work is striped: thread t owns elements t, t+256, t+512, ...
+//
+// Activation buffers are FP16 in smem. Internal arithmetic is FP32.
 
 __device__ void block_bn_relu(
-    float* data,
+    __half* data,
     const float* gamma,
     const float* beta,
     const float* running_mean,
@@ -19,11 +21,11 @@ __device__ void block_bn_relu(
     int total = channels * 64;
     for (int idx = tid; idx < total; idx += blockDim.x) {
         int ch = idx / 64;
-        float x = data[idx];
+        float x = __half2float(data[idx]);
         float norm = (x - running_mean[ch]) * rsqrtf(running_var[ch] + 1e-5f);
         float result = norm * gamma[ch] + beta[ch];
         if (relu && result < 0.0f) result = 0.0f;
-        data[idx] = result;
+        data[idx] = __float2half(result);
     }
     __syncthreads();
 }
@@ -51,26 +53,14 @@ __device__ void block_bn_relu_1ch(
 // Shared memory weight buffer for block_conv_3x3.
 // Caller must provide smem_weights pointing to at least C_OUT * 9 floats
 // in shared memory. For C_OUT=128: 1152 floats = 4608 bytes.
-// This is provided by block_forward.cu's shared memory layout.
 __device__ void block_conv_3x3_smem_w(
-    const float* __restrict__ input_smem,
+    const __half* __restrict__ input_smem,
     const float* __restrict__ weights,
-    float* __restrict__ output_smem,
+    __half* __restrict__ output_smem,
     float* __restrict__ smem_weights,
     int C_in, int C_out
 ) {
     int tid = threadIdx.x;
-
-    // Strategy: iterate over input channels. For each input channel:
-    //   1. All 256 threads cooperatively load C_out*9 weights into shared memory
-    //   2. Each thread computes its output elements using cached weights
-    //   3. Accumulate partial results across input channels
-    //
-    // Weight load: C_out*9 = 1152 floats. 256 threads → 5 passes of 256 = 1280 slots.
-    // We stripe: thread t loads weights[t], weights[t+256], ...
-    //
-    // Each thread owns C_out*64/256 = 32 output elements (for C_out=128).
-    // These are unrolled as 32 scalar accumulators.
 
     // Precompute output element assignments
     int spat[32];
@@ -85,18 +75,13 @@ __device__ void block_conv_3x3_smem_w(
         ox[k] = spat[k] % 8;
     }
 
-    // 32 accumulators
+    // 32 FP32 accumulators
     float a[32];
     #pragma unroll
     for (int k = 0; k < 32; k++) a[k] = 0.0f;
 
-    // Weight buffer in shared memory: smem_weights[out_ch * 9 + ki]
-    // Total: C_out * 9 floats
-
     for (int c = 0; c < C_in; c++) {
         // Step 1: Load this input channel's weights for ALL output channels
-        // weights layout in global: [out_ch][c][ki] → linear offset out_ch*C_in*9 + c*9 + ki
-        // We want: smem_weights[out_ch * 9 + ki]
         const int W_PER_THREAD = (C_out * 9 + 255) / 256;  // 5 for C_out=128
         #pragma unroll
         for (int i = 0; i < W_PER_THREAD; i++) {
@@ -110,7 +95,7 @@ __device__ void block_conv_3x3_smem_w(
         __syncthreads();
 
         // Step 2: Compute convolutions using shared memory weights
-        const float* ic = input_smem + c * 64;
+        const __half* ic = input_smem + c * 64;
 
         #pragma unroll
         for (int k = 0; k < 32; k++) {
@@ -118,48 +103,45 @@ __device__ void block_conv_3x3_smem_w(
             int oy_k = oy[k], ox_k = ox[k];
             const float* w = smem_weights + oc * 9;
             // Center always valid
-            float acc = w[4] * ic[oy_k * 8 + ox_k];
+            float acc = w[4] * __half2float(ic[oy_k * 8 + ox_k]);
             // Row above
             if (oy_k > 0) {
-                if (ox_k > 0) acc += w[0] * ic[(oy_k-1)*8 + (ox_k-1)];
-                acc += w[1] * ic[(oy_k-1)*8 +  ox_k     ];
-                if (ox_k < 7) acc += w[2] * ic[(oy_k-1)*8 + (ox_k+1)];
+                if (ox_k > 0) acc += w[0] * __half2float(ic[(oy_k-1)*8 + (ox_k-1)]);
+                acc += w[1] * __half2float(ic[(oy_k-1)*8 +  ox_k     ]);
+                if (ox_k < 7) acc += w[2] * __half2float(ic[(oy_k-1)*8 + (ox_k+1)]);
             }
             // Same row
-            if (ox_k > 0) acc += w[3] * ic[ oy_k   *8 + (ox_k-1)];
-            if (ox_k < 7) acc += w[5] * ic[ oy_k   *8 + (ox_k+1)];
+            if (ox_k > 0) acc += w[3] * __half2float(ic[ oy_k   *8 + (ox_k-1)]);
+            if (ox_k < 7) acc += w[5] * __half2float(ic[ oy_k   *8 + (ox_k+1)]);
             // Row below
             if (oy_k < 7) {
-                if (ox_k > 0) acc += w[6] * ic[(oy_k+1)*8 + (ox_k-1)];
-                acc += w[7] * ic[(oy_k+1)*8 +  ox_k     ];
-                if (ox_k < 7) acc += w[8] * ic[(oy_k+1)*8 + (ox_k+1)];
+                if (ox_k > 0) acc += w[6] * __half2float(ic[(oy_k+1)*8 + (ox_k-1)]);
+                acc += w[7] * __half2float(ic[(oy_k+1)*8 +  ox_k     ]);
+                if (ox_k < 7) acc += w[8] * __half2float(ic[(oy_k+1)*8 + (ox_k+1)]);
             }
             a[k] += acc;
         }
         __syncthreads();
     }
 
-    // Write results
+    // Write FP16 results
     #pragma unroll
     for (int k = 0; k < 32; k++) {
         int idx = tid + k * 256;
         if (idx < C_out * 64)
-            output_smem[idx] = a[k];
+            output_smem[idx] = __float2half(a[k]);
     }
     __syncthreads();
 }
 
-// Convenience wrapper: allocates smem_weights from caller's shared memory pool.
-// For use when caller has extra shared memory available.
-// The smem_weights pointer must point to at least C_out * 9 floats.
+// Direct conv3x3 reading weights from global memory each call.
+// Used by per-op tests; not on the MCTS hot path.
 __device__ void block_conv_3x3(
-    const float* __restrict__ input_smem,
+    const __half* __restrict__ input_smem,
     const float* __restrict__ weights,
-    float* __restrict__ output_smem,
+    __half* __restrict__ output_smem,
     int C_in, int C_out
 ) {
-    // This version reads weights directly from global memory (no smem caching).
-    // Use block_conv_3x3_smem_w() for the optimized version.
     int tid = threadIdx.x;
     int total = C_out * 64;
 
@@ -176,47 +158,40 @@ __device__ void block_conv_3x3(
             float w3 = w_base[c * 9 + 3], w4 = w_base[c * 9 + 4], w5 = w_base[c * 9 + 5];
             float w6 = w_base[c * 9 + 6], w7 = w_base[c * 9 + 7], w8 = w_base[c * 9 + 8];
 
-            const float* ic = input_smem + c * 64;
+            const __half* ic = input_smem + c * 64;
 
             if (oy > 0) {
-                if (ox > 0) acc += w0 * ic[(oy-1)*8+(ox-1)];
-                              acc += w1 * ic[(oy-1)*8+ox    ];
-                if (ox < 7) acc += w2 * ic[(oy-1)*8+(ox+1)];
+                if (ox > 0) acc += w0 * __half2float(ic[(oy-1)*8+(ox-1)]);
+                              acc += w1 * __half2float(ic[(oy-1)*8+ox    ]);
+                if (ox < 7) acc += w2 * __half2float(ic[(oy-1)*8+(ox+1)]);
             }
             {
-                if (ox > 0) acc += w3 * ic[ oy   *8+(ox-1)];
-                              acc += w4 * ic[ oy   *8+ox    ];
-                if (ox < 7) acc += w5 * ic[ oy   *8+(ox+1)];
+                if (ox > 0) acc += w3 * __half2float(ic[ oy   *8+(ox-1)]);
+                              acc += w4 * __half2float(ic[ oy   *8+ox    ]);
+                if (ox < 7) acc += w5 * __half2float(ic[ oy   *8+(ox+1)]);
             }
             if (oy < 7) {
-                if (ox > 0) acc += w6 * ic[(oy+1)*8+(ox-1)];
-                              acc += w7 * ic[(oy+1)*8+ox    ];
-                if (ox < 7) acc += w8 * ic[(oy+1)*8+(ox+1)];
+                if (ox > 0) acc += w6 * __half2float(ic[(oy+1)*8+(ox-1)]);
+                              acc += w7 * __half2float(ic[(oy+1)*8+ox    ]);
+                if (ox < 7) acc += w8 * __half2float(ic[(oy+1)*8+(ox+1)]);
             }
         }
-        output_smem[out_idx] = acc;
+        output_smem[out_idx] = __float2half(acc);
     }
     __syncthreads();
 }
 
 // ============================================================
-// Tensor Core 3x3 convolution using wmma 16×16×16 FP16
+// Tensor Core 3x3 conv via wmma 16×16×16 FP16 (FP32 accumulator).
 //
-// Reformulates conv3x3 as GEMM:
-//   C[C_out, 64] = W[C_out, C_in*9] × im2col[C_in*9, 64]
-//
-// - Weights pre-converted to FP16 (global memory, read-only)
-// - im2col tile built on-the-fly from FP32 shared-memory activations
-// - FP32 accumulator, results written as FP32 to output_smem
-//
-// Warp mapping: 8 warps (256 threads), warp w owns M rows [w*16, w*16+16).
-// Each warp iterates over 4 N_tiles (covering N=64) and 72 K_tiles (K=1152).
-// smem_staging: 8 * 256 halves, each warp gets its own 256-half region.
+// Input/output are FP16. Per-warp FP32 staging is carved from the
+// smem_staging region (the same buffer that holds the FP16 im2col
+// gather) once the K-loop is finished — they don't conflict in time.
 // ============================================================
 __device__ void block_conv_3x3_tc(
-    const float* __restrict__ input_smem,
+    const __half* __restrict__ input_smem,
     const half* __restrict__ weights_h,
-    float* __restrict__ output_smem,
+    __half* __restrict__ output_smem,
     half* __restrict__ smem_staging,
     int C_in, int C_out
 ) {
@@ -227,28 +202,23 @@ __device__ void block_conv_3x3_tc(
     int K = C_in * 9;
     int K_tiles = (K + 15) / 16;
 
-    // Each warp gets its own staging area: 256 halves
+    // Each warp gets its own 256-half region in smem_staging
     half* my_staging = smem_staging + warp_id * 256;
-
-    // Warp w owns output rows [M_start, M_start+16)
     int M_start = warp_id * 16;
 
-    // Handle C_out not being exactly 128 (e.g., could be less)
     if (M_start >= C_out) {
         __syncthreads();
         return;
     }
 
-    // wmma::load_matrix_sync requires leading dimension to be a multiple of 8
-    // for half precision. When K % 16 != 0, we must load A through staging.
     bool a_direct = (K % 16 == 0);
+
+    // 4 accumulators (one per N_tile), built across all K_tiles below.
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[4];
+    for (int t = 0; t < 4; t++) wmma::fill_fragment(acc[t], 0.0f);
 
     for (int n_tile = 0; n_tile < 4; n_tile++) {
         int N_start = n_tile * 16;
-
-        // Initialize FP32 accumulator fragment
-        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
-        wmma::fill_fragment(acc, 0.0f);
 
         for (int k_tile = 0; k_tile < K_tiles; k_tile++) {
             int K_start = k_tile * 16;
@@ -256,13 +226,11 @@ __device__ void block_conv_3x3_tc(
             // --- Load A fragment (weights) ---
             wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
             if (a_direct && K_start + 16 <= K) {
-                // Fast path: K is aligned and tile is fully within bounds
                 wmma::load_matrix_sync(a_frag, weights_h + M_start * K + K_start, K);
             } else {
-                // Slow path: K not aligned or boundary tile. Load via staging with ld=16.
                 for (int i = lane; i < 256; i += 32) {
-                    int r = i / 16;  // row [0,16)
-                    int c = i % 16;  // col [0,16)
+                    int r = i / 16;
+                    int c = i % 16;
                     int m_idx = M_start + r;
                     int k_idx = K_start + c;
                     half val = __float2half(0.0f);
@@ -275,10 +243,9 @@ __device__ void block_conv_3x3_tc(
             }
 
             // --- Build B tile (im2col gather) into my_staging ---
-            // B[k, n]: k indexes (c_in, kernel_pos), n indexes spatial
             for (int i = lane; i < 256; i += 32) {
-                int k_local = i / 16;  // row within tile [0,16)
-                int n_local = i % 16;  // col within tile [0,16)
+                int k_local = i / 16;
+                int n_local = i % 16;
                 int k_idx = K_start + k_local;
                 int n_idx = N_start + n_local;
                 half val = __float2half(0.0f);
@@ -292,49 +259,54 @@ __device__ void block_conv_3x3_tc(
                     int iy = oy + ky;
                     int ix = ox + kx;
                     if (iy >= 0 && iy < 8 && ix >= 0 && ix < 8)
-                        val = __float2half(input_smem[c * 64 + iy * 8 + ix]);
+                        val = input_smem[c * 64 + iy * 8 + ix];   // already FP16
                 }
                 my_staging[i] = val;
             }
             __syncwarp();
 
-            // Load B fragment from shared memory staging
             wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
             wmma::load_matrix_sync(b_frag, my_staging, 16);
 
-            // Matrix multiply-accumulate
-            wmma::mma_sync(acc, a_frag, b_frag, acc);
+            wmma::mma_sync(acc[n_tile], a_frag, b_frag, acc[n_tile]);
         }
+    }
 
-        // Store accumulator to output shared memory
-        // output_smem is [C_out, 64] row-major, leading dim = 64
-        wmma::store_matrix_sync(output_smem + M_start * 64 + N_start, acc, 64,
-                                wmma::mem_row_major);
+    // --- Store all 4 accumulators as FP16 ---
+    // Repurpose smem_staging as per-warp FP32 staging (8 warps × 256 floats =
+    // 2048 floats = 4096 halves, fits inside the 8192-half region).
+    __syncthreads();
+    float* warp_fp32_stage = ((float*)smem_staging) + warp_id * 256;
+
+    for (int n_tile = 0; n_tile < 4; n_tile++) {
+        wmma::store_matrix_sync(warp_fp32_stage, acc[n_tile], 16, wmma::mem_row_major);
+        __syncwarp();
+        // Convert 16×16 FP32 → FP16, write to output_smem at [M_start, N_start]
+        int N_start = n_tile * 16;
+        for (int i = lane; i < 256; i += 32) {
+            int r = i / 16;
+            int c = i % 16;
+            int oc = M_start + r;
+            int n  = N_start + c;
+            if (oc < C_out && n < 64)
+                output_smem[oc * 64 + n] = __float2half(warp_fp32_stage[i]);
+        }
+        __syncwarp();
     }
     __syncthreads();
 }
 
 // ============================================================
-// Shifted-copy conv3x3: 9 dense GEMMs, no im2col gather
-//
-// For each kernel position s (ky, kx):
-//   1. Build shifted[C_in, 64] FP16 from input FP32 (all 256 threads)
-//   2. Dense GEMM: output += W_s[C_out, C_in] × shifted[C_in, 64]
-//
-// Both A (weights) and B (shifted) are contiguous with aligned ld.
+// Shifted-copy conv3x3: 9 dense GEMMs, FP16 in/out.
 // ============================================================
 
-// Kernel offset table: s → (ky, kx) for s in 0..8
-// s=0: (-1,-1), s=1: (-1,0), s=2: (-1,1)
-// s=3: (0,-1),  s=4: (0,0),  s=5: (0,1)
-// s=6: (1,-1),  s=7: (1,0),  s=8: (1,1)
 __device__ static const int KY_TABLE[9] = {-1, -1, -1, 0, 0, 0, 1, 1, 1};
 __device__ static const int KX_TABLE[9] = {-1, 0, 1, -1, 0, 1, -1, 0, 1};
 
 __device__ void block_conv_3x3_shifted(
-    const float* __restrict__ input_smem,
+    const __half* __restrict__ input_smem,
     half* const* W_s,
-    float* __restrict__ output_smem,
+    __half* __restrict__ output_smem,
     half* __restrict__ shifted,
     int C_in, int C_out
 ) {
@@ -347,7 +319,6 @@ __device__ void block_conv_3x3_shifted(
 
     int M_start = warp_id * 16;
     if (M_start >= C_out) {
-        // This warp has no work — must still participate in __syncthreads
         for (int s = 0; s < 9; s++) {
             __syncthreads();
             __syncthreads();
@@ -356,10 +327,12 @@ __device__ void block_conv_3x3_shifted(
         return;
     }
 
-    // Per-warp staging for A fragment boundary loads (when C_in % 16 != 0)
+    // Per-warp staging for A-fragment boundary loads (when C_in % 16 != 0).
+    // Lives just past the shifted buffer; for C_in=128 (residual blocks),
+    // a_direct=true so this region is unused. For C_in=17 (start conv),
+    // total_in=1088 and a_staging at 1088+8*256=3136 < 8192 (aux size).
     half* a_staging = shifted + total_in + warp_id * 256;
 
-    // 4 accumulators — one per N_tile, kept live across all 9 shifts
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[4];
     for (int t = 0; t < 4; t++) wmma::fill_fragment(acc[t], 0.0f);
 
@@ -369,6 +342,7 @@ __device__ void block_conv_3x3_shifted(
         const half* W_slice = W_s[s];
 
         // --- Build shifted FP16 copy ONCE per kernel position (all 256 threads) ---
+        // Input is already FP16, so this is just a strided copy with shift.
         __syncthreads();
         for (int i = tid; i < total_in; i += 256) {
             int c = i >> 6;
@@ -379,12 +353,11 @@ __device__ void block_conv_3x3_shifted(
             int ix = ox + kx;
             half val = __float2half(0.0f);
             if ((unsigned)iy < 8u && (unsigned)ix < 8u)
-                val = __float2half(input_smem[c * 64 + iy * 8 + ix]);
+                val = input_smem[c * 64 + iy * 8 + ix];
             shifted[i] = val;
         }
         __syncthreads();
 
-        // --- Process ALL 4 N_tiles from the same shifted buffer ---
         for (int n_tile = 0; n_tile < 4; n_tile++) {
             int N_start = n_tile * 16;
 
@@ -415,18 +388,33 @@ __device__ void block_conv_3x3_shifted(
         }
     }
 
-    // Store all 4 accumulators
+    // --- Store all 4 accumulators as FP16 ---
+    // After the 9-shift loop, the shifted buffer is dead. Repurpose it as
+    // per-warp FP32 staging (8 warps × 256 floats = 2048 floats = 4096 halves).
+    __syncthreads();
+    float* warp_fp32_stage = ((float*)shifted) + warp_id * 256;
+
     for (int n_tile = 0; n_tile < 4; n_tile++) {
-        wmma::store_matrix_sync(output_smem + M_start * 64 + n_tile * 16,
-                                acc[n_tile], 64, wmma::mem_row_major);
+        wmma::store_matrix_sync(warp_fp32_stage, acc[n_tile], 16, wmma::mem_row_major);
+        __syncwarp();
+        int N_start = n_tile * 16;
+        for (int i = lane; i < 256; i += 32) {
+            int r = i / 16;
+            int c = i % 16;
+            int oc = M_start + r;
+            int n  = N_start + c;
+            if (oc < C_out && n < 64)
+                output_smem[oc * 64 + n] = __float2half(warp_fp32_stage[i]);
+        }
+        __syncwarp();
     }
     __syncthreads();
 }
 
 __device__ void block_1x1_conv(
-    const float* __restrict__ input_smem,
+    const __half* __restrict__ input_smem,
     const float* __restrict__ weights,
-    float* __restrict__ output_smem,
+    __half* __restrict__ output_smem,
     int C_in, int C_out
 ) {
     int tid = threadIdx.x;
@@ -437,15 +425,15 @@ __device__ void block_1x1_conv(
         float acc = 0.0f;
         const float* w_row = weights + out_ch * C_in;
         for (int c = 0; c < C_in; c++) {
-            acc += w_row[c] * input_smem[c * 64 + spatial];
+            acc += w_row[c] * __half2float(input_smem[c * 64 + spatial]);
         }
-        output_smem[out_idx] = acc;
+        output_smem[out_idx] = __float2half(acc);
     }
     __syncthreads();
 }
 
 __device__ void block_se_block(
-    float* data,
+    __half* data,
     const float* fc1_w,
     const float* fc2_w,
     int channels,
@@ -455,16 +443,15 @@ __device__ void block_se_block(
 ) {
     int tid = threadIdx.x;
 
-    // 1. Global avg pool: each thread accumulates sums for its channels
-    //    in registers, then writes once to shared memory. No atomics needed.
+    // 1. Global avg pool — FP32 accumulation, FP32 output to smem_avg
     for (int c = tid; c < channels; c += blockDim.x) {
         float sum = 0.0f;
-        for (int i = 0; i < 64; i++) sum += data[c * 64 + i];
+        for (int i = 0; i < 64; i++) sum += __half2float(data[c * 64 + i]);
         smem_avg[c] = sum / 64.0f;
     }
     __syncthreads();
 
-    // 2. FC1: smem_fc1[j] = ReLU(sum_c(fc1_w[j,c] * smem_avg[c]))
+    // 2. FC1 — FP32 in, FP32 out
     for (int j = tid; j < inner; j += blockDim.x) {
         float sum = 0.0f;
         for (int c = 0; c < channels; c++) sum += fc1_w[j * channels + c] * smem_avg[c];
@@ -472,12 +459,15 @@ __device__ void block_se_block(
     }
     __syncthreads();
 
-    // 3. FC2 + sigmoid + channel-wise scale (in-place on data)
+    // 3. FC2 + sigmoid + channel-wise scale (in-place on FP16 data)
     for (int c = tid; c < channels; c += blockDim.x) {
         float sum = 0.0f;
         for (int j = 0; j < inner; j++) sum += fc2_w[c * inner + j] * smem_fc1[j];
         float scale = 1.0f / (1.0f + expf(-sum));  // sigmoid
-        for (int i = 0; i < 64; i++) data[c * 64 + i] *= scale;
+        for (int i = 0; i < 64; i++) {
+            float x = __half2float(data[c * 64 + i]);
+            data[c * 64 + i] = __float2half(x * scale);
+        }
     }
     __syncthreads();
 }
@@ -489,7 +479,7 @@ __device__ void block_log_softmax(
 ) {
     int tid = threadIdx.x;
 
-    // 1. Find global max (numerical stability)
+    // 1. Find global max
     float local_max = -FLT_MAX;
     for (int i = tid; i < size; i += blockDim.x) {
         if (data[i] > local_max) local_max = data[i];
@@ -516,7 +506,6 @@ __device__ void block_log_softmax(
     float log_total = logf(smem_reduce[0]);
     __syncthreads();
 
-    // 3. Write log-softmax values
     for (int i = tid; i < size; i += blockDim.x) {
         data[i] = (data[i] - global_max) - log_total;
     }
@@ -525,34 +514,34 @@ __device__ void block_log_softmax(
 
 __device__ void block_board_to_planes(
     const BoardState* bs,
-    float* planes
+    __half* planes
 ) {
     int tid = threadIdx.x;
     int stm = bs->w_to_move ? 0 : 1;
     int opp = 1 - stm;
     bool flip = !bs->w_to_move;
 
-    // Zero all 17 planes
-    for (int i = tid; i < 17 * 64; i += blockDim.x) planes[i] = 0.0f;
+    const __half H_ZERO = __float2half(0.0f);
+    const __half H_ONE  = __float2half(1.0f);
+
+    for (int i = tid; i < 17 * 64; i += blockDim.x) planes[i] = H_ZERO;
     __syncthreads();
 
-    // Planes 0-5: STM pieces; planes 6-11: opponent pieces
     for (int piece = 0; piece < 6; piece++) {
         uint64_t stm_bb = bs->pieces[stm * 6 + piece];
         uint64_t opp_bb = bs->pieces[opp * 6 + piece];
         for (int sq = tid; sq < 64; sq += blockDim.x) {
             int mapped = flip ? (sq ^ 56) : sq;
-            if ((stm_bb >> sq) & 1) planes[piece * 64 + mapped] = 1.0f;
-            if ((opp_bb >> sq) & 1) planes[(6 + piece) * 64 + mapped] = 1.0f;
+            if ((stm_bb >> sq) & 1) planes[piece * 64 + mapped] = H_ONE;
+            if ((opp_bb >> sq) & 1) planes[(6 + piece) * 64 + mapped] = H_ONE;
         }
     }
     __syncthreads();
 
-    // Planes 12-16: en passant + castling rights (thread 0 only)
     if (tid == 0) {
         if (bs->en_passant != EN_PASSANT_NONE) {
             int mapped = flip ? (bs->en_passant ^ 56) : bs->en_passant;
-            planes[12 * 64 + mapped] = 1.0f;
+            planes[12 * 64 + mapped] = H_ONE;
         }
         uint8_t stm_ks, stm_qs, opp_ks, opp_qs;
         if (bs->w_to_move) {
@@ -566,10 +555,10 @@ __device__ void block_board_to_planes(
             opp_ks = bs->castling & CASTLE_WK;
             opp_qs = bs->castling & CASTLE_WQ;
         }
-        if (stm_ks) for (int i = 0; i < 64; i++) planes[13 * 64 + i] = 1.0f;
-        if (stm_qs) for (int i = 0; i < 64; i++) planes[14 * 64 + i] = 1.0f;
-        if (opp_ks) for (int i = 0; i < 64; i++) planes[15 * 64 + i] = 1.0f;
-        if (opp_qs) for (int i = 0; i < 64; i++) planes[16 * 64 + i] = 1.0f;
+        if (stm_ks) for (int i = 0; i < 64; i++) planes[13 * 64 + i] = H_ONE;
+        if (stm_qs) for (int i = 0; i < 64; i++) planes[14 * 64 + i] = H_ONE;
+        if (opp_ks) for (int i = 0; i < 64; i++) planes[15 * 64 + i] = H_ONE;
+        if (opp_qs) for (int i = 0; i < 64; i++) planes[16 * 64 + i] = H_ONE;
     }
     __syncthreads();
 }

@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
     int concurrent = (argc > 3) ? atoi(argv[3]) : SP_MAX_CONCURRENT;
     int pool       = required_pool(sims);
 
-    printf("=== GPU MCTS v2 throughput benchmark ===\n");
+    printf("=== GPU MCTS throughput benchmark ===\n");
     printf("  games=%d  sims/move=%d  concurrent=%d  pool/tree=%d\n",
            num_games, sims, concurrent, pool);
 

@@ -2,59 +2,71 @@
 
 #include "common.cuh"
 #include "nn_weights.cuh"
+#include <cuda_fp16.h>
 
 #ifdef __CUDACC__
 
 // ============================================================
-// Shared memory layout for oracle_net_forward_block
+// Shared memory layout for oracle_net_forward_block (FP16 activations)
 //
-// buf1 (smem+0):          work buffer [128, 64] = 32 KB
-//   — board planes at start, policy conv output, v_feat during value head
-// buf2 (smem+8192):       backbone buffer [128, 64] = 32 KB
-//   — start conv output, kept as backbone through policy head
-// smem_reduce (+16384):   256 floats = 1 KB, multipurpose:
-//   — SE avg pool  [0:128]
-//   — SE FC1 out   [128:136]
-//   — log-softmax reduction [0:256]
-//   — value FC1 out [0:256]
-// smem_weights (+16640):  1152 floats = 4.5 KB (scalar conv path)
-//   — 3x3 conv weight tile cache: C_out * 9 = 128 * 9 = 1152
-//   — loaded once per input channel, reused by all 256 threads
-// smem_staging (+16640):  1024 floats = 4 KB (TC im2col path, overlaps smem_weights)
-//   — 8 warps × 256 halves = 2048 halves = 4096 bytes = 1024 floats
-//   — per-warp FP16 im2col tile for wmma load
-// smem_shifted (+16640):  4096 floats = 16 KB (shifted-copy path, overlaps above)
-//   — [128, 64] FP16 shifted input copy = 8192 halves = 16,384 bytes
-// Total: 20736 floats = 82,944 bytes ≈ 81 KB (fits in 96 KB per SM)
+// The conv math (shifted-copy + WMMA) was already FP16 + FP32-accumulator.
+// What used to be FP32 was the inter-layer activation buffers (buf1, buf2)
+// which forced an FP32→FP16 conversion at every conv call. Storing the
+// activation buffers in FP16 directly halves the smem footprint and
+// removes those per-call conversions.
+//
+// All offsets below are in HALVES (sizeof(__half) == 2 bytes).
+//
+// buf1 (smem+0):       work buffer [128, 64] = 8192 halves = 16 KB
+//   — board planes at start, policy conv output
+// buf2 (smem+8192):    backbone buffer [128, 64] = 8192 halves = 16 KB
+//   — start conv output; carried as backbone through policy head
+// smem_reduce (+16384): 256 floats = 512 halves = 1 KB, multipurpose:
+//   — SE avg pool [0:128] (FP32)
+//   — SE FC1 out [128:136] (FP32)
+//   — log-softmax reduction [0:256] (FP32)
+//   — value FC1 out / FC2 reduction (FP32)
+//   — value-head v_feat [0:64] (FP32) — routed here for end-to-end FP32 stability
+// aux (+16896):        max(scalar weights, TC staging, shifted) = 8192 halves = 16 KB
+//   — scalar conv path: weight tile cache [128*9 = 1152 floats = 2304 halves]
+//   — TC im2col path: 8 warps × 256 halves = 2048 halves
+//   — shifted-copy path: [128, 64] FP16 = 8192 halves
+//   — also reused after the conv completes as per-warp FP32 staging for
+//     converting WMMA accumulator → FP16 output (8 warps × 256 floats =
+//     2048 floats = 4096 halves, fits in same region)
+//
+// Total: 25088 halves = 50,176 bytes ≈ 49 KB (was 81 KB; fits 96 KB cap with room).
 // ============================================================
 
-constexpr int BLOCK_BUF_SIZE    = NN_HIDDEN_DIM * 64;   // 8192 floats per buffer
-constexpr int BLOCK_REDUCE_SIZE = 256;                    // reduction workspace
-constexpr int BLOCK_WEIGHTS_SIZE = NN_HIDDEN_DIM * 9;    // 1152 floats for scalar conv weight tile
-constexpr int BLOCK_STAGING_SIZE = 1024;                  // 8 warps × 256 halves = 1024 floats (TC im2col path)
-constexpr int BLOCK_SHIFTED_SIZE = NN_HIDDEN_DIM * 64 / 2;  // 4096 floats = 8192 halves = 16 KB (shifted-copy path)
+constexpr int BLOCK_BUF_HALVES   = NN_HIDDEN_DIM * 64;   // 8192 halves per buffer
+constexpr int BLOCK_REDUCE_SIZE  = 256;                  // FP32 reduction workspace (in floats)
+constexpr int BLOCK_AUX_HALVES   = NN_HIDDEN_DIM * 64;   // 8192 halves (largest aux user = shifted)
 
-constexpr int BLOCK_BUF1_OFFSET   = 0;
-constexpr int BLOCK_BUF2_OFFSET   = BLOCK_BUF1_OFFSET + BLOCK_BUF_SIZE;     // 8192
-constexpr int BLOCK_REDUCE_OFFSET = BLOCK_BUF2_OFFSET + BLOCK_BUF_SIZE;     // 16384
-constexpr int BLOCK_WEIGHTS_OFFSET = BLOCK_REDUCE_OFFSET + BLOCK_REDUCE_SIZE; // 16640
-constexpr int BLOCK_STAGING_OFFSET = BLOCK_WEIGHTS_OFFSET;                    // 16640 (overlaps)
-constexpr int BLOCK_SHIFTED_OFFSET = BLOCK_WEIGHTS_OFFSET;                    // 16640 (overlaps)
+constexpr int BLOCK_BUF1_OFFSET_H   = 0;
+constexpr int BLOCK_BUF2_OFFSET_H   = BLOCK_BUF1_OFFSET_H + BLOCK_BUF_HALVES;       // 8192
+constexpr int BLOCK_REDUCE_OFFSET_H = BLOCK_BUF2_OFFSET_H + BLOCK_BUF_HALVES;       // 16384
+constexpr int BLOCK_AUX_OFFSET_H    = BLOCK_REDUCE_OFFSET_H + BLOCK_REDUCE_SIZE * 2; // 16384 + 512 = 16896
 
-// Use max of all overlapping auxiliary regions for total size
-constexpr int BLOCK_AUX_SIZE = BLOCK_SHIFTED_SIZE;  // 4096 (largest of weights/staging/shifted)
-constexpr int BLOCK_SMEM_FLOATS = BLOCK_WEIGHTS_OFFSET + BLOCK_AUX_SIZE;  // 20736
-constexpr int BLOCK_SMEM_BYTES  = BLOCK_SMEM_FLOATS * 4;                  // 82,944 bytes
+constexpr int BLOCK_SMEM_HALVES = BLOCK_AUX_OFFSET_H + BLOCK_AUX_HALVES;            // 25088
+constexpr int BLOCK_SMEM_BYTES  = BLOCK_SMEM_HALVES * 2;                            // 50,176
+
+// WMMA fragment loads need 16-byte alignment for 128-bit half loads.
+static_assert((BLOCK_AUX_OFFSET_H * 2) % 16 == 0, "aux offset must be 16-byte aligned for WMMA");
+static_assert((BLOCK_BUF1_OFFSET_H * 2) % 16 == 0, "buf1 offset must be 16-byte aligned for WMMA");
+static_assert((BLOCK_BUF2_OFFSET_H * 2) % 16 == 0, "buf2 offset must be 16-byte aligned for WMMA");
 
 // ============================================================
 // Full SE-ResNet forward pass using 256-thread block cooperation.
 //
 // All 256 threads must participate. Activations live in shared memory.
 // The residual shortcut for each residual block is saved in per-thread
-// registers (32 floats/thread) to avoid needing a third smem buffer.
+// FP32 registers (32 floats/thread) — registers don't share the smem
+// budget and FP32 keeps the residual stream's precision intact.
 //
-// smem:       caller-provided, at least BLOCK_SMEM_FLOATS floats
-// policy_out: global memory [NN_POLICY_SIZE] — written as log-probs
+// smem:       caller-provided, at least BLOCK_SMEM_BYTES bytes. Pointer
+//             is `float*` for caller compatibility; reinterpreted as
+//             `__half*` for the activation regions internally.
+// policy_out: global memory [NN_POLICY_SIZE] FP32 — written as log-probs
 // value_out:  written by thread 0, valid after function returns
 // k_out:      written by thread 0, valid after function returns
 // half_w:     optional FP16 conv weights for Tensor Core im2col path (nullptr = skip)
