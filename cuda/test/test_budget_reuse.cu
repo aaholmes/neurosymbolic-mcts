@@ -463,6 +463,49 @@ void test_pool_exhaust_no_value_poison(bool& test_failed) {
     ASSERT_TRUE(res_tight.root_value > 0.5f);
 }
 
+// ============================================================
+// v5: 2-explorer eval-trees-budget sanity test.
+// Same fresh-start invariants as test_fresh_start_invariants but
+// dispatches via gpu_mcts_eval_trees_budget_p2. Must produce ≥90 sims
+// per tree (allowing ≤10% short due to overshoot/skip on the boundary)
+// and a legal best move.
+// ============================================================
+
+void test_eval_trees_budget_p2_basic(bool& test_failed) {
+    const int NUM_TREES = 4;
+    const int SIMS = 100;
+
+    BoardState positions[NUM_TREES];
+    for (int i = 0; i < NUM_TREES; i++)
+        positions[i] = make_starting_position();
+
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    // p2 needs 2× per-tree policy buffer
+    float* d_policy_bufs = nullptr;
+    cudaMalloc(&d_policy_bufs, NUM_TREES * 2 * NN_POLICY_SIZE * sizeof(float));
+
+    TreeEvalResult res[NUM_TREES] = {};
+    int root_idxs[NUM_TREES];
+    bool fresh[NUM_TREES];
+    for (int i = 0; i < NUM_TREES; i++) fresh[i] = true;
+
+    gpu_mcts_eval_trees_budget_p2(positions, NUM_TREES, SIMS, TEST_POOL,
+                                  false, 1.414f, d_weights, d_policy_bufs,
+                                  res, root_idxs, fresh);
+
+    int watermark = (int)(POOL_WATERMARK * (float)TEST_POOL);
+    for (int i = 0; i < NUM_TREES; i++) {
+        ASSERT_TRUE(res[i].nodes_allocated < watermark);
+        // Allow ≤10% overshoot/short (2-explorer rounds may overshoot by 1 per round)
+        ASSERT_TRUE(res[i].total_simulations >= SIMS * 9 / 10);
+        ASSERT_EQ(root_idxs[i], i * TEST_POOL);
+        ASSERT_TRUE(res[i].best_move_from != 0 || res[i].best_move_to != 0);
+    }
+
+    cudaFree(d_policy_bufs);
+    free_nn_weights(d_weights);
+}
+
 int main(int argc, char** argv) {
     init_movegen_tables();
 
@@ -477,6 +520,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_pool_exhaustion_fallback);
     RUN_TEST(test_pool_exhaust_no_value_poison);
     RUN_TEST(test_e2e_selfplay_reuse);
+    RUN_TEST(test_eval_trees_budget_p2_basic);
 
     printf("\n%d/%d tests passed, %d failed\n", passes, total, failures);
     return failures > 0 ? 1 : 0;

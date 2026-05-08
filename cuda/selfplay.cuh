@@ -29,6 +29,7 @@ struct SelfPlayConfig {
     int max_concurrent;           // max concurrent games (default 36)
     int seed;                     // base RNG seed (each game gets seed derived from game_idx + this)
     bool use_resnet;              // use SE-ResNet kernel instead of transformer
+    bool use_vloss_p2 = false;    // v5: 2-explorer virtual-loss path (resnet only)
 };
 
 // Threshold above which a tree's per-call alloc counter forces fresh restart

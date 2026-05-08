@@ -345,9 +345,12 @@ int run_selfplay_games(
     if (concurrent > num_games) concurrent = num_games;
     if (concurrent > SP_MAX_CONCURRENT) concurrent = SP_MAX_CONCURRENT;
 
-    // Allocate GPU resources for MCTS
+    // Allocate GPU resources for MCTS.
+    // p2 mode needs 2× the per-tree policy buffer (one slot per explorer).
+    int policy_slots_per_tree = config.use_vloss_p2 ? 2 : 1;
     float* d_policy_bufs = nullptr;
-    cudaMalloc(&d_policy_bufs, concurrent * NN_POLICY_SIZE * sizeof(float));
+    cudaMalloc(&d_policy_bufs,
+               concurrent * policy_slots_per_tree * NN_POLICY_SIZE * sizeof(float));
 
     // Pre-convert shifted weights once for the lifetime of the run.
     // Avoids the per-call alloc/convert/free path inside the eval kernel.
@@ -434,13 +437,23 @@ int run_selfplay_games(
             for (int i = 0; i < active_count; i++) {
                 fresh_starts[i] = games[i].fresh_next || games[i].last_alloc > watermark;
             }
-            gpu_mcts_eval_trees_budget(
-                positions, active_count,
-                config.sims_per_move, config.max_nodes_per_tree,
-                config.enable_koth, config.c_puct,
-                (OracleNetWeights*)d_weights, d_policy_bufs, results,
-                reuse_root_idxs, fresh_starts, d_shifted_w
-            );
+            if (config.use_vloss_p2) {
+                gpu_mcts_eval_trees_budget_p2(
+                    positions, active_count,
+                    config.sims_per_move, config.max_nodes_per_tree,
+                    config.enable_koth, config.c_puct,
+                    (OracleNetWeights*)d_weights, d_policy_bufs, results,
+                    reuse_root_idxs, fresh_starts, d_shifted_w
+                );
+            } else {
+                gpu_mcts_eval_trees_budget(
+                    positions, active_count,
+                    config.sims_per_move, config.max_nodes_per_tree,
+                    config.enable_koth, config.c_puct,
+                    (OracleNetWeights*)d_weights, d_policy_bufs, results,
+                    reuse_root_idxs, fresh_starts, d_shifted_w
+                );
+            }
             for (int i = 0; i < active_count; i++) {
                 games[i].fresh_next = false;
                 games[i].last_alloc = results[i].nodes_allocated;

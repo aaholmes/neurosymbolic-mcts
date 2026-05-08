@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 
 static double wall_seconds() {
@@ -33,11 +34,12 @@ int main(int argc, char** argv) {
     int num_games  = (argc > 1) ? atoi(argv[1]) : 100;
     int sims       = (argc > 2) ? atoi(argv[2]) : 200;
     int concurrent = (argc > 3) ? atoi(argv[3]) : SP_MAX_CONCURRENT;
+    bool use_p2    = (argc > 4) && (strcmp(argv[4], "p2") == 0);
     int pool       = required_pool(sims);
 
     printf("=== GPU MCTS throughput benchmark ===\n");
-    printf("  games=%d  sims/move=%d  concurrent=%d  pool/tree=%d\n",
-           num_games, sims, concurrent, pool);
+    printf("  games=%d  sims/move=%d  concurrent=%d  pool/tree=%d  vloss_p2=%s\n",
+           num_games, sims, concurrent, pool, use_p2 ? "ON" : "OFF");
 
     SelfPlayConfig cfg = {};
     cfg.num_games = num_games;
@@ -49,6 +51,7 @@ int main(int argc, char** argv) {
     cfg.max_concurrent = concurrent;
     cfg.seed = 42;
     cfg.use_resnet = true;
+    cfg.use_vloss_p2 = use_p2;
 
     OracleNetWeights* d_weights = init_nn_weights_zeros();
     GameRecord* records = new GameRecord[num_games];

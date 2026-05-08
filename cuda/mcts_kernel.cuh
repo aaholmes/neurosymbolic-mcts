@@ -98,6 +98,20 @@ GPUMctsResult gpu_mcts_search_nn_block(
     int num_blocks
 );
 
+// v5: 2-explorer virtual-loss variant of gpu_mcts_search_nn_block.
+// Each block runs 2 explorers per round, using oracle_net_forward_block_b2
+// for batched NN evaluation. Policy buffer must be sized for 2× per block:
+// d_policy_bufs needs num_blocks * 2 * NN_POLICY_SIZE floats.
+GPUMctsResult gpu_mcts_search_nn_block_p2(
+    const BoardState& root_position,
+    int simulations,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,
+    float* d_policy_bufs,
+    int num_blocks
+);
+
 // ============================================================
 // Multi-tree eval mode (N independent trees, 1 block each)
 // ============================================================
@@ -134,6 +148,25 @@ struct TreeEvalResult {
 // search_root.first_child_idx + chosen_local, and calls gpu_patch_subtree_roots
 // to mark that node as the new search root.
 int gpu_mcts_eval_trees_budget(
+    const BoardState* root_positions,
+    int num_trees,
+    int target_visit_count,
+    int max_nodes_per_tree,
+    bool enable_koth,
+    float c_puct,
+    OracleNetWeights* d_weights,
+    float* d_policy_bufs,
+    TreeEvalResult* h_results,
+    int* game_root_idxs,
+    const bool* fresh_starts,
+    ConvWeightsShifted* d_shifted_w_cached = nullptr
+);
+
+// v5: 2-explorer virtual-loss variant. Same semantics as above but
+// uses mcts_kernel_eval_p2 internally — each block runs 2 explorers per
+// round and uses oracle_net_forward_block_b2 for batched NN evaluation.
+// d_policy_bufs must be sized num_trees * 2 * NN_POLICY_SIZE floats.
+int gpu_mcts_eval_trees_budget_p2(
     const BoardState* root_positions,
     int num_trees,
     int target_visit_count,

@@ -39,6 +39,10 @@
 // ============================================================
 
 constexpr int BLOCK_BUF_HALVES   = NN_HIDDEN_DIM * 64;   // 8192 halves per buffer
+
+// Per-thread element count when 256 threads cooperate on one [NN_HIDDEN_DIM, 64] buffer.
+// 6×128: 32. 6×64: 16. Used by residual-save/add unrolled loops in the b2 forward.
+constexpr int BLOCK_BUF_PER_THREAD = (NN_HIDDEN_DIM * 64 + 255) / 256;
 constexpr int BLOCK_REDUCE_SIZE  = 256;                  // FP32 reduction workspace (in floats)
 constexpr int BLOCK_AUX_HALVES   = NN_HIDDEN_DIM * 64;   // 8192 halves (largest aux user = shifted)
 

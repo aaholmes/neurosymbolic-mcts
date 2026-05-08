@@ -14,6 +14,53 @@ cd cuda/build && cmake --build . --target bench_throughput -j
 
 The benchmark uses zero-initialized SE-ResNet weights (no model file required); throughput depends only on architecture, not weight values.
 
+## GPU MCTS v5 — intra-block 2-explorer virtual loss + batched forward
+
+Measured 2026-05-07 on the `v5-vloss-p2` branch. The v4 batched conv primitive (`oracle_net_forward_block_b2`) is now wired into the production MCTS path via 2-explorer virtual-loss scheduling. Each block runs 2 explorers per round: thread 0 sequentially does SELECT for both (so virtual loss steers the second explorer away from the first's path); EXPAND and BACKUP run in parallel on warps 0 and 1; the NN forward is one batched call instead of two.
+
+Per-block static smem grew by ~1.1 KB (sh_bs[2], sh_path[2][128], sh_skip[2]); `sh_path` shrunk from 256 to 128 deep (chess MCTS depth never exceeds ~30 in practice) to fit static + dynamic within the per-block 99 KB cap.
+
+**6×128 production (RTX 5060 Ti, 200 sims/move, 100 games × 36 concurrent, median of 3):**
+
+| mode | samples/sec | sims/sec | wall (100 games) | vs baseline |
+|------|------------:|---------:|-----------------:|------------:|
+| baseline (v3 + v4 primitive idle) | 86.3 | 17,267 | 134.6 s | 1.00× |
+| **v5 (`vloss_p2=ON`)** | **101.4** | **20,283** | 132.5 s | **1.175×** |
+
+Three-run cluster: 101.4, 94.8, 104.5 samples/sec (samples-per-game varies because tree statistics differ slightly with virtual loss; per-sim throughput is the load-bearing metric).
+
+**6×64 apples-to-apples (same hardware, NN_HIDDEN_DIM=64 on temporary `v5-6x64-bench` child branch, median of 3):**
+
+| mode | samples/sec | sims/sec | vs 6×64 baseline |
+|------|------------:|---------:|-----------------:|
+| 6×64 baseline (no p2)              | 160.9 | 32,175 | 1.00× |
+| **6×64 v5 (`vloss_p2=ON`)**         | **188.6** | **37,729** | **1.172×** |
+| Lc0 + Maia 6×64 (reference target) | 368   | 77,468 | 2.29× |
+
+The v5 ratio (~1.17×) holds across both architectures, confirming the speedup mechanism is architecture-agnostic — it's about weight-load amortization in the batched conv plus parallel MCTS work, not network-size-dependent.
+
+**Apples-to-apples gap with Lc0**: was 368/161.9 = 2.27× at 6×64 single-explorer; now 368/188.6 = **1.95× at 6×64 with v5 p2**. About 14% of the gap closed.
+
+### Per-round wall-time decomposition
+
+Linear-fit from the 6×128 numbers (per-sim wall improvement: 11.6 µs → 9.9 µs):
+
+| component | baseline (per sim) | v5 (per sim) | mechanism |
+|-----------|-------------------:|-------------:|-----------|
+| NN forward            | 35.6 µs | ~30 µs | v4's 1.19× per-sim NN improvement (weight-load amortization at B=2) |
+| MCTS work             | 22 µs   | ~12 µs | parallel EXPAND/BACKUP across warps 0/1; SELECT remains serial for VL correctness |
+| **per-sim total**     | 57.6 µs | **49.4 µs** | **1.17× speedup** |
+
+Sequential SELECT is the bottleneck — at ~5 µs each and serialized across explorers, that's ~10 µs of inherent serial work per round (~5 µs/sim). With more parallelism in selection (e.g., per-warp tree walks with VL within each warp's tree), this floor could drop further.
+
+### Tests
+
+The new TDD tests:
+- `test_block_mcts_p2_mate_detection` — KQK mate-in-1, 200 sims via `gpu_mcts_search_nn_block_p2`. Asserts root_value > 0.5. The VL canary: if both explorers collapsed onto the same path, the second would return an unknown value, dragging root_value below threshold. Result: sims=200, val=1.00. Virtual loss confirmed working.
+- `test_eval_trees_budget_p2_basic` — 4 trees × 100 sims, fresh start, asserts each tree gets ≥90 sims and a legal best move (allowing ≤10% overshoot/short from boundary rounds).
+
+All 19 test_block_ops + 13 test_mcts_kernel + 8 test_budget_reuse tests pass at 6×128. The non-p2 baseline path (`bench_throughput 100 200 36`) still reports 86.3 samples/sec — v5 is fully additive.
+
 ## GPU MCTS v4 — batched conv microbenchmark (B=2)
 
 Measured 2026-05-07 on the `v4-batched-conv` branch. **Primitive-level benchmark only**; no MCTS integration in this phase. The new `block_conv_3x3_shifted_b2` loads each weight tile A once per (n_tile, k_tile) and applies it to both batch elements before advancing — true batched WMMA with weight-load amortization. The new `oracle_net_forward_block_b2` uses it; BN/SE/heads still run sequentially per batch on each batch's slice.

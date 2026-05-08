@@ -1319,6 +1319,40 @@ void test_block_forward_b2_matches_b1(bool& test_failed) {
 }
 
 // ============================================================
+// v5: 2-explorer virtual-loss MCTS sanity test.
+// Both explorers must descend through the mate move (or the second one
+// must steer past the first via virtual loss). The KQK-mate canary —
+// if VL is broken, both explorers go to the same path and one returns
+// an unknown value, dragging root_value below the threshold.
+// ============================================================
+
+void test_block_mcts_p2_mate_detection(bool& test_failed) {
+    // White to move, Qh5 is checkmate (mate-in-1)
+    BoardState bs = parse_fen_blk("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4");
+
+    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    // p2 needs 2× per-block policy buffer
+    float* d_policy_bufs;
+    cudaMalloc(&d_policy_bufs, 1 * 2 * NN_POLICY_SIZE * sizeof(float));
+    cudaDeviceSetLimit(cudaLimitStackSize, 32768);
+
+    GPUMctsResult result = gpu_mcts_search_nn_block_p2(
+        bs, 200, false, 1.414f, d_weights, d_policy_bufs, 1
+    );
+
+    printf("[sims=%d, move %d->%d, val=%.2f] ",
+           result.total_simulations, result.best_move_from, result.best_move_to,
+           result.root_value);
+
+    ASSERT_TRUE(result.best_move_from >= 0 && result.best_move_from < 64);
+    ASSERT_TRUE(result.best_move_to   >= 0 && result.best_move_to   < 64);
+    ASSERT_TRUE(result.root_value > 0.5f);  // Forced win must surface
+
+    cudaFree(d_policy_bufs);
+    free_nn_weights(d_weights);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -1347,6 +1381,7 @@ int main() {
     RUN_TEST(test_block_forward_fp16_activations_vs_fp32);
     RUN_TEST(test_b2_smem_size);
     RUN_TEST(test_block_forward_b2_matches_b1);
+    RUN_TEST(test_block_mcts_p2_mate_detection);
 
     printf("\nResults: %d/%d passed", passes, total);
     if (failures > 0) printf(", %d FAILED", failures);

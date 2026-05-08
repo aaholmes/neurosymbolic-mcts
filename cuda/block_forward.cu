@@ -309,11 +309,11 @@ __device__ void oracle_net_forward_block_b2(
     for (int blk_i = 0; blk_i < NN_NUM_BLOCKS; blk_i++) {
         const ResBlockParams& blk = weights->blocks[blk_i];
 
-        // Save residuals (buf2) in FP32 registers: 32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */ per thread per batch.
+        // Save residuals (buf2) in FP32 registers: BLOCK_BUF_PER_THREAD per thread per batch.
         // 2× the registers vs single batch — at 6×128 each thread holds 64 FP32 (256 bytes), fits in registers.
-        float res0_b0[32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */], res0_b1[32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */];
+        float res0_b0[BLOCK_BUF_PER_THREAD], res0_b1[BLOCK_BUF_PER_THREAD];
         #pragma unroll
-        for (int k = 0; k < 32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */; k++) {
+        for (int k = 0; k < BLOCK_BUF_PER_THREAD; k++) {
             res0_b0[k] = __half2float(buf2_b2[0 * B2_BUF_HALVES_PER + tid + k * 256]);
             res0_b1[k] = __half2float(buf2_b2[1 * B2_BUF_HALVES_PER + tid + k * 256]);
         }
@@ -346,7 +346,7 @@ __device__ void oracle_net_forward_block_b2(
 
         // Residual add + ReLU (per batch, FP32 register residual + FP16 buf store)
         #pragma unroll
-        for (int k = 0; k < 32  /* NN_HIDDEN_DIM * 64 / 256 at 6x128 */; k++) {
+        for (int k = 0; k < BLOCK_BUF_PER_THREAD; k++) {
             int idx0 = 0 * B2_BUF_HALVES_PER + tid + k * 256;
             int idx1 = 1 * B2_BUF_HALVES_PER + tid + k * 256;
             float v0 = res0_b0[k] + __half2float(buf2_b2[idx0]);
