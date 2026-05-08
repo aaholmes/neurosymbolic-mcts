@@ -58,6 +58,7 @@ pub mod mcts;
 pub mod move_generation;
 pub mod move_types;
 pub mod neural_net;
+pub mod nnue;
 pub mod piece_types;
 pub mod search;
 pub mod tensor;
