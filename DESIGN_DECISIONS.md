@@ -185,7 +185,17 @@ Deep symbolic searches (mate-in-5, KOTH-in-3) are replaced by lightweight GPU-si
 
 ### SE-ResNet optimization history
 
-The GPU forward pass went through four implementations. The initial warp-cooperative path (32 threads, im2col to global scratch) proved correctness but was 325× slower than projected. Block-cooperative scalar (256 threads, shared-memory activations, direct conv3x3) achieved 9.52 ms — 13.7× faster. TC im2col (wmma FP16 GEMM replacing scalar conv) reached 3.65 ms but im2col gather still dominated. The final TC shifted-copy path decomposes conv3x3 into 9 dense GEMMs by kernel position, building shifted copies via bit operations only — no integer division, no staging. Loop reorder (shifts outer, N_tiles inner) reduced shifted copies from 36→9 per conv. **Result: 1.51 ms forward pass, 1.64 ms/sim** (6.3× faster than scalar). At 36 blocks on RTX 5060 Ti: **19 ms for 400 simulations** (44× faster than CPU+LibTorch baseline of 840 ms).
+The GPU forward pass went through four kernel-level implementations and three MCTS-level scheduling iterations.
+
+**Forward kernel evolution (v0 → v2).** The initial warp-cooperative path (32 threads, im2col to global scratch) proved correctness but was 325× slower than projected. Block-cooperative scalar (256 threads, shared-memory activations, direct conv3x3) achieved 9.52 ms — 13.7× faster. TC im2col (wmma FP16 GEMM replacing scalar conv) reached 3.65 ms but im2col gather still dominated. The TC shifted-copy path decomposes conv3x3 into 9 dense GEMMs by kernel position, building shifted copies via bit operations only — no integer division, no staging. Loop reorder (shifts outer, N_tiles inner) reduced shifted copies from 36→9 per conv. Result: 1.51 ms forward pass, 1.64 ms/sim, **79 samples/sec** at 36 concurrent games (v2 baseline).
+
+**v3 — FP16 inter-layer activation storage.** A late discovery: the shifted-copy path was already FP16+WMMA+FP32-accumulator at the matmul level; the remaining FP32 surface was inter-layer activation buffers (`buf1`/`buf2`, 16 KB each). Converting these to FP16 dropped per-block smem from 81 KB to 49 KB and removed an FP16/FP32 round-trip at every conv boundary. Throughput gain: **86.4 samples/sec** (~9% over v2). The bigger win was the smem headroom that v4 needed.
+
+**v4 — true batched conv primitive (B=2).** A new device function `oracle_net_forward_block_b2` plus underlying `block_conv_3x3_shifted_b2` load each WMMA weight tile A *once* per (n_tile, k_tile) and apply it to both batch elements before advancing — true weight-load amortization. The "naive" sequential B-loop design (call the existing forward twice) was rejected because it provides no per-FLOP improvement. Microbenchmark in isolation (single block, 1000 iterations, CUDA-event timing): **1.19× per-sim NN improvement** at B=2. Smem 99 KB (just under cap). Three runs identical to four sig figs — confirms weight-bandwidth was a real fraction of NN time.
+
+**v5 — 2-explorer virtual-loss scheduling.** Wires v4 into the production MCTS path. Each block runs 2 explorers per round: thread 0 does SELECT for both sequentially (so virtual loss steers the second away from the first's path); EXPAND and BACKUP parallelize across warps 0 and 1; the NN forward is one batched `oracle_net_forward_block_b2` call. The virtual-loss infrastructure (atomic `apply_virtual_loss`, `backprop_value` that decrements VL on backup) was already present from earlier work — v5 just needed a second explorer that exercises it. Per-block static smem grew ~1.1 KB; `sh_path` shrunk from 256 to 128 deep to fit the per-block 99 KB cap. End-to-end speedup: **101.4 samples/sec at 6×128**, **188.6 at 6×64** — same ~1.17× ratio at both architectures, confirming the mechanism is architecture-agnostic.
+
+**Cumulative result (v2 → v5):** 79 → 101.4 samples/sec at 6×128 production (1.28×), 161.9 → 188.6 at 6×64 apples-to-apples (1.17×).
 
 ### Transformer: hybrid TC/scalar
 
@@ -195,17 +205,27 @@ The forward pass uses a hybrid TC/scalar approach. Q/K/V projections and FFN use
 
 ### Two architectures, two scaling regimes
 
-GPU-resident inference (one block per tree, 256 threads) wins for small models where the forward pass fits in shared memory. For larger models, batched inference from the host with cuBLAS/cuDNN would better utilize GPU compute. Current throughput at 12L D=128: **~8,200 positions/sec**. The speed-of-light analysis shows only 2.8% TC utilization — the bottleneck is tiny matrix dimensions (128×64), not code quality. Depth scaling is free in shared memory; the bottleneck is forward pass latency per simulation.
+GPU-resident inference (one block per tree, 256 threads) wins for small models where activations fit in shared memory. For larger models, batched inference from the host with cuBLAS/cuDNN would better utilize GPU compute.
+
+**Smem-bound batch ceiling.** At 6×128 with FP16 activations the per-block batch is capped at B=2 (97 KB of the 99 KB per-block cap). Each output-channel of a 3×3 conv depends on all 128 input channels, so we cannot reduce the materialized activation tensor between layers without either dropping precision (FP8) or streaming activations through global memory — both of which give up the persistent-activations-in-smem advantage we've built around.
+
+**Apples-to-apples benchmark vs Lc0+Maia.** A temporary 6×64 experiment branch (matching Maia's architecture) measured Caissawary v5 at 188.6 samples/sec vs Lc0+Maia at 368 — about 51% of Lc0's throughput at the same network. The remaining ~1.95× gap decomposes roughly as: ~1.5× from Lc0's larger batch (B=30+ via virtual loss + cross-block batching) → better Tensor Core utilization, ~1.2× from CUTLASS-tuned conv kernels, ~1.15× from CPU/GPU overlap (CPU walks tree while GPU does forward). The first two are reachable with persistent-kernel work; the third is fundamentally incompatible with our design.
 
 ### GPU self-play
 
-A host-side game loop calls `gpu_mcts_eval_trees_transformer` for batches of 36 concurrent games on RTX 5060 Ti. Each batch runs one MCTS evaluation per active position (one block per game, 256 threads). The host handles move application, proportional-or-greedy sampling, game termination (checkmate, stalemate, 50-move, threefold repetition via Zobrist), and training data recording.
+A host-side game loop calls `gpu_mcts_eval_trees_budget` (or the v5 `_p2` variant) for batches of 36 concurrent games on RTX 5060 Ti. Each batch runs one MCTS evaluation per active position (one block per game, 256 threads in single-explorer mode; 256 threads with 2 explorers per round in v5 p2 mode). The host handles move application, proportional-or-greedy sampling, game termination (checkmate, stalemate, 50-move, threefold repetition via Zobrist), and training data recording.
 
-**Throughput (12L D=128 transformer, trained weights):** ~8,200 positions/sec. At 200 sims/move with 6L: 81.5 samples/sec (~3,000 training samples per 36-game batch).
+Selfplay opt-in: `SelfPlayConfig.use_vloss_p2 = true` switches to the v5 path. `bench_throughput 100 200 36 p2` runs the throughput benchmark in v5 mode; without the `p2` argument it uses the single-explorer baseline (untouched, still 86.4 samples/sec).
 
 ### Future directions
 
-Deeper models (24-48L), async batched inference for large models, and a split value head that could leverage the extended Q-search on GPU.
+The persistent-kernel approach has plateaued faster than projected. Each successive optimization — v3 (~9%), v4 (1.19× microbench), v5 (1.17× end-to-end) — is harder than the last, and the smem-bound batch ceiling at B=2 caps the next round of gains. Realistic next steps in order of leverage:
+
+- **FP8 activations** to break through B=2 → B=4. Adds quantization-aware training and an FP8 WMMA path. Estimated ~1.15–1.25× more throughput; brings 6×128 production to ~120 samples/sec.
+- **Cross-block batching** (Lc0-style architecture) — splits MCTS workers from a global inference engine that batches across many blocks. This is essentially rebuilding around Lc0's design pattern and gives up the persistent-kernel advantage; the upside is uncapped batch scaling.
+- **Hybrid CPU NNUE + GPU big-net** — a fast CPU evaluator (NNUE-style or small distilled net) provides immediate provisional values at every leaf so the tree never stalls on GPU latency; the slow GPU evaluator refines values + provides policy priors in batches. Conceptually similar to speculative decoding. Calibration between the two evaluators is the load-bearing risk; distilling the small net from the big net's value head is the strongest version (eliminates calibration entirely). Could in principle exceed Lc0 at equal hardware, which the persistent-kernel approach essentially can't.
+
+The persistent-kernel design's "no CPU-GPU sync per sim" advantage is real but bounded — at B=2 it costs us ~50% of theoretical Lc0 performance even at apples-to-apples architecture. Closing the rest of the gap requires either FP8 + more kernel work (~80% of Lc0 reachable) or a fundamentally different architecture.
 
 ### Test coverage
 

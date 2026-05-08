@@ -93,15 +93,16 @@ See [BENCHMARKS.md](BENCHMARKS.md) for throughput measurements.
 
 **Batched wins for large models:** At 24+ layers (4.8M+ params), GPU forward pass exceeds 3.6ms per batch -- CPU tree operations can overlap. Larger models also exceed the ~99 KB shared memory limit for GPU-resident (D>=192 is impossible). See [CUDA_TC_ANALYSIS.md](CUDA_TC_ANALYSIS.md).
 
-### Current Model: 12L Transformer, D=128, 2.4M params
+### Current Model: SE-ResNet 6×128, ~2M params (v5)
 
-- **Throughput:** see [BENCHMARKS.md](BENCHMARKS.md). At 200 sims/move on SE-ResNet 6×128: 79 samples/sec, 15.8K sims/sec on RTX 5060 Ti (36 concurrent games).
-- **Architecture:** Pre-LayerNorm encoder, 4 attention heads (head_dim=32), FFN 4x expansion
-- **Tensor Cores:** FP16 `buf_out` frees 16 KB for TC staging; Q/K/V projections and FFN use wmma (FP16 in, FP32 accumulate); QK^T, softmax, attn*V stay scalar (workspace aliasing)
+- **Throughput:** see [BENCHMARKS.md](BENCHMARKS.md). At 200 sims/move on RTX 5060 Ti, 36 concurrent games: **101.4 samples/sec, 20.3K sims/sec** (v5: 2-explorer virtual loss + batched conv).
+- **Apples-to-apples vs Lc0+Maia (both at 6×64):** Caissawary v5 188.6 samples/sec vs Lc0 368 — at ~51% of Lc0's throughput, gap narrowed from 2.27× to 1.95× over the v3→v5 work.
+- **Optimization stack:** v3 (FP16 inter-layer activation storage, smem 81→49 KB) → v4 (`oracle_net_forward_block_b2`: true batched WMMA at B=2 with weight-load amortization, 1.19× per-sim NN improvement) → v5 (2-explorer scheduling per block: thread 0 sequentially does SELECT for both with virtual loss, EXPAND/BACKUP parallelize across warps 0/1, NN forward is one batched call). End-to-end gain v3→v5: **~1.17×** on samples/sec.
+- **Smem-bound batch ceiling:** B=2 is the practical limit at 6×128 (97 KB of 99 KB cap). Pushing further requires FP8 activations, streaming activations through global memory, or a cross-block batching architecture.
 
-### SE-ResNet Also Supported
+### Transformer Also Supported
 
-SE-ResNet 128x6 (~2M params) achieves 1.51 ms forward pass with shifted-copy TC (conv3x3 decomposed into 9 dense GEMMs). Better TC tiling than transformer due to regular structure. Per-move: ~19 ms at 36 blocks, 200 sims.
+A 12L D=128 pre-LayerNorm transformer (~2.4M params) runs as an alternative via `--arch transformer`. Hybrid TC/scalar forward: Q/K/V projections and FFN use wmma (FP16 in, FP32 accumulate); QK^T, softmax, and attn×V stay scalar due to workspace constraints. FP16 `buf_out` frees 16 KB for a dedicated TC staging region.
 
 ### GPU Self-Play and Evaluation
 
@@ -169,8 +170,11 @@ cargo test --features slow-tests                  # Full suite including perft (
 cd python && python -m pytest test_*.py -v        # Python pipeline tests
 cuda/build/test_mcts_kernel                       # 13/13 CUDA MCTS tests
 cuda/build/test_transformer                       # 11/11 transformer tests
-cuda/build/test_block_ops                         # 15/15 SE-ResNet tests
+cuda/build/test_block_ops                         # 19/19 SE-ResNet + b2 + p2 tests
+cuda/build/test_budget_reuse                      # 8/8 reuse + p2 sanity
 cuda/build/test_nn_ops                            # 21/21 NN ops tests
+cuda/build/bench_throughput 100 200 36 [p2]       # end-to-end selfplay throughput
+cuda/build/bench_forward_b2 1000                  # batched conv microbench
 ```
 
 <details>
