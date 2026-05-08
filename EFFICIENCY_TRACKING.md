@@ -28,8 +28,26 @@ To append a new measurement: edit this file and add a row to the table. Source d
 
 | date       | test                                                    | overall RMSE | drawish RMSE | midrange RMSE | by-ply spread | verdict | output                |
 |:-----------|:--------------------------------------------------------|-------------:|-------------:|--------------:|--------------:|:--------|:----------------------|
-| 2026-05-07 | Stockfish d2 → Stockfish d12 (same eval, fast→slow)    | 0.195        | 0.121        | 0.202         | 0.054         | YELLOW — calibration is tight at extremes but noisy in tactical mid-range where guidance matters most. Distilled-net variant likely required for useful strength. | `/tmp/calib/results.json` |
-| 2026-05-07 | Stockfish d12 → Caissawary v3 (cross-model)             | 0.350        | —            | —             | —             | RED but uninformative — dominated by ~1000 Elo strength gap, not architectural calibration | `/tmp/calib/results.json` |
+| 2026-05-07 | Stockfish d2 → Stockfish d12 (same eval, fast→slow)    | 0.195        | 0.121        | 0.202         | 0.054         | Calibration is tight at the extremes (drawish, clearly winning) but noisy in the tactical mid-range. Off-the-shelf NNUE used as a speculative provisional value would mislead exploration there. | `/tmp/calib/results.json` |
+| 2026-05-07 | Stockfish d12 → Caissawary v3 (cross-model)             | 0.350        | —            | —             | —             | Uninformative — dominated by ~1000 Elo strength gap, not by the calibration architecture. | `/tmp/calib/results.json` |
+
+A later reframing made these tests mostly moot. The shared-formula approach below uses the existing `V_final = tanh(V_logit + k · ΔM)` — there's no sigmoid mapping to fit, the slow value is literally the fast value plus an additive residual.
+
+## Planned approaches (not yet measured)
+
+Two roughly independent directions. The NNUE one looks more promising; the GPU-engine one is a fallback for incremental wins.
+
+**Replace PeSTO with NNUE inside the existing Q-search.** The fast eval becomes `tanh(k · ΔM_NNUE)`; the slow eval (after GPU returns) becomes `tanh(V_logit + k · ΔM_NNUE)`. NNUE is dramatically stronger than PeSTO, so this likely gives ~+200 Elo at the same MCTS budget without retraining. ~1 week. Touches `src/search/quiescence.rs` and `src/eval.rs`. May need to re-tune `k` for the new ΔM scale.
+
+**Retrain against NNUE-based ΔM.** Once the Q-search uses NNUE, V_logit learns a residual on top of a stronger baseline. Probably another +50–100 Elo. One training cycle.
+
+**Async pipelined CPU MCTS + GPU big-net.** The CPU descends the tree, runs Q-search-with-NNUE at every leaf, backs up the provisional value immediately, and queues the position for batched GPU inference. The GPU returns V_logit; CPU updates the node value to the slow form. The tree never stalls on GPU latency. ~3 months. Plausibly Lc0-class throughput, with the architectural advantage that every node always has *some* value.
+
+**FP8 activations on the GPU MCTS path.** Lets B=4 fit in smem. Probably ~+15–25% throughput at 6×128. ~3 weeks. Independent of the NNUE work.
+
+**Cross-block batching (Lc0-style rewrite of the GPU path).** Match Lc0 throughput by abandoning persistent-kernel for a request-queue + batched-inference design. ~3 months. Same end-state as the async-pipelined approach above, just reached via the GPU side rather than the CPU side.
+
+The NNUE-Q-search change is the highest-ROI next step. It's small, delivers strength gains independent of any larger architectural decision, and validates the "NNUE as fast eval" hypothesis before committing to the bigger work.
 
 ## Notes for future entries
 

@@ -219,13 +219,23 @@ Selfplay opt-in: `SelfPlayConfig.use_vloss_p2 = true` switches to the v5 path. `
 
 ### Future directions
 
-The persistent-kernel approach has plateaued faster than projected. Each successive optimization — v3 (~9%), v4 (1.19× microbench), v5 (1.17× end-to-end) — is harder than the last, and the smem-bound batch ceiling at B=2 caps the next round of gains. Realistic next steps in order of leverage:
+The persistent-kernel approach has plateaued faster than projected. Each successive optimization — v3 (~9%), v4 (1.19× microbench), v5 (1.17× end-to-end) — is harder than the last, and the smem-bound batch ceiling at B=2 caps the next round of gains. At B=2 we're stuck around 50% of Lc0's throughput at apples-to-apples architecture, and closing that requires architectural change.
 
-- **FP8 activations** to break through B=2 → B=4. Adds quantization-aware training and an FP8 WMMA path. Estimated ~1.15–1.25× more throughput; brings 6×128 production to ~120 samples/sec.
-- **Cross-block batching** (Lc0-style architecture) — splits MCTS workers from a global inference engine that batches across many blocks. This is essentially rebuilding around Lc0's design pattern and gives up the persistent-kernel advantage; the upside is uncapped batch scaling.
-- **Hybrid CPU NNUE + GPU big-net** — a fast CPU evaluator (NNUE-style or small distilled net) provides immediate provisional values at every leaf so the tree never stalls on GPU latency; the slow GPU evaluator refines values + provides policy priors in batches. Conceptually similar to speculative decoding. Calibration between the two evaluators is the load-bearing risk; distilling the small net from the big net's value head is the strongest version (eliminates calibration entirely). Could in principle exceed Lc0 at equal hardware, which the persistent-kernel approach essentially can't.
+The strongest direction reuses what we already have. Caissawary's value function is:
 
-The persistent-kernel design's "no CPU-GPU sync per sim" advantage is real but bounded — at B=2 it costs us ~50% of theoretical Lc0 performance even at apples-to-apples architecture. Closing the rest of the gap requires either FP8 + more kernel work (~80% of Lc0 reachable) or a fundamentally different architecture.
+$$V_{final} = \tanh(V_{logit} + k \cdot \Delta M)$$
+
+where ΔM comes from PeSTO via the Q-search and V_logit is the network's residual on top. The "classical fallback" path (V_logit=0) already computes `tanh(k · ΔM)` — that's how a freshly-initialized network plays.
+
+So replace PeSTO's ΔM with NNUE's ΔM inside the existing Q-search. The fast eval — used as an immediate provisional value before the GPU returns — is `tanh(k · ΔM_NNUE)`. The slow eval (after the GPU batch comes back) is `tanh(V_logit + k · ΔM_NNUE)`. The slow value is literally the fast value plus an additive residual the network was specifically trained to learn. No sigmoid mapping needed; the formula is already shared.
+
+This unlocks an async pipelined CPU+GPU architecture cleanly: the CPU descends the tree, runs Q-search-with-NNUE at every leaf, backs up the provisional value immediately, and queues the position for batched GPU inference. The tree never stalls on GPU latency, and every node always has *some* value to back up. The calibration risk that haunted the original hybrid proposal disappears.
+
+The change can be staged. Just swapping PeSTO for NNUE inside the Q-search (a one-week change to `src/search/quiescence.rs` and `src/eval.rs`) probably gives ~+200 Elo at the same MCTS budget, since NNUE is dramatically stronger than PeSTO at piece-placement assessment. Retraining V_logit against the new ΔM is the next layer. The full async pipeline is the third. Each layer is independently valuable.
+
+The GPU MCTS work (v3/v4/v5) doesn't go away — it's still the right design for a self-contained GPU-resident path. But the lead architecture for catching Lc0 shifts from "make persistent-kernel faster" to "let V_logit refine a strong CPU baseline that doesn't stall on GPU latency."
+
+As fallbacks within the GPU MCTS path: FP8 activations would let B=4 fit in smem for ~+15–25% throughput at 6×128 (~3 weeks); cross-block batching (Lc0-style rewrite) reaches the same end-state as the async pipeline by a different route (~3 months).
 
 ### Test coverage
 
