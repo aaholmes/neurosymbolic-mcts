@@ -233,9 +233,27 @@ This unlocks an async pipelined CPU+GPU architecture cleanly: the CPU descends t
 
 The change can be staged. Just swapping PeSTO for NNUE inside the Q-search (a one-week change to `src/search/quiescence.rs` and `src/eval.rs`) probably gives ~+200 Elo at the same MCTS budget, since NNUE is dramatically stronger than PeSTO at piece-placement assessment. Retraining V_logit against the new ΔM is the next layer. The full async pipeline is the third. Each layer is independently valuable.
 
-The GPU MCTS work (v3/v4/v5) doesn't go away — it's still the right design for a self-contained GPU-resident path. But the lead architecture for catching Lc0 shifts from "make persistent-kernel faster" to "let V_logit refine a strong CPU baseline that doesn't stall on GPU latency."
+The persistent-kernel path (v3/v4/v5) was a systems-engineering investment that ran its course. It taught us where the smem-bound batch ceiling sits, what an aggressive single-batch persistent kernel can extract from a small SE-ResNet, and where Lc0's design choices come from. But at apples-to-apples scale we plateaued at ~50% of Lc0's throughput, and each successive optimization extracted less than the last. We aren't married to it.
 
-As fallbacks within the GPU MCTS path: FP8 activations would let B=4 fit in smem for ~+15–25% throughput at 6×128 (~3 weeks); cross-block batching (Lc0-style rewrite) reaches the same end-state as the async pipeline by a different route (~3 months).
+The lead architecture going forward is **CPU-resident MCTS with batched GPU inference**. The CPU descends the tree, runs NNUE-Q at every leaf, optionally does iterative-deepening Q-search at high-uncertainty nodes, backs up the provisional value immediately, and queues the position for batched GPU inference. The GPU runs continuously at high batch sizes using standard inference libraries (cuBLAS/cuDNN/TensorRT or equivalent), returning V_logit which gets folded into the slow value when it arrives. The CPU never stalls on GPU latency; the GPU never stalls on small batches.
+
+This decouples three things the persistent-kernel design conflated: tree traversal (CPU-cheap, latency-sensitive), classical leaf evaluation (CPU-only — NNUE accumulators, Q-search, optional deepening), and neural inference (GPU-only — bulk matmul, throughput-sensitive). Each runs on the hardware that suits it, with the queue absorbing latency between them.
+
+The persistent-kernel code doesn't have to be deleted — it's a usable self-contained GPU-only path and a baseline reference. But the bet on catching Lc0 isn't "make persistent-kernel faster anymore," it's "let a strong CPU pipeline keep a well-fed GPU busy."
+
+A further layer reuses Lc0's trained weights directly. Take a small Maia-class Lc0 network (6×64 or 10×128 — same scale as the existing path), use its policy head as-is, and replace its value head with a small v_logit adapter trained to predict the *residual* on top of NNUE-Q. The trunk has already absorbed billions of self-play games; the adapter learns to improve the evaluation in ways that aren't easy to capture by a quiescence search over a shallow network — the kinds of long-horizon and global-pattern judgments that benefit from a deeper feature stack and explicit policy guidance.
+
+The one real constraint is **network size**. Lc0's mainline nets are 768×15 — orders of magnitude bigger than the persistent-kernel path supports. Starting target is a 6×64 or 10×128 T-net (same scale as Maia, fits the existing GPU path with minor adjustments). Going larger forces the cross-block-batching rewrite, so don't combine the two bets.
+
+Engineering work that's needed anyway (worth doing whether or not we go with Lc0 specifically): a network-adapter layer that decouples the engine from a specific input/output format. Lc0 uses 112 input planes (8-ply history + auxiliary) and a 1858-logit policy in a from-square × move-direction encoding; Caissawary currently uses 17 planes and AlphaZero-style 4672 logits. Adding 8-ply history tracking to `BoardStack`, a configurable input-plane builder, and a static `Move ↔ policy index` map turns "what network can we plug in" into a parameter rather than a rewrite. This is straightforward and unblocks any pretrained network drop-in, not just Lc0.
+
+Fine-tuning recipe: freeze trunk + policy head; add v_logit adapter on top of the trunk's value-head input (a couple of small FC layers); keep `k_logit` as a single tunable scalar; train MSE on `target − tanh(v_logit + k · NNUE_q)` against Stockfish-labeled or self-play positions. If the adapter underfits, unfreeze the trunk's last block.
+
+The bet shifts from "replicate years of Lc0 training" (impossible on this budget) to "let NNUE-Q + a Maia-class Lc0 trunk + async pipeline beat Maia/small-Lc0." The first bet isn't winnable; the second plausibly is.
+
+License caveat: Lc0 networks are typically released under permissive terms (CC0 or similar) but it varies per network. Verify for the specific T-net before building on it.
+
+The persistent-kernel optimizations that were on the books (FP8 activations for B=4, cross-block batching for Lc0-style throughput) become moot under this architecture — cross-block batching is essentially the same destination as CPU-resident MCTS reached from the GPU side, and FP8 only matters if we're keeping the persistent kernel as the lead path.
 
 ### Test coverage
 

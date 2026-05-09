@@ -35,19 +35,25 @@ A later reframing made these tests mostly moot. The shared-formula approach belo
 
 ## Planned approaches (not yet measured)
 
-Two roughly independent directions. The NNUE one looks more promising; the GPU-engine one is a fallback for incremental wins.
+The lead architecture is **CPU-resident MCTS with batched GPU inference**, not an extension of the persistent-kernel path. The persistent-kernel code remains usable as a self-contained GPU-only baseline, but it isn't the destination.
 
-**Replace PeSTO with NNUE inside the existing Q-search.** The fast eval becomes `tanh(k · ΔM_NNUE)`; the slow eval (after GPU returns) becomes `tanh(V_logit + k · ΔM_NNUE)`. NNUE is dramatically stronger than PeSTO, so this likely gives ~+200 Elo at the same MCTS budget without retraining. ~1 week. Touches `src/search/quiescence.rs` and `src/eval.rs`. May need to re-tune `k` for the new ΔM scale.
+The pipeline below is layered — each step delivers strength gains on its own and unblocks the next.
 
-**Retrain against NNUE-based ΔM.** Once the Q-search uses NNUE, V_logit learns a residual on top of a stronger baseline. Probably another +50–100 Elo. One training cycle.
+**1. Replace PeSTO with NNUE inside the existing Q-search.** The fast eval becomes `tanh(k · ΔM_NNUE)`; the slow eval (after GPU returns) becomes `tanh(V_logit + k · ΔM_NNUE)`. NNUE is dramatically stronger than PeSTO, so this likely gives ~+200 Elo at the same MCTS budget without retraining. ~1 week. Touches `src/search/quiescence.rs` and `src/eval.rs`. May need to re-tune `k` for the new ΔM scale.
 
-**Async pipelined CPU MCTS + GPU big-net.** The CPU descends the tree, runs Q-search-with-NNUE at every leaf, backs up the provisional value immediately, and queues the position for batched GPU inference. The GPU returns V_logit; CPU updates the node value to the slow form. The tree never stalls on GPU latency. ~3 months. Plausibly Lc0-class throughput, with the architectural advantage that every node always has *some* value.
+**2. Retrain against NNUE-based ΔM.** Once the Q-search uses NNUE, V_logit learns a residual on top of a stronger baseline. Probably another +50–100 Elo. One training cycle.
 
-**FP8 activations on the GPU MCTS path.** Lets B=4 fit in smem. Probably ~+15–25% throughput at 6×128. ~3 weeks. Independent of the NNUE work.
+**3. Network-adapter layer (input/output decoupling).** Generalize the engine to consume any (input-plane spec, policy-encoding spec) pair so different networks can be dropped in without rewrites. Add 8-ply history tracking to `BoardStack`, make the input-plane builder configurable, and add a static `Move ↔ policy index` map keyed by the chosen encoding. Worth doing on its own merits — unblocks any future pretrained-network experiment, not just Lc0. ~1 week.
 
-**Cross-block batching (Lc0-style rewrite of the GPU path).** Match Lc0 throughput by abandoning persistent-kernel for a request-queue + batched-inference design. ~3 months. Same end-state as the async-pipelined approach above, just reached via the GPU side rather than the CPU side.
+**4. Async pipelined CPU MCTS + batched GPU inference (lead architecture).** CPU descends the tree, runs NNUE-Q at every leaf, backs up the provisional value immediately, and queues the position for batched GPU inference. The GPU runs continuously at high batch sizes using standard inference libraries (cuBLAS/cuDNN/TensorRT), returns V_logit; CPU folds it into the slow value when it arrives. CPU never stalls on GPU latency; GPU never stalls on small batches. ~2–3 months. Plausibly Lc0-class throughput, with the architectural property that every node always has *some* backed-up value.
 
-The NNUE-Q-search change is the highest-ROI next step. It's small, delivers strength gains independent of any larger architectural decision, and validates the "NNUE as fast eval" hypothesis before committing to the bigger work.
+**5. Iterative-deepening Q-search at high-uncertainty leaves.** Once the CPU is the home of leaf evaluation, spend more CPU time on tactically interesting positions — extend the NNUE Q-search adaptively when the static eval is volatile or the position has many forcing moves. CPU-only refinement, naturally fits the async pipeline (the GPU is busy with other batches anyway).
+
+**6. Lc0 trunk import (with v_logit adapter).** Take a small Maia-class Lc0 network (6×64 or 10×128 T-net) and reuse its trunk + policy head directly; replace its value head with a small adapter trained to predict the residual on top of NNUE-Q. Inherits Lc0's training data implicitly via the pretrained weights. The adapter learns to improve the evaluation in ways that aren't easy to capture by a Q-search over a shallow network — long-horizon and global-pattern judgments that benefit from a deeper feature stack and explicit policy guidance. Real constraint: network size — going past 10×128 means the GPU inference path needs to handle bigger nets (which the standard-library batched-inference design does naturally; it was the persistent kernel that capped at small nets). Fine-tuning: freeze trunk + policy head, add a small FC adapter on top of the value-head input, keep `k_logit` as a tunable scalar, train MSE against Stockfish-labeled positions. ~3–4 weeks (after the network-adapter layer is in place).
+
+The NNUE-Q-search change is the highest-ROI next step. It's small, delivers strength gains independent of any larger architectural decision, and validates the "NNUE as fast eval" hypothesis before committing to the bigger work. Lc0 trunk import is the natural follow-up — it depends on NNUE-Q being in place (the adapter is trained against `NNUE_q`, not against PeSTO's ΔM) and on the network-adapter layer being in place. The async pipeline can be staged in either before or after the trunk import; doing it before makes the trunk import simpler because there's already a queue to feed.
+
+(Previously listed: FP8 activations for B=4, cross-block-batching rewrite of the persistent kernel. Both were persistent-kernel optimizations; both are subsumed by the async-pipeline pivot above. Dropped.)
 
 ## Notes for future entries
 
