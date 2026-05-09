@@ -5,19 +5,32 @@
 //! 1. **Scaffolding** (this commit): `NnueEvaluator::new_stub()` returns a
 //!    placeholder evaluator that delegates to PeSTO. Lets the rest of the
 //!    integration land without blocking on the actual NNUE work.
-//! 2. **HalfKP feature encoder**: 64 king squares × 641 (piece, square) tuples
-//!    = 41,024 features per perspective. Two perspectives concatenated → 82,048
-//!    sparse one-hot features into the noru accumulator.
-//! 3. **Stockfish .nnue weight loader**: parse the binary format, remap into
-//!    `noru::network::NnueWeights` layout.
+//! 2. **Feature encoder**: 768 (12 piece-types × 64 squares) × 4 king-input
+//!    buckets = 3,072 features per perspective. Active features passed as a
+//!    sparse index list to `noru::network::Accumulator::refresh`. King bucket
+//!    is a static lookup keyed on the STM king square.
+//! 3. **Akimbo `.bin` weight loader**: Akimbo's file format is a raw struct
+//!    dump (`mem::transmute` of `Network { feature_weights, feature_bias,
+//!    output_weights, output_bias }`, all `i16`, QA=255, no header, no
+//!    compression). Parsing is roughly `read → slice as i16 → copy into
+//!    noru::network::NnueWeights`. Architecture matches noru:
+//!    `NnueConfig::new_static(3072, 1024, &[], Activation::SCReLU)`.
 //! 4. **Incremental updates**: per-thread accumulator stack, push/pop on
-//!    `BoardStack::make_move` / `undo_move`. Avoids the 41K-feature scan on
-//!    every Q-search node.
+//!    `BoardStack::make_move` / `undo_move`. Avoids the 3K-feature scan on
+//!    every Q-search node. King moves trigger a full refresh (king-bucket
+//!    lookup changes).
 //!
 //! The output is **centipawns from STM perspective**, matching the existing
 //! `PestoEval::pst_eval_cp` contract — the rest of the engine doesn't need to
 //! know which evaluator produced the value, only that the scale and sign
 //! convention match.
+//!
+//! Source choice: Akimbo (MIT-licensed) over Stockfish .nnue. A Phase 3 spike
+//! (2026-05-09) confirmed that noru only loads its own NORU-magic format, and
+//! that modern Stockfish's 8-output-bucket HalfKAv2_hm is architecturally
+//! incompatible with noru. Akimbo is single-output-bucket with a trivial file
+//! format, by the author of the `bullet` NNUE trainer — so the same loader
+//! also accepts custom nets we may train later.
 
 use crate::board::Board;
 use crate::eval::PestoEval;

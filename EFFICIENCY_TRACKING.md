@@ -39,7 +39,9 @@ The lead architecture is **CPU-resident MCTS with batched GPU inference**, not a
 
 The pipeline below is layered — each step delivers strength gains on its own and unblocks the next.
 
-**1. Replace PeSTO with NNUE inside the existing Q-search.** The fast eval becomes `tanh(k · ΔM_NNUE)`; the slow eval (after GPU returns) becomes `tanh(V_logit + k · ΔM_NNUE)`. NNUE is dramatically stronger than PeSTO, so this likely gives ~+200 Elo at the same MCTS budget without retraining. ~1 week. Touches `src/search/quiescence.rs` and `src/eval.rs`. May need to re-tune `k` for the new ΔM scale.
+**1. Replace PeSTO with NNUE inside the existing Q-search.** The fast eval becomes `tanh(k · ΔM_NNUE)`; the slow eval (after GPU returns) becomes `tanh(V_logit + k · ΔM_NNUE)`. NNUE is dramatically stronger than PeSTO, so this likely gives ~+200 Elo at the same MCTS budget without retraining. ~1-2 weeks. Touches `src/search/quiescence.rs` and `src/eval.rs`. May need to re-tune `k` for the new ΔM scale.
+
+NNUE source is **Akimbo** (https://github.com/jw1912/akimbo, MIT). Architecture `(768×4 king-input buckets → 1024)_per_perspective → concat → 1`, SCReLU, single output bucket — maps cleanly to noru's `NnueConfig::new_static(3072, 1024, &[], Activation::SCReLU)`. File format is a raw `i16` struct dump (no header, no compression) so the loader is roughly a memcpy. Akimbo at ~3470 CCRL Blitz gives ~+1000 Elo over PeSTO. Originally planned to use Stockfish .nnue, but a Phase 3 spike (2026-05-09) confirmed noru cannot load Stockfish format and SF's modern 8-bucket layer-stack is architecturally incompatible — Akimbo is dramatically simpler. Bonus: Akimbo's author wrote `bullet` (the trainer most modern NNUE engines use), so adopting this file format means future custom-trained nets drop in without loader changes.
 
 **2. Retrain against NNUE-based ΔM.** Once the Q-search uses NNUE, V_logit learns a residual on top of a stronger baseline. Probably another +50–100 Elo. One training cycle.
 
