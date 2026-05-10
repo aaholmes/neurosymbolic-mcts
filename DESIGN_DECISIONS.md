@@ -243,17 +243,41 @@ This decouples three things the persistent-kernel design conflated: tree travers
 
 The persistent-kernel code doesn't have to be deleted — it's a usable self-contained GPU-only path and a baseline reference. But the bet on catching Lc0 isn't "make persistent-kernel faster anymore," it's "let a strong CPU pipeline keep a well-fed GPU busy."
 
-A further layer reuses Lc0's trained weights directly. Take a small Maia-class Lc0 network (6×64 or 10×128 — same scale as the existing path), use its policy head as-is, and replace its value head with a small v_logit adapter trained to predict the *residual* on top of NNUE-Q. The trunk has already absorbed billions of self-play games; the adapter learns to improve the evaluation in ways that aren't easy to capture by a quiescence search over a shallow network — the kinds of long-horizon and global-pattern judgments that benefit from a deeper feature stack and explicit policy guidance.
+A further layer reuses Lc0's trained weights directly. Take a small Maia-class Lc0 network (6×64 or 10×128 — same scale as the existing path), use its policy head as-is, and replace its value head with a small v_logit adapter trained to predict the *residual* on top of NNUE-Q. The network has already absorbed billions of self-play games; the adapter learns to improve the evaluation in ways that aren't easy to capture by a quiescence search over a shallow network — the kinds of long-horizon and global-pattern judgments that benefit from a deeper feature stack and explicit policy guidance.
 
-The one real constraint is **network size**. Lc0's mainline nets are 768×15 — orders of magnitude bigger than the persistent-kernel path supports. Starting target is a 6×64 or 10×128 T-net (same scale as Maia, fits the existing GPU path with minor adjustments). Going larger forces the cross-block-batching rewrite, so don't combine the two bets.
+**Network size — what was a constraint, and isn't anymore.** The "small network only" framing was a holdover from the persistent-kernel architecture, where smem capped batch size at B=2 for 6×128 and made bigger nets impractical. Under CPU-resident MCTS + batched GPU inference (above), that ceiling disappears entirely — standard inference libraries handle 768×15 networks at high batch sizes natively. So the staging is "small network first to validate the design, big network when the design is proven," not "small network because we can't run anything bigger."
 
 Engineering work that's needed anyway (worth doing whether or not we go with Lc0 specifically): a network-adapter layer that decouples the engine from a specific input/output format. Lc0 uses 112 input planes (8-ply history + auxiliary) and a 1858-logit policy in a from-square × move-direction encoding; Caissawary currently uses 17 planes and AlphaZero-style 4672 logits. Adding 8-ply history tracking to `BoardStack`, a configurable input-plane builder, and a static `Move ↔ policy index` map turns "what network can we plug in" into a parameter rather than a rewrite. This is straightforward and unblocks any pretrained network drop-in, not just Lc0.
 
-Fine-tuning recipe: freeze trunk + policy head; add v_logit adapter on top of the trunk's value-head input (a couple of small FC layers); keep `k_logit` as a single tunable scalar; train MSE on `target − tanh(v_logit + k · NNUE_q)` against Stockfish-labeled or self-play positions. If the adapter underfits, unfreeze the trunk's last block.
+Fine-tuning recipe: freeze the network except the value head; add v_logit adapter on top of the value-head input (a couple of small FC layers); keep `k_logit` as a single tunable scalar; train MSE on `target − tanh(v_logit + k · NNUE_q)` against Stockfish-labeled or self-play positions. If the adapter underfits, unfreeze the network's last block.
 
-The bet shifts from "replicate years of Lc0 training" (impossible on this budget) to "let NNUE-Q + a Maia-class Lc0 trunk + async pipeline beat Maia/small-Lc0." The first bet isn't winnable; the second plausibly is.
+The bet shifts from "replicate years of Lc0 training" (impossible on this budget) to "let NNUE-Q + a Maia-class Lc0 network + async pipeline beat Maia/small-Lc0." The first bet isn't winnable; the second plausibly is.
 
 License caveat: Lc0 networks are typically released under permissive terms (CC0 or similar) but it varies per network. Verify for the specific T-net before building on it.
+
+### Importing BT4 directly
+
+Once the design is validated on a small network, the natural escalation is to import Lc0's best mainline network (BT4 or successor) directly. This changes the competitive ceiling materially.
+
+**The math is now different.** Earlier framings of "compete with Lc0" assumed Caissawary's network would be smaller than BT4 — implying we'd lose on raw network strength and have to make up the gap architecturally (probably impossible). Importing BT4 directly eliminates that gap: same network signal at every leaf, same training compute behind it. The question becomes "can MCTS-with-strong-leaf-eval beat pure-MCTS at like-for-like network?" That's a much more winnable bet.
+
+**Three sources of advantage compound on top of vanilla Lc0+BT4:**
+
+1. **Tactical resolution.** NNUE-Q at every leaf gives an exact answer for tactical sequences that vanilla Lc0 only resolves through visit-count convergence. Fixes Lc0's known mid-game tactical-blunder weakness — those positions where the value net mis-evaluates a 5-move sequence and MCTS takes hundreds of visits to correct.
+2. **CPU/GPU concurrency.** Lc0+BT4 on consumer GPUs is GPU-bound; the CPU is mostly idle (just managing the search tree). Putting that capacity to work via NNUE-Q + iterative deepening costs nothing in wall-clock time — the GPU is doing the same work either way — but adds informative computation per visit.
+3. **Selective deepening.** Any high-uncertainty MCTS node can receive a deep NNUE-Q extension. Stockfish does this from the root via α-β extensions; Lc0 doesn't have an analogue. We get both MCTS's tree-level averaging *and* α-β-like depth allocation at the leaves — a combination nobody has shipped at this quality level.
+
+**Realistic ceiling: ~+30 to +100 Elo over vanilla Lc0+BT4 on equivalent hardware.** That puts us at ~3680-3750 vs Lc0's ~3650, in the top-5 engines worldwide and in striking distance of Stockfish 17. Not a blowout, but the kind of result that's publishable on architectural grounds: a hybrid design genuinely beats one of its components at its own benchmark.
+
+**Three integration challenges, in order of pain:**
+
+- **Combination function.** BT4's value head already encodes material assessment, so naively adding NNUE-Q's ΔM double-counts (position with hanging queen, BT4 says +9, NNUE-Q says +9, sum gives +18 — wrong). Two solutions: (a) fine-tune a v_logit adapter on top of BT4's penultimate features that learns *only the residual* on top of NNUE-Q (higher ceiling, requires fine-tuning compute and labeled positions); (b) use NNUE-Q only as an *extension trigger* — when NNUE-Q and BT4 disagree by a lot, deepen the search at that node, but back up BT4's value (simpler, lower ceiling). Both work; pick based on engineering budget.
+- **BT4 loader.** Lc0's network format is protobuf-based with custom quantization. Loading BT4 means either calling into Lc0's code (GPL-3 contamination risk) or writing a parser ourselves with Lc0's source as a reference. The network-adapter layer above is a prerequisite (8-ply history input, 1858-logit policy map). Probably ~2 weeks for a clean parser.
+- **Fine-tuning compute.** If going the adapter route, need millions of positions labeled with target values. Stockfish 17 NNUE evaluations are the natural source — a few GPU-days on consumer hardware. Modest but real.
+
+**Realistic timeline for a serious attempt at beating Lc0+BT4:** ~4-6 months for the full pipeline (NNUE-Q → adapter layer → BT4 loader → fine-tuned adapter → async pipeline → iterative deepening + tuning). Each step delivers strength gains independently — none of it is wasted if a later step doesn't pan out. The biggest risk isn't whether the design is sound; it's sustaining focused engineering across multiple-month effort on a project where the strength gains are real but not large per-step.
+
+**KOTH-specific note.** BT4 is trained for standard chess. In KOTH the network-strength advantage shifts toward us regardless of network choice, because BT4's training distribution doesn't include KOTH center-march patterns. So in KOTH, even a small-network Caissawary with NNUE-Q can plausibly beat Lc0+BT4. Standard chess is the hard target; KOTH is the home turf.
 
 The persistent-kernel optimizations that were on the books (FP8 activations for B=4, cross-block batching for Lc0-style throughput) become moot under this architecture — cross-block batching is essentially the same destination as CPU-resident MCTS reached from the GPU side, and FP8 only matters if we're keeping the persistent kernel as the lead path.
 
