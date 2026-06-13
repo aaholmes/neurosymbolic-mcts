@@ -32,3 +32,27 @@ runs/
 # Claude Code
 .claude/
 CLAUDE.md
+.qwen/
+
+# Build/profiling artifacts
+cuda/build/
+*.o
+report1.qdstrm
+report*.nsys-rep
+.pytest_cache/
+__pycache__/
+
+# Removed tracked junk (Mac binary + stray root smoke test)
+test_tactical_mcts
+test_tactical_mcts.rs
+
+# Working/scratch docs (not part of the curated doc set)
+CUDA_DESIGN_DOC_v*.md
+implementation_plan.md
+profile_results.md
+context.md
+audit.md
+FIX_PLAN.md
+training_log.jsonl
+batched_conv_scaling.csv
+plots/

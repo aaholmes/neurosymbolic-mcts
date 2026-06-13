@@ -33,23 +33,3 @@ jobs:
 
     - name: Run Tests
       run: cargo test --verbose
-
-  build-neural-feature:
-    name: Build (Feature: Neural)
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-
-    # We skip actual Torch installation to keep CI fast/free.
-    # We just want to ensure the feature flag logic is valid.
-    # Note: This might fail if tch-sys tries to download LibTorch and times out or hits limits.
-    # Ideally, we would cache LibTorch or use a docker image.
-    # For a portfolio, just checking the default build is often sufficient, 
-    # but let's try a "dry run" check if possible.
-    
-    - name: Check Neural Feature Compilation
-      # We use 'cargo check' which is faster and validates types without full linking
-      # We skip running it if it requires downloading 500MB+ libtorch
-      # So we'll leave this commented out or minimal for now.
-      run: echo "Skipping heavy neural build in CI for now to save runner time."
