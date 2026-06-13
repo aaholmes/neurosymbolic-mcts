@@ -1,11 +1,11 @@
 # Testing Guide for Caissawary
 
-~830 tests (660 Rust + 175 Python) covering the engine, search, and training pipeline.
+~1,350 tests (829 Rust + 314 CUDA + 203 Python) covering the engine, search, GPU kernels, and training pipeline. The fast `cargo test` suite runs ~750 of the Rust tests in ~50s.
 
 ## Quick Start
 
 ```bash
-cargo test                                        # Fast Rust tests (~50s, ~660 tests)
+cargo test                                        # Fast Rust tests (~50s, ~750 tests)
 cargo test --features slow-tests                  # Full suite including perft (~200s)
 cd python && python -m pytest test_*.py -v        # Python pipeline tests (~175 tests)
 ./scripts/test.sh                                 # Scripted run (unit → integration → property)
