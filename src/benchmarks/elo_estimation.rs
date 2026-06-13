@@ -48,7 +48,7 @@ impl EloCalculator {
         for result in results {
             engine_results
                 .entry(result.engine)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(result);
         }
 

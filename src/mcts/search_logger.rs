@@ -16,24 +16,19 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 /// Verbosity level for the search logger
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Verbosity {
     /// No output
     Silent = 0,
     /// Only tier overrides and final results
     Minimal = 1,
     /// Selection decisions and evaluations
+    #[default]
     Normal = 2,
     /// Full trace including backpropagation
     Verbose = 3,
     /// Debug-level with internal state dumps
     Debug = 4,
-}
-
-impl Default for Verbosity {
-    fn default() -> Self {
-        Verbosity::Normal
-    }
 }
 
 /// Output destination for log messages
@@ -614,7 +609,7 @@ impl SearchLogger {
             _ => 10,
         };
 
-        if iteration % interval != 0 {
+        if !iteration.is_multiple_of(interval) {
             return;
         }
 

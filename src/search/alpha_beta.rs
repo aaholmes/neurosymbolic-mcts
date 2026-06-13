@@ -83,7 +83,9 @@ use std::time::{Duration, Instant};
 /// Perform alpha-beta search from the given position
 ///
 /// This function performs an exhaustive search to the given depth, using alpha-beta pruning
-/// to optimize the search process. Includes NMP, Killers, History Heuristic, LMR.
+/// to optimize the search process. Includes check extensions, history-heuristic move
+/// ordering, and a transposition table. (Null-move pruning, killer moves, and LMR are
+/// not yet implemented.)
 ///
 /// # Arguments
 ///
@@ -149,11 +151,8 @@ pub fn alpha_beta_search(
     }
 
     // Generate and combine captures and regular moves
-    let (mut captures, moves) = move_gen.gen_pseudo_legal_moves_with_evals(
-        &mut board.current_state(),
-        pesto,
-        Some(history),
-    );
+    let (mut captures, moves) =
+        move_gen.gen_pseudo_legal_moves_with_evals(board.current_state(), pesto, Some(history));
     captures.extend(moves);
 
     // Print the list of captures
@@ -228,7 +227,7 @@ pub fn alpha_beta_search(
         // Prune if necessary
         if alpha >= beta {
             // Update history table for the cutoff move
-            if !is_capture(&board.current_state(), &best_move) {
+            if !is_capture(board.current_state(), &best_move) {
                 history.update(&best_move, depth);
             }
             break;
@@ -301,11 +300,8 @@ fn alpha_beta_recursive(
     let mut n: i32 = 1; // Count current node
 
     // Generate and combine captures and regular moves
-    let (mut captures, moves) = move_gen.gen_pseudo_legal_moves_with_evals(
-        &mut board.current_state(),
-        pesto,
-        Some(history),
-    );
+    let (mut captures, moves) =
+        move_gen.gen_pseudo_legal_moves_with_evals(board.current_state(), pesto, Some(history));
     captures.extend(moves);
 
     // Iterate through all moves
@@ -357,7 +353,7 @@ fn alpha_beta_recursive(
             alpha = eval;
             if alpha >= beta {
                 // Update history table for the cutoff move
-                if !is_capture(&board.current_state(), &m) {
+                if !is_capture(board.current_state(), &m) {
                     history.update(&m, depth);
                 }
                 board.undo_move();

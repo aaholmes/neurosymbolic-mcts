@@ -67,8 +67,9 @@ pub struct MctsNode {
     pub total_value_squared: f64,
 
     // --- Evaluation / Mate Status ---
-    /// Stores the exact value if determined by terminal state check or mate search (1.0 for White Win, -1.0 for White Loss).
-    /// Also used as a flag to indicate if mate search has been performed. None = not checked, Some(-999.0) = checked, no mate.
+    /// Exact value when the node is terminal or resolved by mate search
+    /// (+1.0 STM win, -1.0 STM loss, 0.0 draw). `None` means not yet resolved;
+    /// any `Some(_)` value is exact and lies in [-1, 1].
     pub terminal_or_mate_value: Option<f64>,
     /// Distance (in STM moves) to the forced result: KOTH-in-N or mate-in-N.
     /// Used for tie-breaking when all moves are forced losses (prefer longest distance).

@@ -201,11 +201,7 @@ impl Move {
         // Check if moving diagonally (file difference of 1)
         let from_file = self.from % 8;
         let to_file = self.to % 8;
-        let file_diff = if from_file > to_file {
-            from_file - to_file
-        } else {
-            to_file - from_file
-        };
+        let file_diff = from_file.abs_diff(to_file);
 
         if file_diff != 1 {
             return false;

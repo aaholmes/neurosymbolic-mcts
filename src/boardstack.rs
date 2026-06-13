@@ -21,6 +21,12 @@ pub struct BoardStack {
     move_stack: VecDeque<Move>,
 }
 
+impl Default for BoardStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BoardStack {
     /// Create a new boardstack
     pub fn new() -> Self {
@@ -66,7 +72,7 @@ impl BoardStack {
 
     /// Return the current state by peeking at the board stack
     pub fn current_state(&self) -> &Board {
-        &self.state_stack.front().unwrap()
+        self.state_stack.front().unwrap()
     }
 
     /// Applies a move to the boardstack

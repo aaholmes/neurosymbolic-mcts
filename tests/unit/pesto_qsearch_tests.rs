@@ -69,7 +69,10 @@ fn test_pst_eval_cp_stm_perspective() {
 
     // White has a queen, so from white's perspective it's positive,
     // from black's perspective it's negative
-    assert!(score_w > 0, "White with queen should be positive: {score_w}");
+    assert!(
+        score_w > 0,
+        "White with queen should be positive: {score_w}"
+    );
     assert!(
         score_b < 0,
         "Black facing queen should be negative: {score_b}"
@@ -177,10 +180,7 @@ fn test_classical_fallback_texel_calibration() {
 
     // q=0: draw → tanh(0) = 0.0
     let v0 = (k * 0.0).tanh();
-    assert!(
-        v0.abs() < 0.001,
-        "q=0 should give ~0.0 value, got {v0}"
-    );
+    assert!(v0.abs() < 0.001, "q=0 should give ~0.0 value, got {v0}");
 
     // q=1 (1 pawn up): slight advantage
     let v1 = (k * 1.0).tanh();
@@ -205,8 +205,5 @@ fn test_classical_fallback_texel_calibration() {
 
     // q=9 (queen up): near-winning
     let v9 = (k * 9.0).tanh();
-    assert!(
-        v9 > 0.95,
-        "q=9 should give near-winning value, got {v9}"
-    );
+    assert!(v9 > 0.95, "q=9 should give near-winning value, got {v9}");
 }

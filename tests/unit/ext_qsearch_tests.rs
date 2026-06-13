@@ -4,13 +4,13 @@
 use kingfisher::board::Board;
 use kingfisher::boardstack::BoardStack;
 use kingfisher::eval::PestoEval;
-use kingfisher::move_generation::MoveGen;
 use kingfisher::mcts::QSearchVariant;
+use kingfisher::move_generation::MoveGen;
 use kingfisher::search::quiescence::{
     cap1_pesto_qsearch, ext_pesto_qsearch_counted, forced_cap1_pesto_balance,
-    forced_ext_pesto_balance, forced_ext_pesto_balance_counted,
-    forced_material_balance_counted, forced_pesto_balance, forced_pesto_balance_counted,
-    forced_principal_exchange, pesto_qsearch_counted, principal_exchange,
+    forced_ext_pesto_balance, forced_ext_pesto_balance_counted, forced_material_balance_counted,
+    forced_pesto_balance, forced_pesto_balance_counted, forced_principal_exchange,
+    pesto_qsearch_counted, principal_exchange,
 };
 
 fn setup() -> (MoveGen, PestoEval) {
@@ -124,16 +124,9 @@ fn test_ext_budget_exhaustion_no_extra_tactics() {
 
     let mut stack = BoardStack::with_board(board.clone());
     let (exhausted_score, _, _, _) = ext_pesto_qsearch_counted(
-        &mut stack,
-        &move_gen,
-        &pesto,
-        -100_000,
-        100_000,
-        20,
-        true,  // white budget used
+        &mut stack, &move_gen, &pesto, -100_000, 100_000, 20, true,  // white budget used
         false, // black budget available
-        false,
-        false,
+        false, false,
     );
 
     let mut stack2 = BoardStack::with_board(board);
@@ -194,9 +187,9 @@ fn test_ext_null_move_runs_without_crash() {
     let (move_gen, pesto) = setup();
     // Various positions — just verify null-move doesn't crash or loop
     for fen in &[
-        "4k3/8/2p5/1B1p4/4N3/8/8/4K3 w - - 0 1",  // pieces under pawn attack
+        "4k3/8/2p5/1B1p4/4N3/8/8/4K3 w - - 0 1", // pieces under pawn attack
         "r1bqkbnr/pppppppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3", // normal position
-        "8/8/8/8/8/8/k7/K7 w - - 0 1",  // bare kings
+        "8/8/8/8/8/8/k7/K7 w - - 0 1",           // bare kings
     ] {
         let board = Board::new_from_fen(fen);
         let mut stack = BoardStack::with_board(board);
@@ -215,7 +208,8 @@ fn test_ext_null_move_runs_without_crash() {
 fn test_ext_null_move_detects_fork_threat() {
     let (move_gen, pesto) = setup();
     // Position after 1.e4 e5 2.Nc3 Nf6 3.Bc4 Nxe4 4.Nxe4 — Black can play d5 forking
-    let board = Board::new_from_fen("rnbqkb1r/pppp1ppp/8/4p3/2B1N3/8/PPPP1PPP/R1BQK1NR b KQkq - 0 4");
+    let board =
+        Board::new_from_fen("rnbqkb1r/pppp1ppp/8/4p3/2B1N3/8/PPPP1PPP/R1BQK1NR b KQkq - 0 4");
 
     let mut stack = BoardStack::with_board(board.clone());
     let (ext_score, _, ext_nodes, _) = ext_pesto_qsearch_counted(
@@ -232,7 +226,9 @@ fn test_ext_null_move_detects_fork_threat() {
         ext_score > orig_score,
         "Fork+null-move should improve Black's score: ext={ext_score}, orig={orig_score}"
     );
-    println!("Fork threat: ext={ext_score} ({ext_nodes} nodes), orig={orig_score} ({orig_nodes} nodes)");
+    println!(
+        "Fork threat: ext={ext_score} ({ext_nodes} nodes), orig={orig_score} ({orig_nodes} nodes)"
+    );
 }
 
 // ======== Test 9: Regression — existing positions same or better ========
@@ -371,7 +367,8 @@ fn test_cap1_check_wins_material() {
     // Nc7+ checks king and forks rook on a8; after king moves, Nxa8
     let board = Board::new_from_fen("r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1");
     let mut stack_cap1 = BoardStack::with_board(board.clone());
-    let (cap1_score, _, cap1_nodes, _) = forced_cap1_pesto_balance(&mut stack_cap1, &move_gen, &pesto);
+    let (cap1_score, _, cap1_nodes, _) =
+        forced_cap1_pesto_balance(&mut stack_cap1, &move_gen, &pesto);
 
     let mut stack_pe = BoardStack::with_board(board);
     let (pe_score, pe_nodes) = forced_principal_exchange(&mut stack_pe, &move_gen, &pesto);
@@ -415,13 +412,28 @@ fn test_cap1_vs_principal_exchange_comparison() {
     let (move_gen, pesto) = setup();
 
     let positions = vec![
-        ("Start", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
-        ("Fork trick", "rnbqkb1r/pppp1ppp/8/4p3/2B1N3/8/PPPP1PPP/R1BQK1NR b KQkq - 0 4"),
-        ("R5 Nxb4", "r1b2rk1/pp2nppp/2pBp3/q7/1nP4P/5BN1/P4P2/R2QK2R w KQ - 0 15"),
-        ("Quiet mid", "r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 b - - 5 7"),
+        (
+            "Start",
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        ),
+        (
+            "Fork trick",
+            "rnbqkb1r/pppp1ppp/8/4p3/2B1N3/8/PPPP1PPP/R1BQK1NR b KQkq - 0 4",
+        ),
+        (
+            "R5 Nxb4",
+            "r1b2rk1/pp2nppp/2pBp3/q7/1nP4P/5BN1/P4P2/R2QK2R w KQ - 0 15",
+        ),
+        (
+            "Quiet mid",
+            "r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 b - - 5 7",
+        ),
     ];
 
-    println!("\n{:<15} {:>8} {:>8} {:>10} {:>10}", "Position", "PE score", "PE nodes", "Cap1 score", "Cap1 nodes");
+    println!(
+        "\n{:<15} {:>8} {:>8} {:>10} {:>10}",
+        "Position", "PE score", "PE nodes", "Cap1 score", "Cap1 nodes"
+    );
     println!("{}", "-".repeat(55));
     for (name, fen) in &positions {
         let board = Board::new_from_fen(fen);
@@ -432,7 +444,10 @@ fn test_cap1_vs_principal_exchange_comparison() {
         let mut s2 = BoardStack::with_board(board);
         let (c1_s, _, c1_n, _) = forced_cap1_pesto_balance(&mut s2, &move_gen, &pesto);
 
-        println!("{:<15} {:>+8.2} {:>8} {:>+10.2} {:>10}", name, pe_s, pe_n, c1_s, c1_n);
+        println!(
+            "{:<15} {:>+8.2} {:>8} {:>+10.2} {:>10}",
+            name, pe_s, pe_n, c1_s, c1_n
+        );
     }
 }
 
@@ -455,8 +470,7 @@ fn test_forced_pesto_balance_counted_returns_stats() {
 fn test_forced_material_balance_counted_returns_stats() {
     let (move_gen, _pesto) = setup();
     let mut stack = BoardStack::new();
-    let (score, completed, nodes, depth) =
-        forced_material_balance_counted(&mut stack, &move_gen);
+    let (score, completed, nodes, depth) = forced_material_balance_counted(&mut stack, &move_gen);
 
     assert_eq!(score, 0, "Starting material should be 0");
     assert!(completed);
@@ -483,25 +497,44 @@ fn test_forced_pesto_balance_counted_captures_position() {
 
 #[test]
 fn test_qsearch_variant_from_str() {
-    assert_eq!(QSearchVariant::from_str("pe"), Some(QSearchVariant::PrincipalExchange));
-    assert_eq!(QSearchVariant::from_str("principal-exchange"), Some(QSearchVariant::PrincipalExchange));
+    assert_eq!(
+        QSearchVariant::from_str("pe"),
+        Some(QSearchVariant::PrincipalExchange)
+    );
+    assert_eq!(
+        QSearchVariant::from_str("principal-exchange"),
+        Some(QSearchVariant::PrincipalExchange)
+    );
     assert_eq!(QSearchVariant::from_str("cap1"), Some(QSearchVariant::Cap1));
-    assert_eq!(QSearchVariant::from_str("extended"), Some(QSearchVariant::Extended));
-    assert_eq!(QSearchVariant::from_str("ext"), Some(QSearchVariant::Extended));
+    assert_eq!(
+        QSearchVariant::from_str("extended"),
+        Some(QSearchVariant::Extended)
+    );
+    assert_eq!(
+        QSearchVariant::from_str("ext"),
+        Some(QSearchVariant::Extended)
+    );
     assert_eq!(QSearchVariant::from_str("invalid"), None);
     assert_eq!(QSearchVariant::from_str(""), None);
 }
 
 #[test]
 fn test_qsearch_variant_name() {
-    assert_eq!(QSearchVariant::PrincipalExchange.name(), "principal-exchange");
+    assert_eq!(
+        QSearchVariant::PrincipalExchange.name(),
+        "principal-exchange"
+    );
     assert_eq!(QSearchVariant::Cap1.name(), "cap1");
     assert_eq!(QSearchVariant::Extended.name(), "extended");
 }
 
 #[test]
 fn test_qsearch_variant_round_trip() {
-    for variant in &[QSearchVariant::PrincipalExchange, QSearchVariant::Cap1, QSearchVariant::Extended] {
+    for variant in &[
+        QSearchVariant::PrincipalExchange,
+        QSearchVariant::Cap1,
+        QSearchVariant::Extended,
+    ] {
         let name = variant.name();
         let parsed = QSearchVariant::from_str(name);
         assert_eq!(parsed, Some(*variant), "Round-trip failed for {name}");

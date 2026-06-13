@@ -57,7 +57,7 @@ fn main() {
         "🎯 Starting optimization ({} iterations)...",
         max_iterations
     );
-    let optimized_weights = tuner.tune(&move_gen, max_iterations);
+    let _optimized_weights = tuner.tune(&move_gen, max_iterations);
 
     // Print results
     println!("\n📊 Optimization Results");

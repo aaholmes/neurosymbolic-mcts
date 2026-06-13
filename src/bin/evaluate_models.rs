@@ -6,6 +6,7 @@
 //! Usage: evaluate_models <candidate.pt> <current.pt> <num_games> <simulations> [--threshold 0.55]
 
 use kingfisher::boardstack::BoardStack;
+use kingfisher::eval::PestoEval;
 use kingfisher::mcts::sprt::{SprtConfig, SprtResult, SprtState};
 use kingfisher::mcts::{
     tactical_mcts_search_with_tt, InferenceServer, MctsNode, QSearchVariant, TacticalMctsConfig,
@@ -13,8 +14,9 @@ use kingfisher::mcts::{
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::neural_net::NeuralNetPolicy;
-use kingfisher::eval::PestoEval;
-use kingfisher::search::quiescence::{forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange};
+use kingfisher::search::quiescence::{
+    forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange,
+};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
 use kingfisher::transposition::TranspositionTable;
@@ -23,8 +25,8 @@ use rand::Rng;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -340,11 +342,13 @@ pub fn play_evaluation_game_with_servers(
                 let pesto = PestoEval::new();
                 let (q_result, qsearch_completed) = match qsearch_variant {
                     QSearchVariant::PrincipalExchange => {
-                        let (s, _nodes) = forced_principal_exchange(&mut temp_stack, &move_gen, &pesto);
+                        let (s, _nodes) =
+                            forced_principal_exchange(&mut temp_stack, &move_gen, &pesto);
                         (s, true)
                     }
                     QSearchVariant::Cap1 => {
-                        let (s, completed, _nodes, _depth) = forced_cap1_pesto_balance(&mut temp_stack, &move_gen, &pesto);
+                        let (s, completed, _nodes, _depth) =
+                            forced_cap1_pesto_balance(&mut temp_stack, &move_gen, &pesto);
                         (s, completed)
                     }
                     QSearchVariant::Extended => {
@@ -749,7 +753,11 @@ pub fn evaluate_models_koth_sprt(
             GameResult::CurrentWin => state.losses += 1,
             GameResult::Draw => state.draws += 1,
         }
-        *reason_counts.lock().unwrap().entry(game_data.reason).or_insert(0) += 1;
+        *reason_counts
+            .lock()
+            .unwrap()
+            .entry(game_data.reason)
+            .or_insert(0) += 1;
 
         let mut completed = games_completed.lock().unwrap();
         *completed += 1;

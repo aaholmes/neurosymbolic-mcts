@@ -91,7 +91,14 @@ pub fn mate_search(
 
             let next_board = board.apply_move_to_board(*m);
 
-            if solve_mate(&next_board, move_gen, depth - 1, false, checks_only, &mut nodes) {
+            if solve_mate(
+                &next_board,
+                move_gen,
+                depth - 1,
+                false,
+                checks_only,
+                &mut nodes,
+            ) {
                 return (1_000_000 + depth, *m, nodes);
             }
         }

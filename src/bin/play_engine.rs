@@ -64,7 +64,10 @@ fn main() {
     } else {
         println!("Model: none (classical fallback)");
     }
-    println!("You play: {}", if human_is_white { "White" } else { "Black" });
+    println!(
+        "You play: {}",
+        if human_is_white { "White" } else { "Black" }
+    );
     println!();
     println!("Commands: quit, undo, fen, moves, help");
     println!();
@@ -94,11 +97,7 @@ fn main() {
 
         // Print board
         println!();
-        println!(
-            "--- Move {} | {} to move ---",
-            ply / 2 + 1,
-            side
-        );
+        println!("--- Move {} | {} to move ---", ply / 2 + 1, side);
         board.print();
 
         // Check termination
@@ -167,10 +166,7 @@ fn main() {
                         break;
                     }
                     "fen" => {
-                        println!(
-                            "{}",
-                            board.to_fen().unwrap_or_else(|| "???".to_string())
-                        );
+                        println!("{}", board.to_fen().unwrap_or_else(|| "???".to_string()));
                         continue;
                     }
                     "moves" => {
@@ -200,7 +196,10 @@ fn main() {
                         println!("Illegal move. Type 'moves' to see legal moves.");
                     }
                     None => {
-                        println!("Could not parse '{}'. Use UCI notation (e.g. e2e4).", trimmed);
+                        println!(
+                            "Could not parse '{}'. Use UCI notation (e.g. e2e4).",
+                            trimmed
+                        );
                     }
                 }
             }
@@ -222,8 +221,7 @@ fn main() {
                 ..Default::default()
             };
 
-            let (best_move, _stats, root) =
-                tactical_mcts_search(board.clone(), &move_gen, config);
+            let (best_move, _stats, root) = tactical_mcts_search(board.clone(), &move_gen, config);
 
             // Print thinking summary
             let root_ref = root.borrow();

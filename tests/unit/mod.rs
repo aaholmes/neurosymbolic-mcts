@@ -6,10 +6,10 @@ mod board_tests;
 mod board_utils_tests;
 mod boardstack_tests;
 mod eval_tests;
-mod ext_qsearch_tests;
 mod evaluate_models_tests;
 mod experiment_config_tests;
 mod experiment_metrics_tests;
+mod ext_qsearch_tests;
 mod gives_check_tests;
 mod graphviz_tests;
 mod hash_tests;
@@ -51,4 +51,3 @@ mod value_target_tests;
 mod common {
     include!("../common/mod.rs");
 }
-

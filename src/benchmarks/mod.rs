@@ -85,14 +85,14 @@ pub fn create_simple_agent() -> SimpleAgent<'static> {
         8,     // ab_search_depth
         16,    // q_search_max_depth
         false, // verbose
-        &*BENCH_MOVE_GEN,
-        &*BENCH_PESTO_EVAL,
+        &BENCH_MOVE_GEN,
+        &BENCH_PESTO_EVAL,
     )
 }
 
 pub fn create_humanlike_agent() -> HumanlikeAgent<'static> {
     HumanlikeAgent::new(
-        &*BENCH_MOVE_GEN,
+        &BENCH_MOVE_GEN,
         None, // No EGTB for benchmarking
         3,    // mate_search_depth
         1000, // mcts_iterations

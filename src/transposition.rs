@@ -29,6 +29,12 @@ pub struct TranspositionTable {
     table: HashMap<u64, TranspositionEntry>,
 }
 
+impl Default for TranspositionTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TranspositionTable {
     /// Creates a new transposition table.
     pub fn new() -> Self {
@@ -53,9 +59,7 @@ impl TranspositionTable {
         // If it exists, return a reference to the entry
         // Else, return None
         let out = self.table.get(&board.zobrist_hash);
-        if out == None {
-            return None;
-        }
+        out?;
         let entry = out.unwrap();
         if entry.depth >= depth {
             Some(entry)
@@ -96,7 +100,7 @@ impl TranspositionTable {
         // Add a position to the table
         // If the position already exists, update it if the depth is greater
         let entry = self.table.get(&board.zobrist_hash);
-        if entry == None {
+        if entry.is_none() {
             self.table.insert(
                 board.zobrist_hash,
                 TranspositionEntry {

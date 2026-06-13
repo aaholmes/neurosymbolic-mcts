@@ -172,6 +172,12 @@ pub struct MoveGen {
     r_magics: [u64; 64],
 }
 
+impl Default for MoveGen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MoveGen {
     /// Creates a new `MoveGen` instance.
     ///
@@ -361,7 +367,7 @@ impl MoveGen {
         // Sort captures by MVV-LVA
         let mut captures_with_eval: Vec<(Move, i32)> = captures
             .into_iter()
-            .map(|m| (m.clone(), self.mvv_lva(board, m.from, m.to)))
+            .map(|m| (m, self.mvv_lva(board, m.from, m.to)))
             .collect();
         captures_with_eval.sort_by(|a, b| b.1.cmp(&a.1));
         let sorted_captures = captures_with_eval.into_iter().map(|(m, _)| m).collect();
@@ -374,7 +380,7 @@ impl MoveGen {
                 let history_score = history.map_or(0, |h| h.get_score_from_squares(m.from, m.to));
                 // Get evaluation score
                 let eval_score = pesto.move_eval(board, self, m.from, m.to);
-                (m.clone(), history_score, eval_score)
+                (m, history_score, eval_score)
             })
             .collect();
 
@@ -1063,7 +1069,7 @@ impl MoveGen {
         // Pawns (check captures from the target square's perspective)
         if side_idx == 0 {
             // White attackers
-            if sq > 8 && sq % 8 != 0 {
+            if sq > 8 && !sq.is_multiple_of(8) {
                 // Can be attacked from sq - 9 (black pawn on sq-9 attacks sq)
                 attackers |= board.pieces[side_idx][PAWN] & sq_ind_to_bit(sq - 9);
             }
@@ -1073,7 +1079,7 @@ impl MoveGen {
             }
         } else {
             // Black attackers
-            if sq < 55 && sq % 8 != 0 {
+            if sq < 55 && !sq.is_multiple_of(8) {
                 // Can be attacked from sq + 7 (white pawn on sq+7 attacks sq)
                 attackers |= board.pieces[side_idx][PAWN] & sq_ind_to_bit(sq + 7);
             }
@@ -1120,7 +1126,7 @@ impl MoveGen {
         let color_index = side as usize;
         for piece_type_idx in PAWN..=KING {
             // Iterate from Pawn (least valuable) to King
-            let piece_bb = board.pieces[color_index][piece_type_idx as usize];
+            let piece_bb = board.pieces[color_index][piece_type_idx];
             let intersection = attackers_bb & piece_bb;
             if intersection != 0 {
                 return intersection.trailing_zeros() as usize; // Return square of the first found attacker of this type

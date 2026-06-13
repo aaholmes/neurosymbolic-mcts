@@ -42,6 +42,12 @@ pub struct UCIEngine {
     mcts_time_limit_ms: u64,
 }
 
+impl Default for UCIEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UCIEngine {
     pub fn new() -> Self {
         // EGTB prober disabled by default - requires path configuration
@@ -74,8 +80,8 @@ impl UCIEngine {
                 0,
                 0,
                 false,
-                &*GLOBAL_MOVE_GEN,
-                &*GLOBAL_PESTO_EVAL,
+                &GLOBAL_MOVE_GEN,
+                &GLOBAL_PESTO_EVAL,
             )), // Temporary dummy
             mate_search_depth,
             ab_search_depth,
@@ -97,9 +103,9 @@ impl UCIEngine {
                 self.mate_search_depth,
                 self.ab_search_depth,
                 self.q_search_max_depth,
-                false,               // verbose - could be another UCI option
-                &*GLOBAL_MOVE_GEN,   // Use static instance
-                &*GLOBAL_PESTO_EVAL, // Use static instance
+                false,              // verbose - could be another UCI option
+                &GLOBAL_MOVE_GEN,   // Use static instance
+                &GLOBAL_PESTO_EVAL, // Use static instance
             )),
             "Humanlike" | _ => {
                 // Default to Humanlike if type is unknown
@@ -111,7 +117,7 @@ impl UCIEngine {
                     self.agent_type = "Humanlike".to_string(); // Correct the stored type
                 }
                 Box::new(HumanlikeAgent::new(
-                    &*GLOBAL_MOVE_GEN,
+                    &GLOBAL_MOVE_GEN,
                     temp_egtb_prober,
                     self.mate_search_depth,
                     self.mcts_iterations,

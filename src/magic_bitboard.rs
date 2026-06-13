@@ -398,7 +398,7 @@ pub fn rook_attacks(sq: usize, block: u64) -> (Vec<usize>, Vec<usize>) {
         for d in 1..8 {
             let r = rk + dr[i] * d;
             let f = fl + df[i] * d;
-            if r >= 0 && r < 8 && f >= 0 && f < 8 {
+            if (0..8).contains(&r) && (0..8).contains(&f) {
                 let s = (r * 8 + f) as usize;
                 if (block & (1u64 << s)) != 0 {
                     captures.push(s);
@@ -439,7 +439,7 @@ pub fn bishop_attacks(sq: usize, block: u64) -> (Vec<usize>, Vec<usize>) {
         for d in 1..8 {
             let r = rk + dr[i] * d;
             let f = fl + df[i] * d;
-            if r >= 0 && r < 8 && f >= 0 && f < 8 {
+            if (0..8).contains(&r) && (0..8).contains(&f) {
                 let s = (r * 8 + f) as usize;
                 if (block & (1u64 << s)) != 0 {
                     captures.push(s);

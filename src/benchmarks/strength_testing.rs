@@ -179,7 +179,7 @@ impl StrengthTester {
             let time_taken = start_time.elapsed().as_millis() as u64;
 
             let correct_move = if let Some(expected_move) = position.best_move {
-                best_move.map_or(false, |mv| mv == expected_move)
+                best_move == Some(expected_move)
             } else {
                 true // No specific move required
             };
@@ -379,7 +379,7 @@ impl StrengthTester {
         for result in &results {
             engine_results
                 .entry(result.engine)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(result);
         }
 
@@ -394,7 +394,7 @@ impl StrengthTester {
 
         // Generate Elo estimates
         use crate::benchmarks::elo_estimation::EloCalculator;
-        let elo_calculator = EloCalculator::default();
+        let elo_calculator = EloCalculator;
         let elo_estimates = elo_calculator.estimate_performance_ratings(&results);
         let elo_report = elo_calculator.generate_elo_report(&elo_estimates);
 

@@ -171,7 +171,7 @@ fn select_ucb_with_policy(
     let mut best_child = None;
     let mut best_ucb = f64::NEG_INFINITY;
     let mut best_details = (0.0, 0.0, 0.0); // Q, U, Total
-    // Track least-bad losing child (for fallback when all moves are forced losses)
+                                            // Track least-bad losing child (for fallback when all moves are forced losses)
     let mut best_losing_child: Option<Rc<RefCell<MctsNode>>> = None;
     let mut best_losing_dist: u8 = 0;
 
@@ -181,7 +181,7 @@ fn select_ucb_with_policy(
         // Skip proven losses — child's STM wins means parent loses.
         // Among skipped children, track the one with the highest terminal_distance
         // (opponent takes longest to win) for fallback when ALL moves are forced losses.
-        if child_ref.terminal_or_mate_value.map_or(false, |v| v > 0.0) {
+        if child_ref.terminal_or_mate_value.is_some_and(|v| v > 0.0) {
             let dist = child_ref.terminal_distance.unwrap_or(0);
             if best_losing_child.is_none() || dist > best_losing_dist {
                 best_losing_dist = dist;
@@ -217,9 +217,9 @@ fn select_ucb_with_policy(
             } else {
                 child_ref.total_value / child_ref.visits as f64
             };
-            let u = config.exploration_constant * prior_prob
-                * (parent_visits as f64).max(1.0).sqrt()
-                / (1.0 + child_ref.visits as f64);
+            let u =
+                config.exploration_constant * prior_prob * (parent_visits as f64).max(1.0).sqrt()
+                    / (1.0 + child_ref.visits as f64);
             best_details = (q, u, ucb_value);
         }
     }

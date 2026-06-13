@@ -410,7 +410,8 @@ fn test_gives_check_agrees_with_is_check() {
             let is_check_result = new_board.is_check(&move_gen);
 
             assert_eq!(
-                gives_check_result, is_check_result,
+                gives_check_result,
+                is_check_result,
                 "gives_check disagrees with is_check for move {} in FEN: {} \
                  (gives_check={}, is_check={})",
                 m.to_uci(),
@@ -428,14 +429,21 @@ fn test_gives_check_agrees_with_is_check() {
 fn test_mate_search_gives_check_filter_correctness() {
     // Positions where checks-only search should find mates
     let mate_positions = [
-        ("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 2, true),  // Re8# (checking)
-        ("4r1k1/8/8/8/8/8/5PPP/6K1 b - - 0 1", 2, true),  // Re1# (checking)
-        ("r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4", 3, true), // Qxf7#
+        ("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 2, true), // Re8# (checking)
+        ("4r1k1/8/8/8/8/8/5PPP/6K1 b - - 0 1", 2, true), // Re1# (checking)
+        (
+            "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+            3,
+            true,
+        ), // Qxf7#
     ];
 
     // Positions where no mate should be found
     let no_mate_positions = [
-        ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 3),
+        (
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            3,
+        ),
         ("k7/1R6/K7/8/8/8/8/8 b - - 0 1", 2), // Stalemate
     ];
 
@@ -444,9 +452,15 @@ fn test_mate_search_gives_check_filter_correctness() {
         assert!(
             score >= 1_000_000,
             "Should find mate in FEN: {}, got score {}",
-            fen, score
+            fen,
+            score
         );
-        assert_ne!(best_move, Move::null(), "Should have a best move for {}", fen);
+        assert_ne!(
+            best_move,
+            Move::null(),
+            "Should have a best move for {}",
+            fen
+        );
     }
 
     for (fen, depth) in &no_mate_positions {
@@ -454,7 +468,8 @@ fn test_mate_search_gives_check_filter_correctness() {
         assert!(
             score.abs() < 1_000_000,
             "Should NOT find mate in FEN: {}, got score {}",
-            fen, score
+            fen,
+            score
         );
     }
 }
@@ -473,7 +488,8 @@ fn test_node_counts_reported_correctly() {
     assert!(
         nodes_d2 >= nodes_d1,
         "Deeper search should have >= nodes: d1={}, d2={}",
-        nodes_d1, nodes_d2
+        nodes_d1,
+        nodes_d2
     );
 }
 
@@ -483,16 +499,31 @@ fn test_equivalence_across_positions() {
     let test_cases: Vec<(&str, i32, bool, Option<usize>)> = vec![
         // (fen, depth, expect_mate, expected_to_square)
         // Mate-in-1 positions
-        ("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 2, true, Some(60)),    // Re8#
-        ("4r1k1/8/8/8/8/8/5PPP/6K1 b - - 0 1", 2, true, Some(4)),     // Re1#
-        ("r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4", 3, true, Some(53)), // Qxf7#
+        ("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 2, true, Some(60)), // Re8#
+        ("4r1k1/8/8/8/8/8/5PPP/6K1 b - - 0 1", 2, true, Some(4)),  // Re1#
+        (
+            "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+            3,
+            true,
+            Some(53),
+        ), // Qxf7#
         // Quiet mate-in-2
-        ("7k/R7/5K2/8/8/8/8/8 w - - 0 1", 3, true, None),             // Kg6 then Ra8#
-        ("7k/8/5K2/R7/8/8/8/8 w - - 0 1", 3, true, None),             // Similar pattern
+        ("7k/R7/5K2/8/8/8/8/8 w - - 0 1", 3, true, None), // Kg6 then Ra8#
+        ("7k/8/5K2/R7/8/8/8/8 w - - 0 1", 3, true, None), // Similar pattern
         // No mate positions
-        ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 3, false, None),
-        ("k7/1R6/K7/8/8/8/8/8 b - - 0 1", 2, false, None),            // Stalemate
-        ("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4", 1, false, None),
+        (
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            3,
+            false,
+            None,
+        ),
+        ("k7/1R6/K7/8/8/8/8/8 b - - 0 1", 2, false, None), // Stalemate
+        (
+            "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+            1,
+            false,
+            None,
+        ),
     ];
 
     let move_gen = MoveGen::new();
@@ -504,24 +535,26 @@ fn test_equivalence_across_positions() {
             assert!(
                 score >= 1_000_000,
                 "Expected mate for FEN: {}, got score {}",
-                fen, score
+                fen,
+                score
             );
             assert_ne!(best_move, Move::null(), "Expected move for FEN: {}", fen);
             if let Some(to) = expected_to {
-                assert_eq!(
-                    best_move.to, *to,
-                    "Wrong target square for FEN: {}",
-                    fen
-                );
+                assert_eq!(best_move.to, *to, "Wrong target square for FEN: {}", fen);
             }
         } else {
             assert!(
                 score.abs() < 1_000_000,
                 "Expected no mate for FEN: {}, got score {}",
-                fen, score
+                fen,
+                score
             );
         }
-        assert!(nodes >= 0, "Node count should be non-negative for FEN: {}", fen);
+        assert!(
+            nodes >= 0,
+            "Node count should be non-negative for FEN: {}",
+            fen
+        );
     }
 }
 
@@ -662,10 +695,7 @@ fn test_non_slider_single_check_evaded_by_rook() {
     // White Ne4 plays Nf6+ checking Kg8. Black Rd6 can capture: Rd6xNf6.
     let fen = "6k1/5ppp/3r4/8/4N3/8/8/4K3 w - - 0 1";
     let (score, _, _) = run_mate_search(fen, 2);
-    assert!(
-        score < 1_000_000,
-        "Rook captures knight checker, not mate"
-    );
+    assert!(score < 1_000_000, "Rook captures knight checker, not mate");
 }
 
 #[test]

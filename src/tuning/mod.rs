@@ -50,14 +50,13 @@ fn calculate_game_phase(board: &Board) -> f64 {
         total_material += board.get_piece_bitboard(color, ROOK).count_ones() * 5;
         total_material += board.get_piece_bitboard(color, BISHOP).count_ones() * 3;
         total_material += board.get_piece_bitboard(color, KNIGHT).count_ones() * 3;
-        total_material += board.get_piece_bitboard(color, PAWN).count_ones() * 1;
+        total_material += board.get_piece_bitboard(color, PAWN).count_ones();
     }
 
     // Starting position has ~78 points of material (2*Q + 4*R + 4*B + 4*N + 16*P = 2*9 + 4*5 + 4*3 + 4*3 + 16*1 = 78)
     let max_material = 78.0;
-    let phase = (total_material as f64 / max_material).min(1.0);
 
-    phase
+    (total_material as f64 / max_material).min(1.0)
 }
 
 #[cfg(test)]

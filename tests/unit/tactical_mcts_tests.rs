@@ -1308,8 +1308,7 @@ fn test_timing_stats_populated() {
 fn test_timing_stats_koth_populated() {
     let move_gen = MoveGen::new();
     // KOTH position where center-in-3 fires for child nodes
-    let board =
-        Board::new_from_fen("r1b4r/ppp1k2p/n3pq1n/5pp1/8/1PP1K3/P3PPPP/RNQ2BNR w - - 0 11");
+    let board = Board::new_from_fen("r1b4r/ppp1k2p/n3pq1n/5pp1/8/1PP1K3/P3PPPP/RNQ2BNR w - - 0 11");
 
     let config = TacticalMctsConfig {
         max_iterations: 100,
@@ -1343,7 +1342,11 @@ fn test_timing_accumulator_merge() {
 
     assert_eq!(acc1.count, 3);
     // Mean of [100, 200, 300] = 200
-    assert!((acc1.mean_us() - 200.0).abs() < 1.0, "Mean after merge should be ~200, got {}", acc1.mean_us());
+    assert!(
+        (acc1.mean_us() - 200.0).abs() < 1.0,
+        "Mean after merge should be ~200, got {}",
+        acc1.mean_us()
+    );
 }
 
 // === Edge cases ===

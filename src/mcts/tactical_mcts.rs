@@ -8,16 +8,18 @@
 
 use crate::board::Board;
 use crate::boardstack::BoardStack;
+use crate::eval::PestoEval;
 use crate::mcts::inference_server::InferenceServer;
 use crate::mcts::node::{MctsNode, NodeOrigin};
 use crate::mcts::search_logger::{GateReason, SearchLogger};
 use crate::mcts::selection::select_child_with_tactical_priority;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
-use crate::eval::PestoEval;
-use crate::search::{forced_cap1_pesto_balance, forced_ext_pesto_balance_counted, forced_principal_exchange};
 use crate::search::koth_center_in_n_counted;
 use crate::search::mate_search;
+use crate::search::{
+    forced_cap1_pesto_balance, forced_ext_pesto_balance_counted, forced_principal_exchange,
+};
 use crate::search::{koth_best_move, koth_center_in_n};
 use crate::transposition::TranspositionTable;
 use rand_distr::{Distribution, Gamma};
@@ -25,6 +27,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Material-trust scalar `k` used when no NN is available (classical fallback)
+/// and as the initial `k` before an NN result arrives. Matches the network's
+/// init: `0.47 * softplus(0) = 0.47 * ln(2) ≈ 0.326`.
+pub const CLASSICAL_K: f32 = 0.326;
 
 /// Which quiescence search variant to use for computing ΔM.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,8 +137,8 @@ impl Default for TacticalMctsConfig {
 pub struct TimingAccumulator {
     pub count: u64,
     pub total: Duration,
-    mean: f64,  // running mean in microseconds
-    m2: f64,    // running sum of squared deviations
+    mean: f64, // running mean in microseconds
+    m2: f64,   // running sum of squared deviations
 }
 
 impl TimingAccumulator {
@@ -269,33 +276,33 @@ impl TacticalMctsStats {
     pub fn to_latex(&self) -> String {
         let mut s = String::new();
         s.push_str(r"\begin{tabular}{lr}");
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(r"\toprule");
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(r"Metric & Value \\");
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(r"\midrule");
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(&format!(r"Iterations & {} \\", self.iterations));
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(&format!(r"Nodes Expanded & {} \\", self.nodes_expanded));
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(&format!(r"NN Evaluations & {} \\", self.nn_evaluations));
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(&format!(
             r"NN Saved (Tier 1) & {} \\",
             self.nn_saved_by_tier1
         ));
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(&format!(
             r"Reduction & {:.1}\% \\",
             self.nn_reduction_percentage()
         ));
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(r"\bottomrule");
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(r"\end{tabular}");
-        s.push_str("\n");
+        s.push('\n');
         s
     }
 }
@@ -471,14 +478,15 @@ pub fn tactical_mcts_search_with_tt(
             break;
         }
 
-        // Early termination on forced win/loss
-        if config.enable_koth {
+        // Early termination on forced win/loss. Driven by the Tier-1 gate
+        // (mate/KOTH), which sets terminal_or_mate_value — not KOTH alone, so
+        // proven mates short-circuit in standard chess too.
+        if config.enable_tier1_gate {
             let root_ref = root_node.borrow();
-            let has_win_in_1 = root_ref.children.iter().any(|c| {
-                c.borrow()
-                    .terminal_or_mate_value
-                    .map_or(false, |v| v < -0.5)
-            });
+            let has_win_in_1 = root_ref
+                .children
+                .iter()
+                .any(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v < -0.5));
             if has_win_in_1 {
                 drop(root_ref);
                 break;
@@ -495,16 +503,12 @@ pub fn tactical_mcts_search_with_tt(
                 }
             }
             // Early termination: all moves are forced losses
-            let all_visited = root_ref
-                .children
-                .iter()
-                .all(|c| c.borrow().visits > 0);
+            let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
             let all_losing = !root_ref.children.is_empty()
-                && root_ref.children.iter().all(|c| {
-                    c.borrow()
-                        .terminal_or_mate_value
-                        .map_or(false, |v| v > 0.0)
-                });
+                && root_ref
+                    .children
+                    .iter()
+                    .all(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v > 0.0));
             if all_visited && all_losing {
                 drop(root_ref);
                 break;
@@ -579,10 +583,10 @@ fn evaluate_leaf_node(
     let board = &node_ref.state;
 
     if let Some(cached_value) = node_ref.terminal_or_mate_value {
-        if cached_value >= -1.0 {
-            stats.nn_saved_by_tier1 += 1;
-            return cached_value;
-        }
+        // A cached terminal/mate value is always exact (in [-1, 1]); reuse it
+        // and skip the NN entirely.
+        stats.nn_saved_by_tier1 += 1;
+        return cached_value;
     }
 
     if config.enable_koth && config.enable_tier1_gate {
@@ -678,7 +682,7 @@ fn evaluate_leaf_node(
     }
 
     if node_ref.nn_value.is_none() {
-        let mut k_val: f32 = 0.326;
+        let mut k_val: f32 = CLASSICAL_K;
         let mut v_logit: f64 = f64::NEG_INFINITY; // sentinel: no NN result yet
 
         // 1. Run Q-search FIRST so completion flag is available for NN inference
@@ -687,7 +691,8 @@ fn evaluate_leaf_node(
             let mut board_stack = BoardStack::with_board(node_ref.state.clone());
             let (score, completed, nodes, depth_used) = match config.qsearch_variant {
                 QSearchVariant::PrincipalExchange => {
-                    let (s, n) = forced_principal_exchange(&mut board_stack, move_gen, &config.pesto);
+                    let (s, n) =
+                        forced_principal_exchange(&mut board_stack, move_gen, &config.pesto);
                     (s, true, n, 0u8) // PE always completes
                 }
                 QSearchVariant::Cap1 => {
@@ -715,7 +720,8 @@ fn evaluate_leaf_node(
             if let Some(server) = &config.inference_server {
                 if config.use_neural_policy {
                     let nn_start = Instant::now();
-                    let receiver = server.predict_async(node_ref.state.clone(), qsearch_completed, q_result);
+                    let receiver =
+                        server.predict_async(node_ref.state.clone(), qsearch_completed, q_result);
                     if let Ok(Some((policy, nn_v_logit, k))) = receiver.recv() {
                         v_logit = nn_v_logit as f64;
                         k_val = k;
@@ -740,10 +746,9 @@ fn evaluate_leaf_node(
                 }
                 stats.nn_evaluations += 1;
             } else {
-                // Classical fallback: v_logit = 0.0, k = 0.326, rely on material only
-                // k=0.326 matches NN init: 0.47 * softplus(0) = 0.47 * ln(2) ≈ 0.326
+                // Classical fallback: v_logit = 0.0, k = CLASSICAL_K, rely on material only
                 let classical_v_logit = 0.0;
-                let classical_k: f32 = 0.326;
+                let classical_k: f32 = CLASSICAL_K;
                 let final_value = (classical_v_logit + classical_k as f64 * q_result as f64).tanh();
                 if let Some(log) = logger {
                     log.log_classical_eval((q_result * 100.0) as i32, final_value);
@@ -812,7 +817,7 @@ pub fn select_best_move_from_root(root: Rc<RefCell<MctsNode>>, move_gen: &MoveGe
         let mut best_win: Option<(Move, u8)> = None;
         for child in &root_ref.children {
             let cr = child.borrow();
-            if cr.terminal_or_mate_value.map_or(false, |v| v < -0.5) {
+            if cr.terminal_or_mate_value.is_some_and(|v| v < -0.5) {
                 let dist = cr.terminal_distance.unwrap_or(0);
                 if best_win.is_none() || dist < best_win.unwrap().1 {
                     if let Some(action) = cr.action {
@@ -842,7 +847,7 @@ pub fn select_best_move_from_root(root: Rc<RefCell<MctsNode>>, move_gen: &MoveGe
             && root_ref
                 .children
                 .iter()
-                .all(|c| c.borrow().terminal_or_mate_value.map_or(false, |v| v > 0.0));
+                .all(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v > 0.0));
         if all_losing {
             let mut best_move: Option<(Move, u8)> = None;
             for child in &root_ref.children {
@@ -936,14 +941,15 @@ pub fn tactical_mcts_search_for_training(
             log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
         }
 
-        // Early termination on forced win/loss
-        if config.enable_koth {
+        // Early termination on forced win/loss. Driven by the Tier-1 gate
+        // (mate/KOTH), which sets terminal_or_mate_value — not KOTH alone, so
+        // proven mates short-circuit in standard chess too.
+        if config.enable_tier1_gate {
             let root_ref = root_node.borrow();
-            let has_win_in_1 = root_ref.children.iter().any(|c| {
-                c.borrow()
-                    .terminal_or_mate_value
-                    .map_or(false, |v| v < -0.5)
-            });
+            let has_win_in_1 = root_ref
+                .children
+                .iter()
+                .any(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v < -0.5));
             if has_win_in_1 {
                 drop(root_ref);
                 break;
@@ -960,16 +966,12 @@ pub fn tactical_mcts_search_for_training(
                 }
             }
             // Early termination: all moves are forced losses
-            let all_visited = root_ref
-                .children
-                .iter()
-                .all(|c| c.borrow().visits > 0);
+            let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
             let all_losing = !root_ref.children.is_empty()
-                && root_ref.children.iter().all(|c| {
-                    c.borrow()
-                        .terminal_or_mate_value
-                        .map_or(false, |v| v > 0.0)
-                });
+                && root_ref
+                    .children
+                    .iter()
+                    .all(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v > 0.0));
             if all_visited && all_losing {
                 drop(root_ref);
                 break;
@@ -1082,14 +1084,15 @@ pub fn tactical_mcts_search_for_training_with_reuse(
             log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
         }
 
-        // Early termination on forced win/loss
-        if config.enable_koth {
+        // Early termination on forced win/loss. Driven by the Tier-1 gate
+        // (mate/KOTH), which sets terminal_or_mate_value — not KOTH alone, so
+        // proven mates short-circuit in standard chess too.
+        if config.enable_tier1_gate {
             let root_ref = root_node.borrow();
-            let has_win_in_1 = root_ref.children.iter().any(|c| {
-                c.borrow()
-                    .terminal_or_mate_value
-                    .map_or(false, |v| v < -0.5)
-            });
+            let has_win_in_1 = root_ref
+                .children
+                .iter()
+                .any(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v < -0.5));
             if has_win_in_1 {
                 drop(root_ref);
                 break;
@@ -1106,16 +1109,12 @@ pub fn tactical_mcts_search_for_training_with_reuse(
                 }
             }
             // Early termination: all moves are forced losses
-            let all_visited = root_ref
-                .children
-                .iter()
-                .all(|c| c.borrow().visits > 0);
+            let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
             let all_losing = !root_ref.children.is_empty()
-                && root_ref.children.iter().all(|c| {
-                    c.borrow()
-                        .terminal_or_mate_value
-                        .map_or(false, |v| v > 0.0)
-                });
+                && root_ref
+                    .children
+                    .iter()
+                    .all(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v > 0.0));
             if all_visited && all_losing {
                 drop(root_ref);
                 break;

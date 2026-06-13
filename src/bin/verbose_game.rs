@@ -116,14 +116,14 @@ fn main() {
             println!(
                 "CHECKMATE! {} wins after {} moves.",
                 winner,
-                (move_count + 1) / 2
+                move_count.div_ceil(2)
             );
             println!("Final FEN: {}", current.to_fen().unwrap_or_default());
             break;
         }
         if stalemate {
             println!("========================================");
-            println!("STALEMATE! Draw after {} moves.", (move_count + 1) / 2);
+            println!("STALEMATE! Draw after {} moves.", move_count.div_ceil(2));
             break;
         }
 
@@ -133,7 +133,7 @@ fn main() {
             println!("========================================");
             println!(
                 "KOTH WIN! White reaches the center after {} moves.",
-                (move_count + 1) / 2
+                move_count.div_ceil(2)
             );
             break;
         }
@@ -141,7 +141,7 @@ fn main() {
             println!("========================================");
             println!(
                 "KOTH WIN! Black reaches the center after {} moves.",
-                (move_count + 1) / 2
+                move_count.div_ceil(2)
             );
             break;
         }
@@ -150,13 +150,16 @@ fn main() {
             println!("========================================");
             println!(
                 "DRAW by threefold repetition after {} moves.",
-                (move_count + 1) / 2
+                move_count.div_ceil(2)
             );
             break;
         }
         if current.halfmove_clock() >= 100 {
             println!("========================================");
-            println!("DRAW by 50-move rule after {} moves.", (move_count + 1) / 2);
+            println!(
+                "DRAW by 50-move rule after {} moves.",
+                move_count.div_ceil(2)
+            );
             break;
         }
         if move_count >= max_moves as u32 {

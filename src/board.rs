@@ -26,6 +26,12 @@ pub struct Board {
 
 pub const KOTH_CENTER: u64 = 0x0000001818000000; // d4, e4, d5, e5
 
+impl Default for Board {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Board {
     pub fn new() -> Board {
         let mut board = Board {
@@ -59,8 +65,8 @@ impl Board {
         let mut black_mat = 0;
 
         for piece_type in [PAWN, KNIGHT, BISHOP, ROOK, QUEEN] {
-            white_mat += popcnt(self.pieces[WHITE][piece_type]) as i32 * piece_values[piece_type];
-            black_mat += popcnt(self.pieces[BLACK][piece_type]) as i32 * piece_values[piece_type];
+            white_mat += popcnt(self.pieces[WHITE][piece_type]) * piece_values[piece_type];
+            black_mat += popcnt(self.pieces[BLACK][piece_type]) * piece_values[piece_type];
         }
 
         if self.w_to_move {
@@ -648,8 +654,8 @@ impl Board {
         fen.push(' ');
         match self.en_passant {
             Some(sq) => {
-                let file = (sq % 8) as u8;
-                let rank = (sq / 8) as u8;
+                let file = sq % 8;
+                let rank = sq / 8;
                 fen.push((b'a' + file) as char);
                 fen.push((b'1' + rank) as char);
             }
