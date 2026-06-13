@@ -347,10 +347,7 @@ mod real {
 
         fn print_timing_row(name: &str, acc: &TimingAccumulator) {
             if acc.count == 0 {
-                println!(
-                    "{:<24} {:>10} {:>12} {:>12} {:>12}",
-                    name, 0, "-", "-", "-"
-                );
+                println!("{:<24} {:>10} {:>12} {:>12} {:>12}", name, 0, "-", "-", "-");
             } else {
                 println!(
                     "{:<24} {:>10} {:>12.1} {:>12.1} {:>12.1}",
@@ -383,6 +380,12 @@ mod stub {
         pub transfer_from_gpu_timing: TimingAccumulator,
     }
 
+    impl Default for NeuralNetPolicy {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl NeuralNetPolicy {
         pub fn new() -> Self {
             NeuralNetPolicy {
@@ -401,9 +404,7 @@ mod stub {
         pub fn is_available(&self) -> bool {
             false
         }
-        pub fn board_to_tensor(&self, _board: &Board) -> () {
-            ()
-        }
+        pub fn board_to_tensor(&self, _board: &Board) {}
         pub fn predict(
             &mut self,
             _board: &Board,

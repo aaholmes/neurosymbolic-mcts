@@ -83,7 +83,7 @@ fn run_single_config(name: &str) {
     let config = configs
         .iter()
         .find(|c| c.name == name)
-        .expect(&format!("Config '{}' not found", name));
+        .unwrap_or_else(|| panic!("Config '{}' not found", name));
 
     let test_positions = load_test_suite(&TestSuite::TacticalSuite);
     let results = run_experiment(config, &test_positions);
@@ -319,35 +319,35 @@ fn print_summary(results: &ExperimentResults) {
 fn generate_latex_table(results: &[ExperimentResults]) {
     let mut latex = String::new();
     latex.push_str(r"\begin{table}[h]");
-    latex.push_str("\n");
+    latex.push('\n');
     latex.push_str(r"\centering");
-    latex.push_str("\n");
+    latex.push('\n');
     latex.push_str(r"\caption{Ablation Study Results}");
-    latex.push_str("\n");
+    latex.push('\n');
     latex.push_str(r"\label{tab:ablation}");
-    latex.push_str("\n");
+    latex.push('\n');
     latex.push_str(r"\begin{tabular}{lrrrrrrr}");
-    latex.push_str("\n");
+    latex.push('\n');
     latex.push_str(r"\toprule");
-    latex.push_str("\n");
+    latex.push('\n');
     latex.push_str(
         "Config & Iter & Nodes & NN Reduction & T1 & T2 & NN Calls \\\\
 ",
     );
     latex.push_str(r"\midrule");
-    latex.push_str("\n");
+    latex.push('\n');
 
     for result in results {
         latex.push_str(&result.aggregated.to_latex_row());
-        latex.push_str("\n");
+        latex.push('\n');
     }
 
     latex.push_str(r"\bottomrule");
-    latex.push_str("\n");
+    latex.push('\n');
     latex.push_str(r"\end{tabular}");
-    latex.push_str("\n");
+    latex.push('\n');
     latex.push_str(r"\end{table}");
-    latex.push_str("\n");
+    latex.push('\n');
 
     fs::create_dir_all("results").ok();
     fs::write("results/ablation_table.tex", latex).unwrap();

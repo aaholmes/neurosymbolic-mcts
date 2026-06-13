@@ -5,14 +5,16 @@
 
 use kingfisher::boardstack::BoardStack;
 use kingfisher::mcts::{
-    reuse_subtree, tactical_mcts_search_for_training_with_reuse, InferenceServer,
-    QSearchVariant, TacticalMctsConfig,
+    reuse_subtree, tactical_mcts_search_for_training_with_reuse, InferenceServer, QSearchVariant,
+    TacticalMctsConfig,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::search::mate_search;
-use kingfisher::search::quiescence::{forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange};
+use kingfisher::search::quiescence::{
+    forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange,
+};
 use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
@@ -313,11 +315,13 @@ fn play_game(
         let mut temp_stack = BoardStack::with_board(board.clone());
         let (q_result, qsearch_completed) = match qsearch_variant {
             QSearchVariant::PrincipalExchange => {
-                let (s, _nodes) = forced_principal_exchange(&mut temp_stack, &move_gen, &config.pesto);
+                let (s, _nodes) =
+                    forced_principal_exchange(&mut temp_stack, &move_gen, &config.pesto);
                 (s, true)
             }
             QSearchVariant::Cap1 => {
-                let (s, completed, _nodes, _depth) = forced_cap1_pesto_balance(&mut temp_stack, &move_gen, &config.pesto);
+                let (s, completed, _nodes, _depth) =
+                    forced_cap1_pesto_balance(&mut temp_stack, &move_gen, &config.pesto);
                 (s, completed)
             }
             QSearchVariant::Extended => {
@@ -338,13 +342,12 @@ fn play_game(
 
         // Play Move — proportional-or-greedy with decaying exploration
         let move_number = (move_count / 2) + 1;
-        let explore_prob = explore_base.powi((move_number as i32) - 1);
+        let explore_prob = explore_base.powi(move_number - 1);
         let selected_move = if rng.gen::<f64>() < explore_prob {
             sample_proportional(&result.root_policy, &mut rng)
                 .unwrap_or_else(|| result.best_move.unwrap())
         } else {
-            select_greedy(&result.root_policy)
-                .unwrap_or_else(|| result.best_move.unwrap())
+            select_greedy(&result.root_policy).unwrap_or_else(|| result.best_move.unwrap())
         };
 
         if verbose {
@@ -438,7 +441,8 @@ fn play_game(
                             break;
                         }
 
-                        let (score, mv, _) = mate_search(temp_stack.current_state(), &move_gen, 5, false, 2);
+                        let (score, mv, _) =
+                            mate_search(temp_stack.current_state(), &move_gen, 5, false, 2);
                         if score >= 1_000_000 {
                             game_moves.push(mv.to_san(temp_stack.current_state(), &move_gen));
                             temp_stack.make_move(mv);

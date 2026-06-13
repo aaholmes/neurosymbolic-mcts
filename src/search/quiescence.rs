@@ -65,7 +65,7 @@ use crate::boardstack::BoardStack;
 use crate::eval::PestoEval;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
-use crate::piece_types::{BLACK, BISHOP, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+use crate::piece_types::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
 use std::time::{Duration, Instant};
 
 /// Material-only quiescence search for MCTS value function.
@@ -372,7 +372,11 @@ pub fn ext_pesto_qsearch_counted(
         let stand_pat = pesto.pst_eval_cp(board.current_state());
 
         let stm_is_white = board.current_state().w_to_move;
-        let stm_null_used = if stm_is_white { white_null_used } else { black_null_used };
+        let stm_null_used = if stm_is_white {
+            white_null_used
+        } else {
+            black_null_used
+        };
 
         // Null-move probe with "mystery square recapture" for forks.
         //
@@ -401,22 +405,37 @@ pub fn ext_pesto_qsearch_counted(
                     board.undo_move();
                     continue;
                 }
-                let (score, child_completed, child_nodes, child_depth) =
-                    ext_pesto_qsearch_counted(
-                        board, move_gen, pesto, -beta, -alpha, max_depth - 2,
-                        white_tactic_used, black_tactic_used, new_w_null, new_b_null,
-                    );
+                let (score, child_completed, child_nodes, child_depth) = ext_pesto_qsearch_counted(
+                    board,
+                    move_gen,
+                    pesto,
+                    -beta,
+                    -alpha,
+                    max_depth - 2,
+                    white_tactic_used,
+                    black_tactic_used,
+                    new_w_null,
+                    new_b_null,
+                );
                 nodes += child_nodes;
                 max_child_depth = max_child_depth.max(child_depth + 2);
-                if !child_completed { all_completed = false; }
+                if !child_completed {
+                    all_completed = false;
+                }
                 board.undo_move();
                 scored_moves.push((-score, *cap));
                 legal_cap_count += 1;
-                if legal_cap_count >= 2 { break; } // only need top 2
+                if legal_cap_count >= 2 {
+                    break;
+                } // only need top 2
             }
 
             // Also evaluate one opponent tactical quiet (check or fork) if budget allows
-            let opp_tactic_used = if stm_is_white { black_tactic_used } else { white_tactic_used };
+            let opp_tactic_used = if stm_is_white {
+                black_tactic_used
+            } else {
+                white_tactic_used
+            };
             if !opp_tactic_used {
                 let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
                 for mv in &quiets {
@@ -428,16 +447,34 @@ pub fn ext_pesto_qsearch_counted(
                         board.undo_move();
                         continue;
                     }
-                    let opp_w_used = if !stm_is_white { true } else { white_tactic_used };
-                    let opp_b_used = if stm_is_white { true } else { black_tactic_used };
+                    let opp_w_used = if !stm_is_white {
+                        true
+                    } else {
+                        white_tactic_used
+                    };
+                    let opp_b_used = if stm_is_white {
+                        true
+                    } else {
+                        black_tactic_used
+                    };
                     let (score, child_completed, child_nodes, child_depth) =
                         ext_pesto_qsearch_counted(
-                            board, move_gen, pesto, -beta, -alpha, max_depth - 2,
-                            opp_w_used, opp_b_used, new_w_null, new_b_null,
+                            board,
+                            move_gen,
+                            pesto,
+                            -beta,
+                            -alpha,
+                            max_depth - 2,
+                            opp_w_used,
+                            opp_b_used,
+                            new_w_null,
+                            new_b_null,
                         );
                     nodes += child_nodes;
                     max_child_depth = max_child_depth.max(child_depth + 2);
-                    if !child_completed { all_completed = false; }
+                    if !child_completed {
+                        all_completed = false;
+                    }
                     board.undo_move();
                     scored_moves.push((-score, *mv));
                     break; // only need one tactical quiet
@@ -553,19 +590,18 @@ pub fn ext_pesto_qsearch_counted(
                 continue;
             }
             any_legal = true;
-            let (score, child_completed, child_nodes, child_depth) =
-                ext_pesto_qsearch_counted(
-                    board,
-                    move_gen,
-                    pesto,
-                    -beta,
-                    -alpha,
-                    max_depth - 1,
-                    white_tactic_used,
-                    black_tactic_used,
-                    white_null_used,
-                    black_null_used,
-                );
+            let (score, child_completed, child_nodes, child_depth) = ext_pesto_qsearch_counted(
+                board,
+                move_gen,
+                pesto,
+                -beta,
+                -alpha,
+                max_depth - 1,
+                white_tactic_used,
+                black_tactic_used,
+                white_null_used,
+                black_null_used,
+            );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
             let score = -score;
@@ -595,20 +631,18 @@ pub fn ext_pesto_qsearch_counted(
                 board.undo_move();
                 continue;
             }
-            any_legal = true;
-            let (score, child_completed, child_nodes, child_depth) =
-                ext_pesto_qsearch_counted(
-                    board,
-                    move_gen,
-                    pesto,
-                    -beta,
-                    -alpha,
-                    max_depth - 1,
-                    white_tactic_used,
-                    black_tactic_used,
-                    white_null_used,
-                    black_null_used,
-                );
+            let (score, child_completed, child_nodes, child_depth) = ext_pesto_qsearch_counted(
+                board,
+                move_gen,
+                pesto,
+                -beta,
+                -alpha,
+                max_depth - 1,
+                white_tactic_used,
+                black_tactic_used,
+                white_null_used,
+                black_null_used,
+            );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
             let score = -score;
@@ -637,7 +671,6 @@ pub fn ext_pesto_qsearch_counted(
                     board.undo_move();
                     continue;
                 }
-                any_legal = true;
 
                 // Tactical move consumes the moving side's budget
                 let new_w_used = if stm_is_white {
@@ -651,19 +684,18 @@ pub fn ext_pesto_qsearch_counted(
                     black_tactic_used
                 };
 
-                let (score, child_completed, child_nodes, child_depth) =
-                    ext_pesto_qsearch_counted(
-                        board,
-                        move_gen,
-                        pesto,
-                        -beta,
-                        -alpha,
-                        max_depth - 1,
-                        new_w_used,
-                        new_b_used,
-                        white_null_used,
-                        black_null_used,
-                    );
+                let (score, child_completed, child_nodes, child_depth) = ext_pesto_qsearch_counted(
+                    board,
+                    move_gen,
+                    pesto,
+                    -beta,
+                    -alpha,
+                    max_depth - 1,
+                    new_w_used,
+                    new_b_used,
+                    white_null_used,
+                    black_null_used,
+                );
                 nodes += child_nodes;
                 max_child_depth = max_child_depth.max(child_depth + 1);
                 let score = -score;
@@ -694,8 +726,9 @@ pub fn forced_ext_pesto_balance(
     move_gen: &MoveGen,
     pesto: &PestoEval,
 ) -> (f32, bool) {
-    let (score_cp, completed, _nodes, _depth) =
-        ext_pesto_qsearch_counted(board, move_gen, pesto, -100_000, 100_000, 20, false, false, false, false);
+    let (score_cp, completed, _nodes, _depth) = ext_pesto_qsearch_counted(
+        board, move_gen, pesto, -100_000, 100_000, 20, false, false, false, false,
+    );
     (score_cp as f32 / 100.0, completed)
 }
 
@@ -707,8 +740,9 @@ pub fn forced_ext_pesto_balance_counted(
     move_gen: &MoveGen,
     pesto: &PestoEval,
 ) -> (f32, bool, u32, u8) {
-    let (score_cp, completed, nodes, depth) =
-        ext_pesto_qsearch_counted(board, move_gen, pesto, -100_000, 100_000, 20, false, false, false, false);
+    let (score_cp, completed, nodes, depth) = ext_pesto_qsearch_counted(
+        board, move_gen, pesto, -100_000, 100_000, 20, false, false, false, false,
+    );
     (score_cp as f32 / 100.0, completed, nodes, depth)
 }
 
@@ -746,9 +780,8 @@ pub fn principal_exchange(
             board.undo_move();
             continue;
         }
-        let (score, child_nodes) = principal_exchange(
-            board, move_gen, pesto, -beta, -alpha, max_depth - 1,
-        );
+        let (score, child_nodes) =
+            principal_exchange(board, move_gen, pesto, -beta, -alpha, max_depth - 1);
         nodes += child_nodes;
         let score = -score;
         board.undo_move();
@@ -828,20 +861,29 @@ pub fn cap1_pesto_qsearch(
                 continue;
             }
             any_legal = true;
-            let (score, child_completed, child_nodes, child_depth) =
-                cap1_pesto_qsearch(
-                    board, move_gen, pesto, -beta, -alpha, max_depth - 1,
-                    white_check_used, black_check_used,
-                );
+            let (score, child_completed, child_nodes, child_depth) = cap1_pesto_qsearch(
+                board,
+                move_gen,
+                pesto,
+                -beta,
+                -alpha,
+                max_depth - 1,
+                white_check_used,
+                black_check_used,
+            );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
             let score = -score;
-            if !child_completed { all_completed = false; }
+            if !child_completed {
+                all_completed = false;
+            }
             board.undo_move();
             if score >= beta {
                 return (beta, all_completed, nodes, max_child_depth);
             }
-            if score > alpha { alpha = score; }
+            if score > alpha {
+                alpha = score;
+            }
         }
         if !any_legal {
             return (-1_000_000, true, nodes, 0); // checkmate
@@ -859,25 +901,38 @@ pub fn cap1_pesto_qsearch(
                 continue;
             }
             best_capture_to = Some(capture.to);
-            let (score, child_completed, child_nodes, child_depth) =
-                cap1_pesto_qsearch(
-                    board, move_gen, pesto, -beta, -alpha, max_depth - 1,
-                    white_check_used, black_check_used,
-                );
+            let (score, child_completed, child_nodes, child_depth) = cap1_pesto_qsearch(
+                board,
+                move_gen,
+                pesto,
+                -beta,
+                -alpha,
+                max_depth - 1,
+                white_check_used,
+                black_check_used,
+            );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
             let score = -score;
-            if !child_completed { all_completed = false; }
+            if !child_completed {
+                all_completed = false;
+            }
             board.undo_move();
             if score >= beta {
                 return (beta, all_completed, nodes, max_child_depth);
             }
-            if score > alpha { alpha = score; }
+            if score > alpha {
+                alpha = score;
+            }
             break; // only the first legal capture
         }
 
         // 2. One checking move (if check budget not spent)
-        let stm_check_used = if stm_is_white { white_check_used } else { black_check_used };
+        let stm_check_used = if stm_is_white {
+            white_check_used
+        } else {
+            black_check_used
+        };
         if !stm_check_used {
             // Try all moves, find the first legal one that gives check
             // (that isn't the same as the capture we already tried)
@@ -885,8 +940,13 @@ pub fn cap1_pesto_qsearch(
             for mv in cap_moves.iter().chain(quiet_moves.iter()) {
                 // Skip if this is the same as the capture we already explored
                 if let Some(best_to) = best_capture_to {
-                    if mv.from == captures.iter().find(|c| c.to == best_to).map_or(usize::MAX, |c| c.from)
-                        && mv.to == best_to {
+                    if mv.from
+                        == captures
+                            .iter()
+                            .find(|c| c.to == best_to)
+                            .map_or(usize::MAX, |c| c.from)
+                        && mv.to == best_to
+                    {
                         continue;
                     }
                 }
@@ -900,21 +960,34 @@ pub fn cap1_pesto_qsearch(
                 }
                 // This side used their check budget
                 let new_w_check = if stm_is_white { true } else { white_check_used };
-                let new_b_check = if !stm_is_white { true } else { black_check_used };
-                let (score, child_completed, child_nodes, child_depth) =
-                    cap1_pesto_qsearch(
-                        board, move_gen, pesto, -beta, -alpha, max_depth - 1,
-                        new_w_check, new_b_check,
-                    );
+                let new_b_check = if !stm_is_white {
+                    true
+                } else {
+                    black_check_used
+                };
+                let (score, child_completed, child_nodes, child_depth) = cap1_pesto_qsearch(
+                    board,
+                    move_gen,
+                    pesto,
+                    -beta,
+                    -alpha,
+                    max_depth - 1,
+                    new_w_check,
+                    new_b_check,
+                );
                 nodes += child_nodes;
                 max_child_depth = max_child_depth.max(child_depth + 1);
                 let score = -score;
-                if !child_completed { all_completed = false; }
+                if !child_completed {
+                    all_completed = false;
+                }
                 board.undo_move();
                 if score >= beta {
                     return (beta, all_completed, nodes, max_child_depth);
                 }
-                if score > alpha { alpha = score; }
+                if score > alpha {
+                    alpha = score;
+                }
                 break; // only one check
             }
         }
@@ -958,12 +1031,12 @@ pub fn quiescence_search(
 
     if let (Some(start), Some(limit)) = (start_time, time_limit) {
         if start.elapsed() >= limit {
-            let stand_pat = pesto.eval(&board.current_state(), move_gen);
+            let stand_pat = pesto.eval(board.current_state(), move_gen);
             return (stand_pat, nodes);
         }
     }
 
-    let stand_pat = pesto.eval(&board.current_state(), move_gen);
+    let stand_pat = pesto.eval(board.current_state(), move_gen);
 
     if stand_pat >= beta {
         return (beta, nodes);
@@ -977,13 +1050,13 @@ pub fn quiescence_search(
         return (alpha, nodes);
     }
 
-    let captures = move_gen.gen_pseudo_legal_captures(&board.current_state());
+    let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
     if captures.is_empty() && !board.is_check(move_gen) {
         return (alpha, nodes);
     }
 
     for capture in captures {
-        if see(&board.current_state(), move_gen, capture.to, capture.from) < 0 {
+        if see(board.current_state(), move_gen, capture.to, capture.from) < 0 {
             continue;
         }
 
@@ -1028,11 +1101,11 @@ pub fn quiescence_search_tactical(
     pesto: &PestoEval,
 ) -> TacticalTree {
     let mut siblings = Vec::new();
-    let stand_pat = pesto.eval(&board.current_state(), move_gen);
+    let stand_pat = pesto.eval(board.current_state(), move_gen);
     let mut best_score = stand_pat;
     let mut best_pv = Vec::new();
 
-    let captures = move_gen.gen_pseudo_legal_captures(&board.current_state());
+    let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
 
     for capture in captures {
         board.make_move(capture);

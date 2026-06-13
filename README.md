@@ -40,9 +40,11 @@ $$V_{final} = \tanh(V_{logit} + k \cdot \Delta M)$$
 
 ## Tournament Results: Caissawary vs Vanilla MCTS
 
-An 18-model round-robin tournament compared two training runs (both 6 blocks, 128 channels, ~2M params, 200 MCTS sims/move):
+An 18-model tournament compared two training runs (both 6 blocks, 128 channels, ~2M params, 200 MCTS sims/move):
 - **Caissawary** (9 models, 20 generations): all three tiers
 - **Vanilla** (9 models, 29 generations): KOTH only, no tier 1, no material (pure AlphaZero-style)
+
+> **Read the topology before the table.** This is *not* a full round-robin (17 of 153 possible pairings were played). It is two adjacent-generation ladders — one per training run — joined by a **single 100-game cross-match** (tiered_gen0 vs vanilla_gen28). Elo is well-determined *within* each ladder, but the cross-group comparison rests on that one bridge: the gap between the two groups is +30 Elo with a bootstrap 95% CI of roughly [−20, +74] (crosses zero). Treat "all tiered outrank all vanilla" as suggestive, not established — confirming it would require playing the missing cross-pairings.
 
 ![Elo vs Generation](tournament_results_800eval_elo_plot.png)
 
@@ -67,16 +69,18 @@ An 18-model round-robin tournament compared two training runs (both 6 blocks, 12
 | 17 | vanilla_gen1 | 1600 | [1566, 1636] | Vanilla |
 | 18 | vanilla_gen0 | 1500 | (anchor) | Vanilla |
 
-**Key findings:**
-- All Caissawary models outrank all vanilla models. Even tiered_gen0 (zero-initialized NN) exceeds vanilla_gen28, the best vanilla model after 29 generations of training.
-- Caissawary gains +595 Elo over 18 generations; vanilla gains +538 Elo over 28 generations -- similar NN learning rates, but tiered starts ~570 Elo higher.
-- The classical fallback alone ($V_{final} = \tanh(0.326 \cdot \Delta M)$) provides stronger play than 29 generations of pure NN training.
+**Key findings** (subject to the cross-group caveat above):
+- Every tiered model ranks above every vanilla model in this fit; tiered_gen0 (zero-initialized NN) edges out vanilla_gen28 by ~30 Elo. This separation is real in the data but thin — it hangs on the single cross-match.
+- Caissawary gains +595 Elo over 18 generations; vanilla gains +538 Elo over 28 generations -- similar NN learning rates, but the tiered ladder sits higher.
+- Suggestively, the classical fallback alone ($V_{final} = \tanh(0.326 \cdot \Delta M)$) appears to match or beat 29 generations of pure NN training — the headline reason to take the three-tier idea seriously, and the result most worth nailing down with more cross-pairings.
 
-Elo via MLE on the Bradley-Terry model with 95% bootstrap CIs (1000 resamples). Full results: [`runs/tournaments/round_robin_800eval/round_robin_results.json`](runs/tournaments/round_robin_800eval/round_robin_results.json).
+Elo via MLE on the Bradley-Terry model with 95% bootstrap CIs (1000 resamples). Underlying match data (17 pairings, 6,579 games): [`runs/tournaments/round_robin_800eval/round_robin_results.json`](runs/tournaments/round_robin_800eval/round_robin_results.json).
 
 ## GPU MCTS (CUDA)
 
 A fully GPU-resident MCTS implementation in `cuda/`. The entire search loop -- tree traversal, node expansion, quick checks, quiescence search, and neural network inference -- runs inside a persistent CUDA kernel with no CPU interaction during search. No cuBLAS, no cuDNN, no host round-trips.
+
+> **Status:** this path is complete and benchmarked (v2→v5), but it plateaued at the ~99 KB shared-memory ceiling and is no longer the lead direction — see [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md). It is kept as a self-contained GPU-only engine and a throughput baseline; ongoing work has shifted to CPU-resident MCTS with batched GPU inference (and is not yet wired into the Rust UCI engine).
 
 ### Two Inference Architectures
 
@@ -96,7 +100,7 @@ See [BENCHMARKS.md](BENCHMARKS.md) for throughput measurements.
 ### Current Model: SE-ResNet 6×128, ~2M params (v5)
 
 - **Throughput:** see [BENCHMARKS.md](BENCHMARKS.md). At 200 sims/move on RTX 5060 Ti, 36 concurrent games: **101.4 samples/sec, 20.3K sims/sec** (v5: 2-explorer virtual loss + batched conv).
-- **Apples-to-apples vs Lc0+Maia (both at 6×64):** Caissawary v5 188.6 samples/sec vs Lc0 368 — at ~51% of Lc0's throughput, gap narrowed from 2.27× to 1.95× over the v3→v5 work.
+- **Apples-to-apples vs Lc0+Maia (both at 6×64):** Caissawary v5 188.6 samples/sec vs Lc0 368 — at ~51% of Lc0's throughput, gap narrowed from 2.27× to 1.95× over the v3→v5 work. (The 6×64 figure is from a temporary, *uncommitted* benchmark branch; reproducing it requires editing `nn_weights.cuh` and relaxing a `static_assert` — see [BENCHMARKS.md](BENCHMARKS.md).)
 - **Optimization stack:** v3 (FP16 inter-layer activation storage, smem 81→49 KB) → v4 (`oracle_net_forward_block_b2`: true batched WMMA at B=2 with weight-load amortization, 1.19× per-sim NN improvement) → v5 (2-explorer scheduling per block: thread 0 sequentially does SELECT for both with virtual loss, EXPAND/BACKUP parallelize across warps 0/1, NN forward is one batched call). End-to-end gain v3→v5: **~1.17×** on samples/sec.
 - **Smem-bound batch ceiling:** B=2 is the practical limit at 6×128 (97 KB of 99 KB cap). Pushing further requires FP8 activations, streaming activations through global memory, or a cross-block batching architecture.
 
@@ -162,7 +166,7 @@ cd cuda && mkdir -p build && cd build && cmake .. -DCMAKE_CUDA_ARCHITECTURES=89 
 
 ## Testing
 
-~790 tests (609 Rust + 157 CUDA + 24 Python). See [TESTING.md](TESTING.md).
+~1,350 tests (829 Rust + 314 CUDA + 203 Python). The fast `cargo test` suite runs ~750 of the Rust tests in ~50s. See [TESTING.md](TESTING.md).
 
 ```bash
 cargo test                                        # Fast Rust tests (~50s)

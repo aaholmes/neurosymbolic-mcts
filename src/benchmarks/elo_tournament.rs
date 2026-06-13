@@ -437,6 +437,12 @@ pub struct TournamentResults {
     pub ratings: HashMap<String, f64>,
 }
 
+impl Default for TournamentResults {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TournamentResults {
     pub fn new() -> Self {
         TournamentResults {
@@ -492,17 +498,17 @@ impl TournamentResults {
     pub fn to_latex_table(&self) -> String {
         let mut output = String::new();
         output.push_str(r"\begin{table}[h]");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"\centering");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"\begin{tabular}{lrrrrr}");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"\toprule");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"Engine A & Engine B & W & D & L & Elo Diff (95\% CI) \\");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"\midrule");
-        output.push_str("\n");
+        output.push('\n');
 
         for m in &self.matches {
             let (lo, hi) = m.elo_confidence_interval();
@@ -517,19 +523,19 @@ impl TournamentResults {
                 lo,
                 hi,
             ));
-            output.push_str("\n");
+            output.push('\n');
         }
 
         output.push_str(r"\bottomrule");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"\end{tabular}");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"\caption{Head-to-head results between engine variants}");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"\label{tab:elo_results}");
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(r"\end{table}");
-        output.push_str("\n");
+        output.push('\n');
 
         output
     }

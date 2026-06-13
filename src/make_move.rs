@@ -166,12 +166,10 @@ impl Board {
                 } else if the_move.from == 7 {
                     new_board.castling_rights.white_kingside = false;
                 }
-            } else {
-                if the_move.from == 56 {
-                    new_board.castling_rights.black_queenside = false;
-                } else if the_move.from == 63 {
-                    new_board.castling_rights.black_kingside = false;
-                }
+            } else if the_move.from == 56 {
+                new_board.castling_rights.black_queenside = false;
+            } else if the_move.from == 63 {
+                new_board.castling_rights.black_kingside = false;
             }
         }
 

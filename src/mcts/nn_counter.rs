@@ -13,6 +13,12 @@ pub struct CountingNeuralNetPolicy {
     total_positions: Rc<RefCell<u32>>,
 }
 
+impl Default for CountingNeuralNetPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CountingNeuralNetPolicy {
     pub fn new() -> Self {
         CountingNeuralNetPolicy {
@@ -70,6 +76,12 @@ pub struct EfficiencyComparison {
     pub tactical_mcts_positions: u32,
     pub classical_mcts_calls: u32,
     pub classical_mcts_positions: u32,
+}
+
+impl Default for EfficiencyComparison {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EfficiencyComparison {

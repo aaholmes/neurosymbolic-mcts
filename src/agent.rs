@@ -97,7 +97,13 @@ impl HumanlikeAgent<'_> {
 impl Agent for HumanlikeAgent<'_> {
     fn get_move(&mut self, board: &mut BoardStack) -> Move {
         // 1. Mate Search
-        let (eval, m, _nodes) = mate_search(board.current_state(), self.move_gen, self.mate_search_depth, false, 2);
+        let (eval, m, _nodes) = mate_search(
+            board.current_state(),
+            self.move_gen,
+            self.mate_search_depth,
+            false,
+            2,
+        );
 
         if eval >= 1000000 {
             return m;

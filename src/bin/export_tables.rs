@@ -16,8 +16,7 @@ use std::path::Path;
 fn write_u64_array(path: &Path, data: &[u64]) {
     let mut file = fs::File::create(path).expect("Failed to create file");
     for &val in data {
-        file.write_all(&val.to_le_bytes())
-            .expect("Failed to write");
+        file.write_all(&val.to_le_bytes()).expect("Failed to write");
     }
     println!(
         "  Wrote {} entries ({} bytes) to {}",
@@ -59,10 +58,7 @@ fn main() {
 
     // --- Jump piece tables ---
     println!("Exporting knight/king move tables...");
-    write_u64_array(
-        &out_dir.join("knight_moves.bin"),
-        &move_gen.n_move_bitboard,
-    );
+    write_u64_array(&out_dir.join("knight_moves.bin"), &move_gen.n_move_bitboard);
     write_u64_array(&out_dir.join("king_moves.bin"), &move_gen.k_move_bitboard);
 
     // --- Pawn capture tables ---

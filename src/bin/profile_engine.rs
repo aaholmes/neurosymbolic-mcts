@@ -5,8 +5,8 @@
 
 use kingfisher::boardstack::BoardStack;
 use kingfisher::mcts::{
-    reuse_subtree, tactical_mcts_search_for_training_with_reuse, QSearchVariant,
-    StatsAccumulator, TacticalMctsConfig, TimingAccumulator,
+    reuse_subtree, tactical_mcts_search_for_training_with_reuse, QSearchVariant, StatsAccumulator,
+    TacticalMctsConfig, TimingAccumulator,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
@@ -248,10 +248,7 @@ fn main() {
         "=== Profiling Results ({} games, {} total moves, {} total iterations) ===",
         num_games, total_moves, total_iterations
     );
-    println!(
-        "Total wall time: {:.1}s",
-        overall_elapsed.as_secs_f64()
-    );
+    println!("Total wall time: {:.1}s", overall_elapsed.as_secs_f64());
     println!();
     println!(
         "{:<20} {:>10} {:>12} {:>12} {:>12}",
@@ -303,10 +300,7 @@ fn main() {
 
 fn print_stats_row(name: &str, acc: &StatsAccumulator) {
     if acc.count == 0 {
-        println!(
-            "{:<20} {:>10} {:>12} {:>12}",
-            name, 0, "-", "-"
-        );
+        println!("{:<20} {:>10} {:>12} {:>12}", name, 0, "-", "-");
     } else {
         println!(
             "{:<20} {:>10} {:>12.1} {:>12.1}",
@@ -340,10 +334,7 @@ fn sample_proportional(policy: &[(Move, u32)], rng: &mut impl Rng) -> Option<Mov
 
 fn print_row(name: &str, acc: &TimingAccumulator) {
     if acc.count == 0 {
-        println!(
-            "{:<20} {:>10} {:>12} {:>12} {:>12}",
-            name, 0, "-", "-", "-"
-        );
+        println!("{:<20} {:>10} {:>12} {:>12} {:>12}", name, 0, "-", "-", "-");
     } else {
         println!(
             "{:<20} {:>10} {:>12.1} {:>12.1} {:>12.1}",

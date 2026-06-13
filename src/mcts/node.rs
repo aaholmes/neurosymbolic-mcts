@@ -67,8 +67,9 @@ pub struct MctsNode {
     pub total_value_squared: f64,
 
     // --- Evaluation / Mate Status ---
-    /// Stores the exact value if determined by terminal state check or mate search (1.0 for White Win, -1.0 for White Loss).
-    /// Also used as a flag to indicate if mate search has been performed. None = not checked, Some(-999.0) = checked, no mate.
+    /// Exact value when the node is terminal or resolved by mate search
+    /// (+1.0 STM win, -1.0 STM loss, 0.0 draw). `None` means not yet resolved;
+    /// any `Some(_)` value is exact and lies in [-1, 1].
     pub terminal_or_mate_value: Option<f64>,
     /// Distance (in STM moves) to the forced result: KOTH-in-N or mate-in-N.
     /// Used for tie-breaking when all moves are forced losses (prefer longest distance).
@@ -425,7 +426,7 @@ impl MctsNode {
     pub fn get_legal_moves(state: &Board, move_gen: &MoveGen) -> Vec<Move> {
         let (captures, moves) = move_gen.gen_pseudo_legal_moves(state);
         let mut legal_moves = Vec::with_capacity(captures.len() + moves.len());
-        for m in captures.into_iter().chain(moves.into_iter()) {
+        for m in captures.into_iter().chain(moves) {
             let next_state = state.apply_move_to_board(m);
             if next_state.is_legal(move_gen) {
                 legal_moves.push(m);

@@ -80,9 +80,8 @@ mod tests {
         let nnue = NnueEvaluator::new_stub();
         let pesto = PestoEval::new();
         // After 1.e4 e5 2.Nf3, evaluator should match exactly (it IS PeSTO under the hood).
-        let board = Board::new_from_fen(
-            "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2",
-        );
+        let board =
+            Board::new_from_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2");
         assert_eq!(nnue.eval_cp(&board), pesto.pst_eval_cp(&board));
     }
 }

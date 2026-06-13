@@ -25,6 +25,12 @@ pub struct PestoEval {
     pub weights: EvalWeights,
 }
 
+impl Default for PestoEval {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PestoEval {
     pub fn new() -> PestoEval {
         let mut mg_table = [[[0; 64]; 6]; 2];
@@ -216,11 +222,12 @@ impl PestoEval {
 
                 let no_adjacent_support = (friendly_pawns & adjacent_mask & front_span) == 0;
 
-                if no_adjacent_support && stop_sq < 64 {
-                    if (enemy_pawns & sq_ind_to_bit(stop_sq)) != 0 {
-                        backward_penalty_mg += self.weights.backward_pawn_penalty[0];
-                        backward_penalty_eg += self.weights.backward_pawn_penalty[1];
-                    }
+                if no_adjacent_support
+                    && stop_sq < 64
+                    && (enemy_pawns & sq_ind_to_bit(stop_sq)) != 0
+                {
+                    backward_penalty_mg += self.weights.backward_pawn_penalty[0];
+                    backward_penalty_eg += self.weights.backward_pawn_penalty[1];
                 }
             }
             mg[color] += backward_penalty_mg;
@@ -230,8 +237,8 @@ impl PestoEval {
             if king_sq < 64 {
                 let shield_zone_mask = get_king_shield_zone_mask(color, king_sq);
                 let shield_pawns = popcnt(shield_zone_mask & friendly_pawns);
-                mg[color] += shield_pawns as i32 * self.weights.king_safety_pawn_shield_bonus[0];
-                eg[color] += shield_pawns as i32 * self.weights.king_safety_pawn_shield_bonus[1];
+                mg[color] += shield_pawns * self.weights.king_safety_pawn_shield_bonus[0];
+                eg[color] += shield_pawns * self.weights.king_safety_pawn_shield_bonus[1];
 
                 let enemy_king_sq = board.pieces[enemy_color][KING].trailing_zeros() as usize;
                 if enemy_king_sq < 64 {
@@ -336,29 +343,29 @@ impl PestoEval {
             for sq in bits(&board.pieces[color][KNIGHT]) {
                 knight_moves += popcnt(move_gen.n_move_bitboard[sq] & !friendly_occ);
             }
-            mobility_mg[color] += knight_moves as i32 * self.weights.mobility_weights_mg[0];
-            mobility_eg[color] += knight_moves as i32 * self.weights.mobility_weights_eg[0];
+            mobility_mg[color] += knight_moves * self.weights.mobility_weights_mg[0];
+            mobility_eg[color] += knight_moves * self.weights.mobility_weights_eg[0];
 
             let mut bishop_moves = 0;
             for sq in bits(&board.pieces[color][BISHOP]) {
                 bishop_moves += popcnt(move_gen.get_bishop_moves(sq, occupied) & !friendly_occ);
             }
-            mobility_mg[color] += bishop_moves as i32 * self.weights.mobility_weights_mg[1];
-            mobility_eg[color] += bishop_moves as i32 * self.weights.mobility_weights_eg[1];
+            mobility_mg[color] += bishop_moves * self.weights.mobility_weights_mg[1];
+            mobility_eg[color] += bishop_moves * self.weights.mobility_weights_eg[1];
 
             let mut rook_moves = 0;
             for sq in bits(&board.pieces[color][ROOK]) {
                 rook_moves += popcnt(move_gen.get_rook_moves(sq, occupied) & !friendly_occ);
             }
-            mobility_mg[color] += rook_moves as i32 * self.weights.mobility_weights_mg[2];
-            mobility_eg[color] += rook_moves as i32 * self.weights.mobility_weights_eg[2];
+            mobility_mg[color] += rook_moves * self.weights.mobility_weights_mg[2];
+            mobility_eg[color] += rook_moves * self.weights.mobility_weights_eg[2];
 
             let mut queen_moves = 0;
             for sq in bits(&board.pieces[color][QUEEN]) {
                 queen_moves += popcnt(move_gen.get_queen_moves(sq, occupied) & !friendly_occ);
             }
-            mobility_mg[color] += queen_moves as i32 * self.weights.mobility_weights_mg[3];
-            mobility_eg[color] += queen_moves as i32 * self.weights.mobility_weights_eg[3];
+            mobility_mg[color] += queen_moves * self.weights.mobility_weights_mg[3];
+            mobility_eg[color] += queen_moves * self.weights.mobility_weights_eg[3];
 
             mg[color] += mobility_mg[color];
             eg[color] += mobility_eg[color];

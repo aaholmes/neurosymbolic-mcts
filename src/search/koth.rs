@@ -144,11 +144,7 @@ pub fn koth_best_move(board: &Board, move_gen: &MoveGen) -> Option<Move> {
 }
 
 /// Like `koth_center_in_n` but also returns the number of nodes visited.
-pub fn koth_center_in_n_counted(
-    board: &Board,
-    move_gen: &MoveGen,
-    max_n: u8,
-) -> (Option<u8>, u32) {
+pub fn koth_center_in_n_counted(board: &Board, move_gen: &MoveGen, max_n: u8) -> (Option<u8>, u32) {
     let side_to_move = if board.w_to_move { WHITE } else { BLACK };
     let king_bit = board.get_piece_bitboard(side_to_move, KING);
 
@@ -246,7 +242,7 @@ fn solve_koth_counted(
                     return (true, nodes);
                 }
             }
-            return (false, nodes);
+            (false, nodes)
         } else {
             let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
             for m in captures.iter().chain(moves.iter()) {
@@ -267,7 +263,7 @@ fn solve_koth_counted(
                     return (true, nodes);
                 }
             }
-            return (false, nodes);
+            (false, nodes)
         }
     } else {
         // Opponent turn
@@ -355,7 +351,7 @@ fn solve_koth(board: &Board, move_gen: &MoveGen, ply: i32, max_ply: i32, max_n: 
                     return true;
                 }
             }
-            return false;
+            false
         } else {
             // King already in ring — need full movegen
             let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
@@ -375,7 +371,7 @@ fn solve_koth(board: &Board, move_gen: &MoveGen, ply: i32, max_ply: i32, max_n: 
                     return true;
                 }
             }
-            return false;
+            false
         }
     } else {
         // Opponent turn: try all moves, if ANY prevents Root from winning, branch fails.

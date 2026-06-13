@@ -112,14 +112,14 @@ impl SeeBoard {
 
         // Pawns
         if side_idx == 0 {
-            if sq > 8 && sq % 8 != 0 {
+            if sq > 8 && !sq.is_multiple_of(8) {
                 attackers |= self.pieces[side_idx][PAWN] & sq_ind_to_bit(sq - 9);
             }
             if sq > 7 && sq % 8 != 7 {
                 attackers |= self.pieces[side_idx][PAWN] & sq_ind_to_bit(sq - 7);
             }
         } else {
-            if sq < 55 && sq % 8 != 0 {
+            if sq < 55 && !sq.is_multiple_of(8) {
                 attackers |= self.pieces[side_idx][PAWN] & sq_ind_to_bit(sq + 7);
             }
             if sq < 56 && sq % 8 != 7 {

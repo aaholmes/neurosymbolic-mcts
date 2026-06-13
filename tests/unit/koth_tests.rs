@@ -258,12 +258,7 @@ fn test_select_best_move_prefers_longer_koth_loss() {
 
     for (i, mv) in legal_moves.iter().take(3).enumerate() {
         let child_board = parent_board.apply_move_to_board(*mv);
-        let child = MctsNode::new_child(
-            std::rc::Rc::downgrade(&root),
-            *mv,
-            child_board,
-            &move_gen,
-        );
+        let child = MctsNode::new_child(std::rc::Rc::downgrade(&root), *mv, child_board, &move_gen);
         {
             let mut cr = child.borrow_mut();
             // All children: STM wins (+1.0 from STM's perspective = parent loses)
@@ -306,12 +301,7 @@ fn test_select_best_move_prefers_shorter_koth_win() {
 
     for (i, mv) in legal_moves.iter().take(3).enumerate() {
         let child_board = parent_board.apply_move_to_board(*mv);
-        let child = MctsNode::new_child(
-            std::rc::Rc::downgrade(&root),
-            *mv,
-            child_board,
-            &move_gen,
-        );
+        let child = MctsNode::new_child(std::rc::Rc::downgrade(&root), *mv, child_board, &move_gen);
         {
             let mut cr = child.borrow_mut();
             // All children: STM loses (-1.0 from STM's perspective = parent wins)
@@ -376,7 +366,8 @@ fn test_koth_prefilter_equivalence() {
                 assert!(
                     best.is_some(),
                     "FEN {}: center_in_3={} but no best_move",
-                    fen, n
+                    fen,
+                    n
                 );
             }
         }

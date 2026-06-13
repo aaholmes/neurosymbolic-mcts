@@ -9,6 +9,12 @@ pub struct PerformanceComparison {
     pub results: Vec<(String, BenchmarkSummary)>,
 }
 
+impl Default for PerformanceComparison {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceComparison {
     pub fn new() -> Self {
         PerformanceComparison {
@@ -169,8 +175,8 @@ pub fn run_performance_comparison(time_limit_per_position: Duration) -> Performa
         6,     // shallower ab_search_depth to compensate
         16,    // q_search_max_depth
         false, // verbose
-        &*BENCH_MOVE_GEN,
-        &*BENCH_PESTO_EVAL,
+        &BENCH_MOVE_GEN,
+        &BENCH_PESTO_EVAL,
     );
     let deep_results = run_tactical_benchmark(
         &mut deep_mate_agent,

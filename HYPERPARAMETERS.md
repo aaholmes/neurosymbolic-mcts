@@ -12,7 +12,7 @@ All tunable parameters for the Caissawary training pipeline, organized by stage.
 | Policy planes | 73 | -- | AlphaZero encoding (4672 = 73x8x8) |
 | SE reduction | 16 | -- | Squeeze-and-excitation ratio |
 | Value head FC | 65 -> 256 -> 1 | -- | 1x1 conv → flatten(64) → concat(q_result) → FC(65→256→1) |
-| k | scalar nn.Parameter | -- | softplus(k_logit) / (2 ln 2); init k_logit=0 → k=0.5 |
+| k | scalar nn.Parameter | -- | 0.47 * softplus(k_logit); init k_logit=0 → k ≈ 0.326 |
 
 ## MCTS Search
 

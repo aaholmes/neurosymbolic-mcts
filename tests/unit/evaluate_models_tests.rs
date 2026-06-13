@@ -459,11 +459,13 @@ fn test_koth_gate_stores_move_on_root_node() {
     };
     let mut tt = TranspositionTable::new();
 
-    let (best_move, _stats, root) =
-        tactical_mcts_search_with_tt(board, &move_gen, config, &mut tt);
+    let (best_move, _stats, root) = tactical_mcts_search_with_tt(board, &move_gen, config, &mut tt);
 
     // The MCTS return value should have a move
-    assert!(best_move.is_some(), "MCTS should return a best move for KOTH win-in-2");
+    assert!(
+        best_move.is_some(),
+        "MCTS should return a best move for KOTH win-in-2"
+    );
 
     // Critical: the root node's mate_move must also be set (this is what select_eval_move reads)
     let root_ref = root.borrow();
