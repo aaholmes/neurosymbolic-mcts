@@ -3,6 +3,20 @@
 #include <cstdio>
 #include <cstdlib>
 
+// Global skip flag, set by ASSERT_SKIP and consumed by RUN_TEST.
+// A skipped test is NOT counted as a pass; it is reported separately.
+static bool g_test_skipped = false;
+static const char* g_skip_reason = "";
+static int g_skip_count = 0;
+
+// Mark the current test as skipped (a missing prerequisite, not a pass) and
+// return from the test function. A green check must mean an assertion ran.
+#define ASSERT_SKIP(reason) do { \
+    g_test_skipped = true; \
+    g_skip_reason = (reason); \
+    return; \
+} while(0)
+
 // Simple test assertion macro
 #define ASSERT_EQ(a, b) do { \
     auto _a = (a); auto _b = (b); \
@@ -31,9 +45,12 @@
 
 #define RUN_TEST(fn) do { \
     bool test_failed = false; \
+    g_test_skipped = false; \
+    g_skip_reason = ""; \
     printf("  %-50s ", #fn); \
     fn(test_failed); \
-    if (test_failed) { printf("FAILED\n"); failures++; } \
+    if (g_test_skipped) { printf("SKIP (%s)\n", g_skip_reason); g_skip_count++; } \
+    else if (test_failed) { printf("FAILED\n"); failures++; } \
     else { printf("OK\n"); passes++; } \
     total++; \
 } while(0)

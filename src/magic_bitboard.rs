@@ -275,17 +275,14 @@ pub fn init_pawn_moves(from_sq_ind: usize) -> (Vec<usize>, Vec<usize>) {
 /// A tuple containing:
 /// - A vector of vectors of tuples, where each tuple contains two vectors of usize (for captures and moves).
 /// - A vector of vectors of u64 (bitboards).
-pub fn init_bishop_moves(
-    b_magics: [u64; 64],
-) -> (Vec<Vec<(Vec<usize>, Vec<usize>)>>, Vec<Vec<u64>>) {
-    let mut out1: Vec<Vec<(Vec<usize>, Vec<usize>)>> = Vec::new();
+pub fn init_bishop_moves(b_magics: [u64; 64]) -> Vec<Vec<u64>> {
     let mut out2: Vec<Vec<u64>> = Vec::new();
     let mut blockers: u64;
     let mut key: usize;
     let mut blocker_squares: Vec<usize> = Vec::new();
     for from_sq_ind in 0..64 {
-        out1.push(vec![(vec![], vec![]); 4096]);
-        out2.push(vec![0; 4096]);
+        // Size each square's table to its actual index space (1 << relevant_bits).
+        out2.push(vec![0; 1 << B_BITS[from_sq_ind]]);
         // Mask blockers
         blockers = B_MASKS[from_sq_ind];
         blocker_squares.clear();
@@ -306,18 +303,14 @@ pub fn init_bishop_moves(
             key = ((current_blockers.wrapping_mul(b_magics[from_sq_ind]))
                 >> (64 - B_BITS[from_sq_ind])) as usize;
 
-            // Assign the captures and moves for this blocker combination
-            out1[from_sq_ind][key] = bishop_attacks(from_sq_ind, current_blockers);
-            // Include both captures (.0) and moves (.1) in the attack bitboard
-            for i in out1[from_sq_ind][key].0.iter() {
-                out2[from_sq_ind][key] |= sq_ind_to_bit(*i);
-            }
-            for i in out1[from_sq_ind][key].1.iter() {
+            // Build the attack bitboard from both captures (.0) and ray moves (.1)
+            let (caps, rays) = bishop_attacks(from_sq_ind, current_blockers);
+            for i in caps.iter().chain(rays.iter()) {
                 out2[from_sq_ind][key] |= sq_ind_to_bit(*i);
             }
         }
     }
-    (out1, out2)
+    out2
 }
 
 /// Initializes the magic bitboards for rook moves.
@@ -331,14 +324,13 @@ pub fn init_bishop_moves(
 /// A tuple containing:
 /// - A vector of vectors of tuples, where each tuple contains two vectors of usize (for captures and moves).
 /// - A vector of vectors of u64 (bitboards).
-pub fn init_rook_moves(r_magics: [u64; 64]) -> (Vec<Vec<(Vec<usize>, Vec<usize>)>>, Vec<Vec<u64>>) {
-    let mut out1: Vec<Vec<(Vec<usize>, Vec<usize>)>> = Vec::new();
+pub fn init_rook_moves(r_magics: [u64; 64]) -> Vec<Vec<u64>> {
     let mut out2: Vec<Vec<u64>> = Vec::new();
     let mut key: usize;
     let mut blocker_squares: Vec<usize> = Vec::new();
     for from_sq_ind in 0..64 {
-        out1.push(vec![(vec![], vec![]); 4096]);
-        out2.push(vec![0; 4096]);
+        // Size each square's table to its actual index space (1 << relevant_bits).
+        out2.push(vec![0; 1 << R_BITS[from_sq_ind]]);
         // Mask blockers
         let mask = R_MASKS[from_sq_ind];
         blocker_squares.clear();
@@ -359,18 +351,14 @@ pub fn init_rook_moves(r_magics: [u64; 64]) -> (Vec<Vec<(Vec<usize>, Vec<usize>)
             key = ((current_blockers.wrapping_mul(r_magics[from_sq_ind]))
                 >> (64 - R_BITS[from_sq_ind])) as usize;
 
-            // Assign the captures and moves for this blocker combination
-            out1[from_sq_ind][key] = rook_attacks(from_sq_ind, current_blockers);
-            // Include both captures (.0) and moves (.1) in the attack bitboard
-            for i in out1[from_sq_ind][key].0.iter() {
-                out2[from_sq_ind][key] |= sq_ind_to_bit(*i);
-            }
-            for i in out1[from_sq_ind][key].1.iter() {
+            // Build the attack bitboard from both captures (.0) and ray moves (.1)
+            let (caps, rays) = rook_attacks(from_sq_ind, current_blockers);
+            for i in caps.iter().chain(rays.iter()) {
                 out2[from_sq_ind][key] |= sq_ind_to_bit(*i);
             }
         }
     }
-    (out1, out2)
+    out2
 }
 
 /// Generates rook attacks for a given square and blocking bitboard.

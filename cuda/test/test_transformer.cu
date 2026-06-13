@@ -865,9 +865,7 @@ void test_transformer_dump_policy(bool& test_failed) {
     const char* weights_path = "weights/transformer4/candidate_1.bin";
     TransformerWeights* d_weights = load_transformer_weights(weights_path);
     if (!d_weights) {
-        printf("[no weights at %s, skipping] ", weights_path);
-        ASSERT_TRUE(true);
-        return;
+        ASSERT_SKIP("no weights at weights/transformer4/candidate_1.bin");
     }
 
     BoardState bs = make_starting_position();
@@ -1206,6 +1204,7 @@ int main() {
     RUN_TEST(test_transformer_layer_timing);
 
     printf("\nResults: %d/%d passed", passes, total);
+    if (g_skip_count > 0) printf(", %d skipped", g_skip_count);
     if (failures > 0) printf(", %d FAILED", failures);
     printf("\n");
     return failures > 0 ? 1 : 0;

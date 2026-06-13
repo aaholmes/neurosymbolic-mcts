@@ -445,74 +445,22 @@ pub fn tactical_mcts_search_with_tt(
             break;
         }
 
-        if let Some(log) = logger {
-            log.log_iteration_start(iteration + 1);
-        }
-
-        let leaf_node = select_leaf_node(root_node.clone(), move_gen, &config, &mut stats, logger);
-        let value = evaluate_leaf_node(
-            leaf_node.clone(),
+        run_mcts_iteration(
+            &root_node,
             move_gen,
             &config,
             transposition_table,
             &mut stats,
             logger,
+            iteration,
         );
-
-        if !leaf_node.borrow().is_game_terminal()
-            && leaf_node.borrow().visits == 0
-            && leaf_node.borrow().terminal_or_mate_value.is_none()
-        {
-            evaluate_and_expand_node(leaf_node.clone(), move_gen, &mut stats, &config, logger);
-        }
-
-        MctsNode::backpropagate(leaf_node, value);
-        stats.iterations = iteration + 1;
-
-        if let Some(log) = logger {
-            let best = select_best_move_from_root(root_node.clone(), move_gen);
-            log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
-        }
 
         if iteration % 100 == 0 && start_time.elapsed() > config.time_limit {
             break;
         }
 
-        // Early termination on forced win/loss. Driven by the Tier-1 gate
-        // (mate/KOTH), which sets terminal_or_mate_value — not KOTH alone, so
-        // proven mates short-circuit in standard chess too.
-        if config.enable_tier1_gate {
-            let root_ref = root_node.borrow();
-            let has_win_in_1 = root_ref
-                .children
-                .iter()
-                .any(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v < -0.5));
-            if has_win_in_1 {
-                drop(root_ref);
-                break;
-            }
-            let has_forced_win = root_ref.children.iter().any(|c| {
-                let cr = c.borrow();
-                cr.visits > 0 && (cr.total_value / cr.visits as f64) > 0.99
-            });
-            if has_forced_win {
-                let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
-                if all_visited {
-                    drop(root_ref);
-                    break;
-                }
-            }
-            // Early termination: all moves are forced losses
-            let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
-            let all_losing = !root_ref.children.is_empty()
-                && root_ref
-                    .children
-                    .iter()
-                    .all(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v > 0.0));
-            if all_visited && all_losing {
-                drop(root_ref);
-                break;
-            }
+        if should_early_terminate(&root_node, &config) {
+            break;
         }
     }
 
@@ -529,6 +477,85 @@ pub fn tactical_mcts_search_with_tt(
     }
 
     (best_move, stats, root_node)
+}
+
+/// Run one MCTS simulation iteration: select a leaf, evaluate it, expand it if
+/// it is a fresh non-terminal node, then backpropagate. Shared by all three
+/// search entrypoints to keep the tier ladder byte-for-byte identical.
+#[allow(clippy::too_many_arguments)]
+fn run_mcts_iteration(
+    root_node: &Rc<RefCell<MctsNode>>,
+    move_gen: &MoveGen,
+    config: &TacticalMctsConfig,
+    transposition_table: &mut TranspositionTable,
+    stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
+    iteration: u32,
+) {
+    if let Some(log) = logger {
+        log.log_iteration_start(iteration + 1);
+    }
+
+    let leaf = select_leaf_node(root_node.clone(), move_gen, config, stats, logger);
+    let value = evaluate_leaf_node(
+        leaf.clone(),
+        move_gen,
+        config,
+        transposition_table,
+        stats,
+        logger,
+    );
+
+    if !leaf.borrow().is_game_terminal()
+        && leaf.borrow().visits == 0
+        && leaf.borrow().terminal_or_mate_value.is_none()
+    {
+        evaluate_and_expand_node(leaf.clone(), move_gen, stats, config, logger);
+    }
+
+    MctsNode::backpropagate(leaf, value);
+    stats.iterations = iteration + 1;
+
+    if let Some(log) = logger {
+        let best = select_best_move_from_root(root_node.clone(), move_gen);
+        log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
+    }
+}
+
+/// Early-termination check on forced win/loss. Driven by the Tier-1 gate
+/// (mate/KOTH), which sets terminal_or_mate_value — not KOTH alone, so proven
+/// mates short-circuit in standard chess too. Returns true if the search loop
+/// should break. No-op (returns false) when the Tier-1 gate is disabled.
+fn should_early_terminate(root_node: &Rc<RefCell<MctsNode>>, config: &TacticalMctsConfig) -> bool {
+    if !config.enable_tier1_gate {
+        return false;
+    }
+    let root_ref = root_node.borrow();
+    let has_win_in_1 = root_ref
+        .children
+        .iter()
+        .any(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v < -0.5));
+    if has_win_in_1 {
+        return true;
+    }
+    let has_forced_win = root_ref.children.iter().any(|c| {
+        let cr = c.borrow();
+        cr.visits > 0 && (cr.total_value / cr.visits as f64) > 0.99
+    });
+    if has_forced_win {
+        let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
+        if all_visited {
+            return true;
+        }
+    }
+    // Early termination: all moves are forced losses
+    let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
+    let all_losing = !root_ref.children.is_empty()
+        && root_ref
+            .children
+            .iter()
+            .all(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v > 0.0));
+    all_visited && all_losing
 }
 
 fn select_leaf_node(
@@ -914,68 +941,18 @@ pub fn tactical_mcts_search_for_training(
             break;
         }
 
-        if let Some(log) = logger {
-            log.log_iteration_start(iteration + 1);
-        }
-
-        let leaf = select_leaf_node(root_node.clone(), move_gen, &config, &mut stats, logger);
-        let value = evaluate_leaf_node(
-            leaf.clone(),
+        run_mcts_iteration(
+            &root_node,
             move_gen,
             &config,
             &mut transposition_table,
             &mut stats,
             logger,
+            iteration,
         );
-        if !leaf.borrow().is_game_terminal()
-            && leaf.borrow().visits == 0
-            && leaf.borrow().terminal_or_mate_value.is_none()
-        {
-            evaluate_and_expand_node(leaf.clone(), move_gen, &mut stats, &config, logger);
-        }
-        MctsNode::backpropagate(leaf, value);
-        stats.iterations = iteration + 1;
 
-        if let Some(log) = logger {
-            let best = select_best_move_from_root(root_node.clone(), move_gen);
-            log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
-        }
-
-        // Early termination on forced win/loss. Driven by the Tier-1 gate
-        // (mate/KOTH), which sets terminal_or_mate_value — not KOTH alone, so
-        // proven mates short-circuit in standard chess too.
-        if config.enable_tier1_gate {
-            let root_ref = root_node.borrow();
-            let has_win_in_1 = root_ref
-                .children
-                .iter()
-                .any(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v < -0.5));
-            if has_win_in_1 {
-                drop(root_ref);
-                break;
-            }
-            let has_forced_win = root_ref.children.iter().any(|c| {
-                let cr = c.borrow();
-                cr.visits > 0 && (cr.total_value / cr.visits as f64) > 0.99
-            });
-            if has_forced_win {
-                let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
-                if all_visited {
-                    drop(root_ref);
-                    break;
-                }
-            }
-            // Early termination: all moves are forced losses
-            let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
-            let all_losing = !root_ref.children.is_empty()
-                && root_ref
-                    .children
-                    .iter()
-                    .all(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v > 0.0));
-            if all_visited && all_losing {
-                drop(root_ref);
-                break;
-            }
+        if should_early_terminate(&root_node, &config) {
+            break;
         }
     }
 
@@ -1057,68 +1034,18 @@ pub fn tactical_mcts_search_for_training_with_reuse(
             break;
         }
 
-        if let Some(log) = logger {
-            log.log_iteration_start(iteration + 1);
-        }
-
-        let leaf = select_leaf_node(root_node.clone(), move_gen, &config, &mut stats, logger);
-        let value = evaluate_leaf_node(
-            leaf.clone(),
+        run_mcts_iteration(
+            &root_node,
             move_gen,
             &config,
             transposition_table,
             &mut stats,
             logger,
+            iteration,
         );
-        if !leaf.borrow().is_game_terminal()
-            && leaf.borrow().visits == 0
-            && leaf.borrow().terminal_or_mate_value.is_none()
-        {
-            evaluate_and_expand_node(leaf.clone(), move_gen, &mut stats, &config, logger);
-        }
-        MctsNode::backpropagate(leaf, value);
-        stats.iterations = iteration + 1;
 
-        if let Some(log) = logger {
-            let best = select_best_move_from_root(root_node.clone(), move_gen);
-            log.log_iteration_summary(iteration + 1, best, root_node.borrow().visits);
-        }
-
-        // Early termination on forced win/loss. Driven by the Tier-1 gate
-        // (mate/KOTH), which sets terminal_or_mate_value — not KOTH alone, so
-        // proven mates short-circuit in standard chess too.
-        if config.enable_tier1_gate {
-            let root_ref = root_node.borrow();
-            let has_win_in_1 = root_ref
-                .children
-                .iter()
-                .any(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v < -0.5));
-            if has_win_in_1 {
-                drop(root_ref);
-                break;
-            }
-            let has_forced_win = root_ref.children.iter().any(|c| {
-                let cr = c.borrow();
-                cr.visits > 0 && (cr.total_value / cr.visits as f64) > 0.99
-            });
-            if has_forced_win {
-                let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
-                if all_visited {
-                    drop(root_ref);
-                    break;
-                }
-            }
-            // Early termination: all moves are forced losses
-            let all_visited = root_ref.children.iter().all(|c| c.borrow().visits > 0);
-            let all_losing = !root_ref.children.is_empty()
-                && root_ref
-                    .children
-                    .iter()
-                    .all(|c| c.borrow().terminal_or_mate_value.is_some_and(|v| v > 0.0));
-            if all_visited && all_losing {
-                drop(root_ref);
-                break;
-            }
+        if should_early_terminate(&root_node, &config) {
+            break;
         }
     }
 

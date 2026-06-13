@@ -290,7 +290,7 @@ __global__ void kernel_stages(
 
 void test_board_encoding_matches_reference(bool& test_failed) {
     float* ref = load_ref("cuda/test/reference_data/startpos_tokens.bin", 64 * 17);
-    if (!ref) { printf("[no ref data] "); ASSERT_TRUE(true); return; }
+    if (!ref) { ASSERT_SKIP("no ref data"); }
 
     BoardState bs = make_starting_position();
     BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -312,10 +312,10 @@ void test_board_encoding_matches_reference(bool& test_failed) {
 
 void test_input_proj_matches_pytorch(bool& test_failed) {
     float* ref = load_ref("cuda/test/reference_data/startpos_after_proj.bin", 64 * 128);
-    if (!ref) { printf("[no ref data] "); ASSERT_TRUE(true); return; }
+    if (!ref) { ASSERT_SKIP("no ref data"); }
 
     TransformerWeights* d_w = load_transformer_weights("weights/transformer4/candidate_1.bin");
-    if (!d_w) { printf("[no weights] "); ASSERT_TRUE(true); free(ref); return; }
+    if (!d_w) { free(ref); ASSERT_SKIP("no weights"); }
 
     BoardState bs = make_starting_position();
     BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -344,10 +344,10 @@ void test_input_proj_matches_pytorch(bool& test_failed) {
 
 void test_posemb_matches_pytorch(bool& test_failed) {
     float* ref = load_ref("cuda/test/reference_data/startpos_after_posemb.bin", 64 * 128);
-    if (!ref) { printf("[no ref data] "); ASSERT_TRUE(true); return; }
+    if (!ref) { ASSERT_SKIP("no ref data"); }
 
     TransformerWeights* d_w = load_transformer_weights("weights/transformer4/candidate_1.bin");
-    if (!d_w) { printf("[no weights] "); ASSERT_TRUE(true); free(ref); return; }
+    if (!d_w) { free(ref); ASSERT_SKIP("no weights"); }
 
     BoardState bs = make_starting_position();
     BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -376,10 +376,10 @@ void test_posemb_matches_pytorch(bool& test_failed) {
 
 void test_block0_matches_pytorch(bool& test_failed) {
     float* ref = load_ref("cuda/test/reference_data/startpos_after_block0.bin", 64 * 128);
-    if (!ref) { printf("[no ref data] "); ASSERT_TRUE(true); return; }
+    if (!ref) { ASSERT_SKIP("no ref data"); }
 
     TransformerWeights* d_w = load_transformer_weights("weights/transformer4/candidate_1.bin");
-    if (!d_w) { printf("[no weights] "); ASSERT_TRUE(true); free(ref); return; }
+    if (!d_w) { free(ref); ASSERT_SKIP("no weights"); }
 
     BoardState bs = make_starting_position();
     BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -409,10 +409,10 @@ void test_block0_matches_pytorch(bool& test_failed) {
 
 void test_block5_matches_pytorch(bool& test_failed) {
     float* ref = load_ref("cuda/test/reference_data/startpos_after_block5.bin", 64 * 128);
-    if (!ref) { printf("[no ref data] "); ASSERT_TRUE(true); return; }
+    if (!ref) { ASSERT_SKIP("no ref data"); }
 
     TransformerWeights* d_w = load_transformer_weights("weights/transformer4/candidate_1.bin");
-    if (!d_w) { printf("[no weights] "); ASSERT_TRUE(true); free(ref); return; }
+    if (!d_w) { free(ref); ASSERT_SKIP("no weights"); }
 
     BoardState bs = make_starting_position();
     BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -442,10 +442,10 @@ void test_block5_matches_pytorch(bool& test_failed) {
 
 void test_policy_matches_pytorch(bool& test_failed) {
     float* ref = load_ref("cuda/test/reference_data/startpos_policy.bin", 4672);
-    if (!ref) { printf("[no ref data] "); ASSERT_TRUE(true); return; }
+    if (!ref) { ASSERT_SKIP("no ref data"); }
 
     TransformerWeights* d_w = load_transformer_weights("weights/transformer4/candidate_1.bin");
-    if (!d_w) { printf("[no weights] "); ASSERT_TRUE(true); free(ref); return; }
+    if (!d_w) { free(ref); ASSERT_SKIP("no weights"); }
 
     BoardState bs = make_starting_position();
     BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -485,10 +485,10 @@ void test_policy_matches_pytorch(bool& test_failed) {
 void test_value_matches_pytorch(bool& test_failed) {
     // Reference: [v_logit_q0, value_q0, k, v_logit_q3, value_q3]
     float* ref = load_ref("cuda/test/reference_data/startpos_value.bin", 5);
-    if (!ref) { printf("[no ref data] "); ASSERT_TRUE(true); return; }
+    if (!ref) { ASSERT_SKIP("no ref data"); }
 
     TransformerWeights* d_w = load_transformer_weights("weights/transformer4/candidate_1.bin");
-    if (!d_w) { printf("[no weights] "); ASSERT_TRUE(true); free(ref); return; }
+    if (!d_w) { free(ref); ASSERT_SKIP("no weights"); }
 
     BoardState bs = make_starting_position();
     BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -528,7 +528,7 @@ void test_value_matches_pytorch(bool& test_failed) {
 
 void test_no_nan_in_forward_pass(bool& test_failed) {
     TransformerWeights* d_w = load_transformer_weights("weights/transformer4/candidate_1.bin");
-    if (!d_w) { printf("[no weights] "); ASSERT_TRUE(true); return; }
+    if (!d_w) { ASSERT_SKIP("no weights"); }
 
     BoardState bs = make_starting_position();
     BoardState* d_bs; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -575,6 +575,7 @@ int main() {
     RUN_TEST(test_no_nan_in_forward_pass);
 
     printf("\n%d/%d tests passed", passes, total);
+    if (g_skip_count > 0) printf(", %d skipped", g_skip_count);
     if (failures > 0) printf(", %d FAILED", failures);
     printf("\n");
     return failures > 0 ? 1 : 0;

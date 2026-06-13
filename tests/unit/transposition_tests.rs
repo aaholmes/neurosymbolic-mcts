@@ -5,7 +5,7 @@
 
 use kingfisher::board::Board;
 use kingfisher::move_types::Move;
-use kingfisher::transposition::TranspositionTable;
+use kingfisher::transposition::{Bound, TranspositionTable};
 
 fn create_move(from: usize, to: usize) -> Move {
     Move {
@@ -197,6 +197,80 @@ fn test_tt_stats() {
     // Two different positions should create at least 1 entry each
     assert!(size >= 1, "Should have at least 1 entry");
     assert_eq!(entries_with_mate, 1, "Should have 1 entry with mate result");
+}
+
+// --- Bound-aware probe semantics ---
+
+#[test]
+fn test_probe_value_exact_always_usable() {
+    let mut tt = TranspositionTable::new();
+    let board = Board::new();
+    let mv = create_move(12, 28);
+
+    tt.store_with_bound(&board, 5, 42, Bound::Exact, mv, None);
+
+    // Exact score is usable for any window at sufficient depth.
+    assert_eq!(tt.probe_value(&board, 5, -1000, 1000), Some(42));
+    assert_eq!(tt.probe_value(&board, 5, 100, 200), Some(42));
+    assert_eq!(tt.probe_value(&board, 5, -200, -100), Some(42));
+    // Insufficient depth -> not usable.
+    assert_eq!(tt.probe_value(&board, 6, -1000, 1000), None);
+}
+
+#[test]
+fn test_probe_value_lower_bound_only_on_cutoff() {
+    let mut tt = TranspositionTable::new();
+    let board = Board::new();
+    let mv = create_move(12, 28);
+
+    // Stored as a fail-high: true value >= 100.
+    tt.store_with_bound(&board, 5, 100, Bound::Lower, mv, None);
+
+    // Usable only when it still causes a beta cutoff (score >= beta).
+    assert_eq!(tt.probe_value(&board, 5, 0, 100), Some(100));
+    assert_eq!(tt.probe_value(&board, 5, 0, 50), Some(100));
+    // Window beta above the bound: cannot conclude the exact value.
+    assert_eq!(tt.probe_value(&board, 5, 0, 200), None);
+}
+
+#[test]
+fn test_probe_value_upper_bound_only_on_fail_low() {
+    let mut tt = TranspositionTable::new();
+    let board = Board::new();
+    let mv = create_move(12, 28);
+
+    // Stored as a fail-low: true value <= 30.
+    tt.store_with_bound(&board, 5, 30, Bound::Upper, mv, None);
+
+    // Usable only when it still fails low (score <= alpha).
+    assert_eq!(tt.probe_value(&board, 5, 30, 100), Some(30));
+    assert_eq!(tt.probe_value(&board, 5, 50, 100), Some(30));
+    // Alpha below the bound: cannot conclude the exact value.
+    assert_eq!(tt.probe_value(&board, 5, 0, 100), None);
+}
+
+#[test]
+fn test_probe_value_respects_depth() {
+    let mut tt = TranspositionTable::new();
+    let board = Board::new();
+    let mv = create_move(12, 28);
+
+    tt.store_with_bound(&board, 3, 77, Bound::Exact, mv, None);
+    assert_eq!(tt.probe_value(&board, 3, -1000, 1000), Some(77));
+    assert_eq!(tt.probe_value(&board, 2, -1000, 1000), Some(77));
+    assert_eq!(tt.probe_value(&board, 4, -1000, 1000), None);
+}
+
+#[test]
+fn test_legacy_store_is_exact() {
+    let mut tt = TranspositionTable::new();
+    let board = Board::new();
+    let mv = create_move(12, 28);
+
+    tt.store(&board, 4, 12, mv);
+    let entry = tt.probe_entry(&board).unwrap();
+    assert_eq!(entry.bound(), Bound::Exact);
+    assert_eq!(tt.probe_value(&board, 4, 100, 200), Some(12));
 }
 
 #[test]

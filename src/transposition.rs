@@ -7,6 +7,24 @@ use crate::board::Board;
 use crate::move_types::Move;
 use std::collections::HashMap;
 
+/// The kind of bound a stored score represents relative to the alpha-beta
+/// window in which it was produced.
+///
+/// Without this flag a fail-hard alpha-beta search stores `beta` on a cutoff
+/// and the last move's score on a fail-low, both of which are *bounds*, not
+/// exact values. Reusing them as exact scores returns wrong results.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum Bound {
+    /// The score is exact (`alpha < score < beta`, a move improved alpha).
+    Exact,
+    /// The score is a lower bound (fail-high / beta cutoff: `score >= beta`).
+    /// The true value is at least `score`.
+    Lower,
+    /// The score is an upper bound (fail-low: no move improved alpha).
+    /// The true value is at most `score`.
+    Upper,
+}
+
 /// Represents an entry in the transposition table.
 #[derive(PartialEq, Clone)]
 pub struct TranspositionEntry {
@@ -14,6 +32,8 @@ pub struct TranspositionEntry {
     pub(crate) depth: i32,
     /// The evaluation score for this position.
     pub(crate) score: i32,
+    /// The bound type of the stored score relative to its search window.
+    pub(crate) bound: Bound,
     /// The best move found for this position.
     pub(crate) best_move: Move,
     /// Mate search results: (mate_depth, mate_move, searched_depth)
@@ -21,6 +41,23 @@ pub struct TranspositionEntry {
     /// Some((0, move, depth)) means no mate found at depth
     /// Some((mate_depth, move, depth)) means mate found in mate_depth moves
     pub(crate) mate_result: Option<(i32, Move, i32)>,
+}
+
+impl TranspositionEntry {
+    /// The bound type of the stored score.
+    pub fn bound(&self) -> Bound {
+        self.bound
+    }
+
+    /// The stored evaluation score.
+    pub fn score(&self) -> i32 {
+        self.score
+    }
+
+    /// The best move stored for this position.
+    pub fn best_move(&self) -> Move {
+        self.best_move
+    }
 }
 
 /// A transposition table for caching chess positions and their evaluations.
@@ -68,6 +105,38 @@ impl TranspositionTable {
         }
     }
 
+    /// Look up the raw entry regardless of depth (used for move ordering).
+    pub fn probe_entry(&self, board: &Board) -> Option<&TranspositionEntry> {
+        self.table.get(&board.zobrist_hash)
+    }
+
+    /// Probe for a directly usable score given the current `[alpha, beta]`
+    /// search window.
+    ///
+    /// A stored score may only be returned as the value of the node when its
+    /// bound is *compatible* with the window:
+    /// - `Exact` is always usable.
+    /// - `Lower` (`score >= beta` when stored) is usable only if it still
+    ///   produces a beta cutoff in the current window (`score >= beta`).
+    /// - `Upper` (`score <= alpha` when stored) is usable only if it still
+    ///   produces a fail-low in the current window (`score <= alpha`).
+    ///
+    /// The stored depth must be at least `depth`. Mate handling is left to the
+    /// caller; stored scores are returned verbatim. Returns `None` when the
+    /// entry exists but can only be used for move ordering.
+    pub fn probe_value(&self, board: &Board, depth: i32, alpha: i32, beta: i32) -> Option<i32> {
+        let entry = self.table.get(&board.zobrist_hash)?;
+        if entry.depth < depth {
+            return None;
+        }
+        match entry.bound {
+            Bound::Exact => Some(entry.score),
+            Bound::Lower if entry.score >= beta => Some(entry.score),
+            Bound::Upper if entry.score <= alpha => Some(entry.score),
+            _ => None,
+        }
+    }
+
     /// Adds a position to the transposition table or updates an existing entry.
     ///
     /// # Arguments
@@ -77,7 +146,50 @@ impl TranspositionTable {
     /// * `score` - The evaluation score for this position.
     /// * `best_move` - The best move found for this position, if any.
     pub fn store(&mut self, board: &Board, depth: i32, score: i32, best_move: Move) {
-        self.store_with_mate(board, depth, score, best_move, None);
+        self.store_with_bound(board, depth, score, Bound::Exact, best_move, None);
+    }
+
+    /// Store a position with an explicit score bound (Exact/Lower/Upper).
+    pub fn store_with_bound(
+        &mut self,
+        board: &Board,
+        depth: i32,
+        score: i32,
+        bound: Bound,
+        best_move: Move,
+        mate_result: Option<(i32, Move, i32)>,
+    ) {
+        let entry = self.table.get(&board.zobrist_hash);
+        if entry.is_none() {
+            self.table.insert(
+                board.zobrist_hash,
+                TranspositionEntry {
+                    depth,
+                    score,
+                    bound,
+                    best_move,
+                    mate_result,
+                },
+            );
+        } else {
+            let entry = entry.unwrap();
+            if depth > entry.depth {
+                self.table.insert(
+                    board.zobrist_hash,
+                    TranspositionEntry {
+                        depth,
+                        score,
+                        bound,
+                        best_move,
+                        mate_result,
+                    },
+                );
+            } else if mate_result.is_some() && entry.mate_result.is_none() {
+                let mut updated_entry = entry.clone();
+                updated_entry.mate_result = mate_result;
+                self.table.insert(board.zobrist_hash, updated_entry);
+            }
+        }
     }
 
     /// Adds a position with mate search results to the transposition table.
@@ -97,39 +209,7 @@ impl TranspositionTable {
         best_move: Move,
         mate_result: Option<(i32, Move, i32)>,
     ) {
-        // Add a position to the table
-        // If the position already exists, update it if the depth is greater
-        let entry = self.table.get(&board.zobrist_hash);
-        if entry.is_none() {
-            self.table.insert(
-                board.zobrist_hash,
-                TranspositionEntry {
-                    depth,
-                    score,
-                    best_move,
-                    mate_result,
-                },
-            );
-        } else {
-            let entry = entry.unwrap();
-            if depth > entry.depth {
-                // Update with new search results
-                self.table.insert(
-                    board.zobrist_hash,
-                    TranspositionEntry {
-                        depth,
-                        score,
-                        best_move,
-                        mate_result,
-                    },
-                );
-            } else if mate_result.is_some() && entry.mate_result.is_none() {
-                // Keep existing entry but add mate result if we didn't have one
-                let mut updated_entry = entry.clone();
-                updated_entry.mate_result = mate_result;
-                self.table.insert(board.zobrist_hash, updated_entry);
-            }
-        }
+        self.store_with_bound(board, depth, score, Bound::Exact, best_move, mate_result);
     }
 
     /// Probe for mate search results in the transposition table.
@@ -184,6 +264,7 @@ impl TranspositionTable {
                 TranspositionEntry {
                     depth: 0, // No regular search depth
                     score: 0, // No evaluation score
+                    bound: Bound::Exact,
                     best_move: mate_move,
                     mate_result,
                 },
