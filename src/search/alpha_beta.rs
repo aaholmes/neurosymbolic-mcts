@@ -77,7 +77,7 @@ use crate::boardstack::BoardStack;
 use crate::eval::PestoEval;
 use crate::move_generation::MoveGen;
 use crate::move_types::{Move, NULL_MOVE};
-use crate::transposition::TranspositionTable;
+use crate::transposition::{Bound, TranspositionTable};
 use std::time::{Duration, Instant};
 
 /// Perform alpha-beta search from the given position
@@ -241,9 +241,18 @@ pub fn alpha_beta_search(
         );
     }
 
-    // Store the result in the transposition table
-    tt.store(board.current_state(), depth, eval, best_move);
+    // Store the result in the transposition table.
+    // `alpha` rose above `alpha_init` iff some move improved it; in that case
+    // the search returned an exact score within the window. Otherwise no move
+    // improved alpha and `alpha` is an upper bound on the true value.
+    let bound = if alpha > alpha_init {
+        Bound::Exact
+    } else {
+        Bound::Upper
+    };
+    tt.store_with_bound(board.current_state(), depth, alpha, bound, best_move, None);
 
+    let _ = eval; // last write may be unread; eval is consumed inside the loop
     (alpha, best_move, n, false)
 }
 
@@ -274,6 +283,16 @@ fn alpha_beta_recursive(
             return (0, 0, true); // Return 0 score, 0 nodes, terminated=true
         }
     }
+    let alpha_orig = alpha;
+
+    // --- Transposition Table Probe ---
+    // Only reuse a stored score whose bound is compatible with the current
+    // window at sufficient depth; otherwise the entry is used only via its
+    // best move for ordering (move ordering is handled elsewhere).
+    if let Some(score) = tt.probe_value(board.current_state(), depth, alpha, beta) {
+        return (score, 1, false);
+    }
+
     // --- Depth Check ---
     if depth <= 0 {
         let (score, nodes) = quiescence_search(
@@ -297,6 +316,7 @@ fn alpha_beta_recursive(
     }
 
     let mut best_eval: i32 = -1000000;
+    let mut best_move: Move = NULL_MOVE;
     let mut n: i32 = 1; // Count current node
 
     // Generate and combine captures and regular moves
@@ -348,7 +368,10 @@ fn alpha_beta_recursive(
         // n += nodes; // Moved up
 
         // Update best evaluation
-        best_eval = best_eval.max(eval);
+        if eval > best_eval {
+            best_eval = eval;
+            best_move = m;
+        }
         if eval > alpha {
             alpha = eval;
             if alpha >= beta {
@@ -357,6 +380,8 @@ fn alpha_beta_recursive(
                     history.update(&m, depth);
                 }
                 board.undo_move();
+                // Fail-high: `beta` is a lower bound on the true value.
+                tt.store_with_bound(board.current_state(), depth, beta, Bound::Lower, m, None);
                 return (beta, n, false); // Not terminated here
             }
         }
@@ -364,6 +389,22 @@ fn alpha_beta_recursive(
         // Undo the move
         board.undo_move();
     }
+
+    // Loop completed with no beta cutoff. If alpha rose above its original
+    // value some move was exact; otherwise `best_eval` is an upper bound.
+    let bound = if alpha > alpha_orig {
+        Bound::Exact
+    } else {
+        Bound::Upper
+    };
+    tt.store_with_bound(
+        board.current_state(),
+        depth,
+        best_eval,
+        bound,
+        best_move,
+        None,
+    );
 
     (best_eval, n, false) // Not terminated if loop completes normally
 }
