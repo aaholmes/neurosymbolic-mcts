@@ -93,10 +93,12 @@ add_executable(selfplay selfplay_main.cu)
 target_link_libraries(selfplay caissawary_cuda)
 set_target_properties(selfplay PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
-# Attention debug test
-add_executable(test_attn_debug test/test_attn_debug.cu)
-target_link_libraries(test_attn_debug caissawary_cuda)
-set_target_properties(test_attn_debug PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# Attention debug test (optional: source is not always present in a clean checkout)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_attn_debug.cu")
+    add_executable(test_attn_debug test/test_attn_debug.cu)
+    target_link_libraries(test_attn_debug caissawary_cuda)
+    set_target_properties(test_attn_debug PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+endif()
 
 # Transformer vs PyTorch regression tests
 add_executable(test_transformer_vs_pytorch test/test_transformer_vs_pytorch.cu)

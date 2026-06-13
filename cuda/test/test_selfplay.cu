@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 // GPU_MAKE_MOVE helper (matches common.cuh encoding)
 #ifndef GPU_MAKE_MOVE
@@ -27,7 +28,8 @@ void test_selfplay_single_game(bool& test_failed) {
     SelfPlayConfig config = {};
     config.num_games = 1;
     config.sims_per_move = 50;
-    config.max_nodes_per_tree = config.sims_per_move + 100;
+    config.max_nodes_per_tree = std::max(MIN_POOL_PER_TREE,
+                                          config.sims_per_move * POOL_FACTOR_PER_SIM);
     config.explore_base = 0.80f;
     config.enable_koth = false;
     config.c_puct = 1.414f;
@@ -77,7 +79,8 @@ void test_selfplay_batch(bool& test_failed) {
     SelfPlayConfig config = {};
     config.num_games = 4;  // small batch for testing
     config.sims_per_move = 30;
-    config.max_nodes_per_tree = config.sims_per_move + 100;
+    config.max_nodes_per_tree = std::max(MIN_POOL_PER_TREE,
+                                          config.sims_per_move * POOL_FACTOR_PER_SIM);
     config.explore_base = 0.80f;
     config.enable_koth = false;
     config.c_puct = 1.414f;
@@ -202,7 +205,8 @@ void test_selfplay_determinism(bool& test_failed) {
     SelfPlayConfig config = {};
     config.num_games = 2;
     config.sims_per_move = 30;
-    config.max_nodes_per_tree = config.sims_per_move + 100;
+    config.max_nodes_per_tree = std::max(MIN_POOL_PER_TREE,
+                                          config.sims_per_move * POOL_FACTOR_PER_SIM);
     config.explore_base = 0.80f;
     config.enable_koth = false;
     config.c_puct = 1.414f;
@@ -245,7 +249,8 @@ void test_eval_single_game(bool& test_failed) {
     EvalConfig config = {};
     config.num_games = 1;
     config.sims_per_move = 30;
-    config.max_nodes_per_tree = config.sims_per_move + 100;
+    config.max_nodes_per_tree = std::max(MIN_POOL_PER_TREE,
+                                          config.sims_per_move * POOL_FACTOR_PER_SIM);
     config.explore_base = 0.90f;
     config.enable_koth = false;
     config.c_puct = 1.414f;
@@ -269,7 +274,8 @@ void test_eval_batch(bool& test_failed) {
     EvalConfig config = {};
     config.num_games = 8;
     config.sims_per_move = 30;
-    config.max_nodes_per_tree = config.sims_per_move + 100;
+    config.max_nodes_per_tree = std::max(MIN_POOL_PER_TREE,
+                                          config.sims_per_move * POOL_FACTOR_PER_SIM);
     config.explore_base = 0.90f;
     config.enable_koth = false;
     config.c_puct = 1.414f;
