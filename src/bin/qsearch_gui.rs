@@ -160,7 +160,7 @@ fn build_qsearch_tree(
         scored_children.push((*capture, score, child_tree));
     }
 
-    scored_children.sort_by(|a, b| b.1.cmp(&a.1));
+    scored_children.sort_by_key(|b| std::cmp::Reverse(b.1));
     scored_children.truncate(TOP_N);
 
     let mut best_score = stand_pat;

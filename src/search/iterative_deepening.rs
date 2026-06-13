@@ -90,11 +90,7 @@ pub fn iterative_deepening_ab_search(
 
         if verbose {
             let elapsed = start_time.elapsed().as_millis();
-            let nps = if elapsed > 0 {
-                (nodes as u128 * 1000) / elapsed
-            } else {
-                0
-            };
+            let nps = (nodes as u128 * 1000).checked_div(elapsed).unwrap_or(0);
             println!(
                 "info depth {} score cp {} time {} nodes {} nps {} pv {}",
                 depth,

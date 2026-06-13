@@ -369,7 +369,7 @@ impl MoveGen {
             .into_iter()
             .map(|m| (m, self.mvv_lva(board, m.from, m.to)))
             .collect();
-        captures_with_eval.sort_by(|a, b| b.1.cmp(&a.1));
+        captures_with_eval.sort_by_key(|b| std::cmp::Reverse(b.1));
         let sorted_captures = captures_with_eval.into_iter().map(|(m, _)| m).collect();
 
         // Sort non-captures by history score if available, then by evaluation
@@ -386,11 +386,11 @@ impl MoveGen {
 
         // First sort by history score (unstable sort)
         if history.is_some() {
-            non_captures_with_eval.sort_by(|a, b| b.1.cmp(&a.1));
+            non_captures_with_eval.sort_by_key(|b| std::cmp::Reverse(b.1));
         }
 
         // Then sort by evaluation (stable sort)
-        non_captures_with_eval.sort_by(|a, b| b.2.cmp(&a.2));
+        non_captures_with_eval.sort_by_key(|b| std::cmp::Reverse(b.2));
 
         let sorted_non_captures = non_captures_with_eval
             .into_iter()

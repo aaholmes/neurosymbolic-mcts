@@ -88,7 +88,7 @@ fn main() {
                 }
             }
         }
-        children_info.sort_by(|a, b| b.1.cmp(&a.1));
+        children_info.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (mv, visits, q) in &children_info {
             println!("{:<10} {:>6}  {:>+8.3}", mv.to_uci(), visits, q);
         }

@@ -251,7 +251,7 @@ fn main() {
                         children_info.push((cmv, c.visits, q));
                     }
                 }
-                children_info.sort_by(|a, b| b.1.cmp(&a.1));
+                children_info.sort_by_key(|b| std::cmp::Reverse(b.1));
 
                 let top_n = children_info.len().min(5);
                 if top_n > 0 {

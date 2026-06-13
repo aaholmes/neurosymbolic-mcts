@@ -237,8 +237,8 @@ impl PestoEval {
             if king_sq < 64 {
                 let shield_zone_mask = get_king_shield_zone_mask(color, king_sq);
                 let shield_pawns = popcnt(shield_zone_mask & friendly_pawns);
-                mg[color] += shield_pawns as i32 * self.weights.king_safety_pawn_shield_bonus[0];
-                eg[color] += shield_pawns as i32 * self.weights.king_safety_pawn_shield_bonus[1];
+                mg[color] += shield_pawns * self.weights.king_safety_pawn_shield_bonus[0];
+                eg[color] += shield_pawns * self.weights.king_safety_pawn_shield_bonus[1];
 
                 let enemy_king_sq = board.pieces[enemy_color][KING].trailing_zeros() as usize;
                 if enemy_king_sq < 64 {

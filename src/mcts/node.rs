@@ -426,7 +426,7 @@ impl MctsNode {
     pub fn get_legal_moves(state: &Board, move_gen: &MoveGen) -> Vec<Move> {
         let (captures, moves) = move_gen.gen_pseudo_legal_moves(state);
         let mut legal_moves = Vec::with_capacity(captures.len() + moves.len());
-        for m in captures.into_iter().chain(moves.into_iter()) {
+        for m in captures.into_iter().chain(moves) {
             let next_state = state.apply_move_to_board(m);
             if next_state.is_legal(move_gen) {
                 legal_moves.push(m);
