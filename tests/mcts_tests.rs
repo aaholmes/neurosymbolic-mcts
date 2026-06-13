@@ -135,8 +135,10 @@ mod mcts_tests {
     #[test]
     fn test_simulation_immediate_stalemate() {
         let move_gen = setup();
-        // Stalemate position, White to move
-        let board = Board::new_from_fen("k7/8/8/8/8/5Q2/8/K7 w - - 0 1");
+        // Genuine stalemate: Black to move, not in check, no legal moves
+        // (Kh8 boxed in by Qf7 + Kg6). The playout must terminate immediately
+        // as a draw rather than play on, so 0.5 is deterministic.
+        let board = Board::new_from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
         let result = simulate_random_playout(&board, &move_gen);
         assert_eq!(result, 0.5); // Draw
     }
