@@ -4,6 +4,50 @@ GPU benchmarks measured on RTX 5060 Ti (sm_120, 16 GB VRAM, 36 SMs). Rust benchm
 
 All numbers report **samples/sec** (one completed MCTS search = one training sample) and **sims/sec** (single MCTS simulation = one path through the tree). At 200 sims/move, 1 sample = 200 sims.
 
+## GPU-resident search: design and results
+
+A fully GPU-resident MCTS implementation in `cuda/`. The entire search loop -- tree traversal, node expansion, quick checks, quiescence search, and neural network inference -- runs inside a persistent CUDA kernel with no CPU interaction during search. No cuBLAS, no cuDNN, no host round-trips.
+
+> **Status:** this path is complete and benchmarked (v2→v5), but it plateaued at the ~99 KB shared-memory ceiling and is no longer the lead direction — see [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md). It is kept as a self-contained GPU-only engine and a throughput baseline; ongoing work has shifted to CPU-resident MCTS with batched GPU inference (and is not yet wired into the Rust UCI engine).
+
+### Two Inference Architectures
+
+Which is faster depends on model size:
+
+| Architecture | Mechanism | Best for |
+|---|---|---|
+| **GPU-resident MCTS** (CUDA) | Full MCTS loop on GPU, NN inline per-SM | Small models (<=12L D=128) |
+| **CPU MCTS + GPU batched** (Rust+LibTorch) | Rayon threads + InferenceServer batching | Large models (>=24L) |
+
+Throughput measurements follow below.
+
+**GPU-resident wins for small models:** Each SM runs select-expand-evaluate-backup with zero CPU-GPU transfers. At 12L D=128 (2.4M params), transfer overhead of batched inference exceeds the cost of computing inline on each SM.
+
+**Batched wins for large models:** At 24+ layers (4.8M+ params), GPU forward pass exceeds 3.6ms per batch -- CPU tree operations can overlap. Larger models also exceed the ~99 KB shared memory limit for GPU-resident (D>=192 is impossible). See [CUDA_TC_ANALYSIS.md](CUDA_TC_ANALYSIS.md).
+
+### Current Model: SE-ResNet 6×128, ~2M params (v5)
+
+- **Throughput:** see below. At 200 sims/move on RTX 5060 Ti, 36 concurrent games: **101.4 samples/sec, 20.3K sims/sec** (v5: 2-explorer virtual loss + batched conv).
+- **Apples-to-apples vs Lc0+Maia (both at 6×64):** Caissawary v5 188.6 samples/sec vs Lc0 368 — at ~51% of Lc0's throughput, gap narrowed from 2.27× to 1.95× over the v3→v5 work. (The 6×64 figure is from a temporary, *uncommitted* benchmark branch; reproducing it requires editing `nn_weights.cuh` and relaxing a `static_assert` — see the v5 section below.)
+- **Optimization stack:** v3 (FP16 inter-layer activation storage, smem 81→49 KB) → v4 (`oracle_net_forward_block_b2`: true batched WMMA at B=2 with weight-load amortization, 1.19× per-sim NN improvement) → v5 (2-explorer scheduling per block: thread 0 sequentially does SELECT for both with virtual loss, EXPAND/BACKUP parallelize across warps 0/1, NN forward is one batched call). End-to-end gain v3→v5: **~1.17×** on samples/sec.
+- **Smem-bound batch ceiling:** B=2 is the practical limit at 6×128 (97 KB of 99 KB cap). Pushing further requires FP8 activations, streaming activations through global memory, or a cross-block batching architecture.
+
+### Transformer Also Supported
+
+A 12L D=128 pre-LayerNorm transformer (~2.4M params) runs as an alternative via `--arch transformer`. Hybrid TC/scalar forward: Q/K/V projections and FFN use wmma (FP16 in, FP32 accumulate); QK^T, softmax, and attn×V stay scalar due to workspace constraints. FP16 `buf_out` frees 16 KB for a dedicated TC staging region.
+
+### GPU Self-Play and Evaluation
+
+```bash
+# Self-play: 36 concurrent games, 200 sims/move
+cuda/build/selfplay /tmp/transformer_weights.bin 36 200 /tmp/selfplay_data/
+
+# Two-network SPRT evaluation (colors alternated for fairness)
+cuda/build/evaluate weights_a.bin weights_b.bin 36 200 /tmp/eval_data/
+```
+
+Both binaries produce training data compatible with `train.py`. Two-network eval partitions games by side-to-move, making two kernel calls per round -- both weight sets (~4.7 MB each) reside in GPU global memory simultaneously.
+
 ## Reproducing
 
 ```bash
