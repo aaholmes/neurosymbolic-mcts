@@ -245,7 +245,7 @@ impl UCIEngine {
             elapsed.as_millis() // Example if agent printed info: info depth 10 score cp 150 nodes 12345 time 1500 pv e2e4 e7e5 ...
         );
 
-        println!("bestmove {}", &best_move.print_algebraic());
+        println!("bestmove {}", best_move.print_algebraic());
     }
 
     fn parse_go_command(&mut self, args: &[&str]) {

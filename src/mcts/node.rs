@@ -6,7 +6,6 @@ use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::f64;
 use std::rc::{Rc, Weak};
 
 // Define Move Categories (Lower discriminant = higher priority)

@@ -101,7 +101,7 @@ engine in the result above.
 Moves are selected with AlphaZero's rule (PUCT, a variant of the upper confidence bound for trees),
 with one change:
 
-$$U(s,a) = c \cdot P(s,a) \cdot \frac{\sqrt{\max(N(s),\,1)}}{1 + n(s,a)}$$
+$$U(s,a) = c \cdot P(s,a) \cdot \frac{\sqrt{\max(N(s), 1)}}{1 + n(s,a)}$$
 
 AlphaZero uses $N(s)$, the visit count of the parent, in place of $\max(N(s), 1)$. On a node's first
 visit $N = 0$, which makes the exploration bonus zero for every move, so the first move tried is

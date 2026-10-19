@@ -3,7 +3,6 @@
 use super::*;
 use crate::eval::{EvalWeights, PestoEval};
 use crate::move_generation::MoveGen;
-use std::f64;
 
 pub struct TexelTuner {
     positions: Vec<TexelPosition>,
