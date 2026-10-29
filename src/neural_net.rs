@@ -9,8 +9,8 @@
 // ==========================================
 // 1. Real Implementation (LibTorch)
 // ==========================================
-#[cfg(feature = "neural")]
-mod real {
+#[cfg(feature = "neural-tch")]
+pub mod tch_impl {
     use crate::board::Board;
     use crate::mcts::tactical_mcts::TimingAccumulator;
     use crate::move_types::Move;
@@ -440,7 +440,7 @@ mod stub {
 }
 
 #[cfg(feature = "neural")]
-pub use self::real::NeuralNetPolicy;
+pub use self::candle_impl::NeuralNetPolicy;
 
 #[cfg(not(feature = "neural"))]
 pub use self::stub::NeuralNetPolicy;

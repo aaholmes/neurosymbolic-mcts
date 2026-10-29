@@ -64,15 +64,16 @@ proptest! {
 mod tensor_props {
     use super::*;
     use kingfisher::neural_net::NeuralNetPolicy;
-    use tch::Tensor;
+    use candle_core::Tensor;
 
     fn extract_plane(tensor: &Tensor, plane: usize) -> Vec<f32> {
-        let mut result = vec![0.0f32; 64];
         tensor
-            .narrow(0, plane as i64, 1)
-            .view([64])
-            .copy_data(&mut result, 64);
-        result
+            .narrow(0, plane, 1)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap()
     }
 
     proptest! {

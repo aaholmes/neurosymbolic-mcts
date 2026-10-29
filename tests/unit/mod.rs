@@ -4,6 +4,7 @@ mod bits_tests;
 mod board_encoding_tests;
 mod board_tests;
 mod board_utils_tests;
+mod candle_net_tests;
 mod boardstack_tests;
 mod eval_tests;
 mod evaluate_models_tests;

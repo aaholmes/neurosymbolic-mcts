@@ -43,7 +43,9 @@ shakmaty = "0.25" # Dependency for shakmaty-syzygy
 shakmaty-syzygy = "0.15.0"
 rayon = "1.7"
 crossbeam-channel = "0.5"
-tch = { git = "https://github.com/LaurentMazare/tch-rs", branch = "main", optional = true }
+tch = { git = "https://github.com/LaurentMazare/tch-rs", branch = "main", optional = true } # temporary: parity check for the candle port
+candle-core = { version = "0.11.0", optional = true }
+candle-nn = { version = "0.11.0", optional = true }
 rustc-hash = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -53,7 +55,9 @@ noru = "2.2"   # NNUE inference (game-agnostic). Planned HalfKP eval for Q-searc
 
 [features]
 default = []
-neural = ["dep:tch"]
+neural = ["dep:candle-core", "dep:candle-nn"]  # candle inference on CPU
+cuda = ["neural", "candle-core/cuda", "candle-nn/cuda"]  # needs nvcc >= 12.8 for sm_120 GPUs
+neural-tch = ["dep:tch"]  # temporary: LibTorch backend kept for parity checks
 slow-tests = []
 
 # Clippy lints deferred as stylistic/structural rather than fixed. Applied

@@ -6,7 +6,7 @@ use crate::common::{board_from_fen, positions};
 use kingfisher::board::Board;
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::piece_types::{BLACK, KING, WHITE};
-use tch::Tensor;
+use candle_core::Tensor;
 
 /// Test that tensor construction respects side-to-move flipping
 #[test]
@@ -56,7 +56,7 @@ fn test_tensor_dimensions() {
     let board = board_from_fen(positions::STARTING);
     let tensor = nn.board_to_tensor(&board);
 
-    let shape = tensor.size();
+    let shape = tensor.dims();
     assert_eq!(shape, &[17, 8, 8], "Tensor shape should be [17, 8, 8]"); // Guide said [1, 17, 8, 8] but src uses view([17, 8, 8])
 }
 
@@ -112,13 +112,12 @@ fn test_en_passant_plane() {
 }
 
 fn extract_plane(tensor: &Tensor, plane: usize) -> Vec<f32> {
-    // Extract a single 8x8 plane from the tensor
-    let mut result = vec![0.0f32; 64];
     // tensor is [17, 8, 8]
-    // narrow(dim, start, length)
     tensor
-        .narrow(0, plane as i64, 1)
-        .view([64])
-        .copy_data(&mut result, 64);
-    result
+        .narrow(0, plane, 1)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap()
 }

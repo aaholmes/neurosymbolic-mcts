@@ -213,15 +213,16 @@ mod tactical_q_init {
 #[cfg(feature = "neural")]
 mod tensor_17_plane {
     use super::*;
-    use tch::Tensor;
+    use candle_core::Tensor;
 
     fn extract_plane(tensor: &Tensor, plane: usize) -> Vec<f32> {
-        let mut result = vec![0.0f32; 64];
         tensor
-            .narrow(0, plane as i64, 1)
-            .view([64])
-            .copy_data(&mut result, 64);
-        result
+            .narrow(0, plane, 1)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap()
     }
 
     #[test]
@@ -230,7 +231,7 @@ mod tensor_17_plane {
         let board = board_from_fen(positions::STARTING);
         let tensor = nn.board_to_tensor(&board);
 
-        assert_eq!(tensor.size()[0], 17, "Should have exactly 17 planes");
+        assert_eq!(tensor.dims()[0], 17, "Should have exactly 17 planes");
     }
 
     #[test]
@@ -240,9 +241,6 @@ mod tensor_17_plane {
         // Plane 12: En passant
         // Planes 13-16: Castling (StM-KS, StM-QS, Opp-KS, Opp-QS)
 
-        let nn = NeuralNet::new_dummy(); // Wait, new() or new_dummy()? Guide says new_dummy().
-                                         // In my code NeuralNetPolicy::new() creates one. If feature=neural is on, it's real.
-                                         // But for unit testing logic without loading model, new() is fine as it doesn't load model by default.
         let nn = NeuralNetPolicy::new();
 
         // Position with one of each piece for both sides
