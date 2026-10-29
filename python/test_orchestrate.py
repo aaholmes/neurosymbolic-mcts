@@ -113,8 +113,9 @@ class TestOrchestrator:
 
         gen0_pt = os.path.join(cfg.weights_dir, "gen_0.pt")
         gen0_pth = os.path.join(cfg.weights_dir, "gen_0.pth")
-        assert os.path.exists(gen0_pt)
         assert os.path.exists(gen0_pth)
+        # Rust loads gen_0.pth when given gen_0.pt, so no TorchScript file is written
+        assert not os.path.exists(gen0_pt)
 
     def test_log_entry_format(self, tmp_workspace):
         cfg = TrainingConfig(
@@ -280,13 +281,13 @@ class TestOrchestratorExtended:
         """Calling initialize_gen0 twice doesn't overwrite existing model."""
         orch = self._make_orch(tmp_workspace)
         orch.initialize_gen0()
-        gen0_pt = os.path.join(orch.config.weights_dir, "gen_0.pt")
-        mtime1 = os.path.getmtime(gen0_pt)
+        gen0_pth = os.path.join(orch.config.weights_dir, "gen_0.pth")
+        mtime1 = os.path.getmtime(gen0_pth)
 
         import time
         time.sleep(0.01)
         orch.initialize_gen0()
-        mtime2 = os.path.getmtime(gen0_pt)
+        mtime2 = os.path.getmtime(gen0_pth)
         assert mtime1 == mtime2  # File not overwritten
 
     def test_initialize_gen0_sets_state(self, tmp_workspace):
@@ -310,10 +311,8 @@ class TestOrchestratorExtended:
         orch = self._make_orch(tmp_workspace)
         os.makedirs(orch.config.weights_dir, exist_ok=True)
 
-        candidate_pt = os.path.join(orch.config.weights_dir, "candidate.pt")
+        candidate_pt = os.path.join(orch.config.weights_dir, "candidate.pt")  # name only
         candidate_pth = os.path.join(orch.config.weights_dir, "candidate.pth")
-        with open(candidate_pt, "w") as f:
-            f.write("model")
         with open(candidate_pth, "w") as f:
             f.write("model")
 
@@ -327,8 +326,9 @@ class TestOrchestratorExtended:
 
         gen_pt = os.path.join(orch.config.weights_dir, "gen_7.pt")
         gen_pth = os.path.join(orch.config.weights_dir, "gen_7.pth")
-        assert os.path.exists(gen_pt)
         assert os.path.exists(gen_pth)
+        assert not os.path.exists(gen_pt)
+        assert orch.state.current_best_pt == gen_pt
 
     def test_handle_eval_result_accepted_updates_symlink(self, tmp_workspace):
         orch = self._make_orch(tmp_workspace)
@@ -336,8 +336,6 @@ class TestOrchestratorExtended:
 
         candidate_pt = os.path.join(orch.config.weights_dir, "candidate.pt")
         candidate_pth = os.path.join(orch.config.weights_dir, "candidate.pth")
-        with open(candidate_pt, "w") as f:
-            f.write("model")
         with open(candidate_pth, "w") as f:
             f.write("model")
 
@@ -347,24 +345,23 @@ class TestOrchestratorExtended:
             eval_results={"wins": 60, "losses": 30, "draws": 10},
         )
 
-        latest = os.path.join(orch.config.weights_dir, "latest.pt")
+        latest = os.path.join(orch.config.weights_dir, "latest.pth")
         assert os.path.islink(latest)
+        assert os.readlink(latest).endswith("gen_1.pth")
 
     def test_handle_eval_result_accepted_replaces_existing_symlink(self, tmp_workspace):
         orch = self._make_orch(tmp_workspace)
         os.makedirs(orch.config.weights_dir, exist_ok=True)
-        latest = os.path.join(orch.config.weights_dir, "latest.pt")
+        latest = os.path.join(orch.config.weights_dir, "latest.pth")
 
         # Create initial symlink
-        dummy = os.path.join(orch.config.weights_dir, "dummy.pt")
+        dummy = os.path.join(orch.config.weights_dir, "dummy.pth")
         with open(dummy, "w") as f:
             f.write("old")
         os.symlink(os.path.abspath(dummy), latest)
 
         candidate_pt = os.path.join(orch.config.weights_dir, "candidate.pt")
         candidate_pth = os.path.join(orch.config.weights_dir, "candidate.pth")
-        with open(candidate_pt, "w") as f:
-            f.write("new")
         with open(candidate_pth, "w") as f:
             f.write("new")
 
@@ -374,9 +371,9 @@ class TestOrchestratorExtended:
             eval_results={"wins": 60, "losses": 30, "draws": 10},
         )
         assert os.path.islink(latest)
-        # Symlink should point to gen_2.pt
+        # Symlink should point to gen_2.pth
         target = os.readlink(latest)
-        assert "gen_2.pt" in target
+        assert target.endswith("gen_2.pth")
 
     def test_handle_eval_result_rejected_no_files_created(self, tmp_workspace):
         orch = self._make_orch(tmp_workspace)
@@ -423,23 +420,6 @@ class TestOrchestratorExtended:
         total = orch.update_buffer(game_dir)
         assert total <= 30  # Capacity is 30
 
-    def test_export_model_for_rust(self, tmp_workspace):
-        from orchestrate import export_model_for_rust
-        from model import OracleNet
-        import torch
-
-        model = OracleNet(num_blocks=1, hidden_dim=16)
-        output_path = os.path.join(tmp_workspace, "test.pt")
-        export_model_for_rust(model, output_path)
-        assert os.path.exists(output_path)
-
-        # Verify it's loadable as a TorchScript module
-        loaded = torch.jit.load(output_path)
-        board = torch.randn(1, 17, 8, 8)
-        material = torch.randn(1, 1)
-        policy, value, k = loaded(board, material)
-        assert policy.shape == (1, 4672)
-
     def test_get_rust_env_puts_cudnn_on_library_paths(self, tmp_workspace):
         from orchestrate import get_rust_env
         env = get_rust_env()
@@ -467,6 +447,25 @@ class TestOrchestratorExtended:
         assert results["losses"] == 30
         assert results["draws"] == 10
         assert results["winrate"] == pytest.approx(0.65)
+
+    def test_run_evaluation_handles_llr_not_available(self, tmp_workspace):
+        """evaluate_models prints LLR=N/A when the LLR is undefined (e.g. one game)."""
+        orch = self._make_orch(tmp_workspace)
+        orch.state.current_best_pt = "current.pt"
+
+        mock_result = MagicMock()
+        mock_result.stdout = (
+            "WINS=1 LOSSES=0 DRAWS=0 WINRATE=1.0000 ACCEPTED=false "
+            "GAMES_PLAYED=1 LLR=N/A SPRT_RESULT=inconclusive\n"
+        )
+        mock_result.stderr = ""
+        mock_result.returncode = 1
+
+        with patch("subprocess.run", return_value=mock_result):
+            accepted, results = orch.run_evaluation("candidate.pt")
+
+        assert accepted is False
+        assert results["wins"] == 1
 
     def test_run_evaluation_rejected_output(self, tmp_workspace):
         """Test evaluation output parsing when model is rejected."""

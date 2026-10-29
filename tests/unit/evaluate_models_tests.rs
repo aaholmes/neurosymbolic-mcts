@@ -543,8 +543,10 @@ fn test_sprt_llr_all_draws() {
         draws: 100,
     };
     let llr = state.compute_llr(&config);
-    // All draws → var = (0 + 100/4)/100 - 0.25 = 0, so LLR is None (zero variance)
-    assert!(llr.is_none(), "All draws should have zero variance → None");
+    // All draws → zero variance; pseudo-counts make the LLR defined. 100 straight
+    // draws is strong evidence of no 10-Elo gain.
+    let llr = llr.expect("zero variance is regularized, not None");
+    assert!(llr < -2.944, "100 draws should accept H0, got LLR {llr}");
 
     // With a mix that's mostly draws, LLR should be computable and near 0
     let state2 = SprtState {
@@ -689,4 +691,74 @@ fn test_sprt_bounds_symmetric() {
         lower,
         upper
     );
+}
+
+/// The formula without regularization, to check that defined results do not change.
+fn reference_llr(w: f64, d: f64, l: f64, c: &SprtConfig) -> f64 {
+    let n = w + d + l;
+    let s0 = 1.0 / (1.0 + 10f64.powf(-c.elo0 / 400.0));
+    let s1 = 1.0 / (1.0 + 10f64.powf(-c.elo1 / 400.0));
+    let s = (w + 0.5 * d) / n;
+    let var = (w + d / 4.0) / n - s * s;
+    (s1 - s0) * (2.0 * s - s0 - s1) / (2.0 * var / n)
+}
+
+fn state(wins: u32, draws: u32, losses: u32) -> SprtState {
+    SprtState {
+        wins,
+        losses,
+        draws,
+    }
+}
+
+#[test]
+fn test_sprt_all_wins_accepts_h1() {
+    // Previously the variance was 0, the LLR None and the decision inconclusive forever.
+    let c = default_sprt_config();
+    assert_eq!(state(30, 0, 0).check_decision(&c), SprtResult::AcceptH1);
+}
+
+#[test]
+fn test_sprt_all_losses_accepts_h0() {
+    let c = default_sprt_config();
+    assert_eq!(state(0, 0, 30).check_decision(&c), SprtResult::AcceptH0);
+}
+
+#[test]
+fn test_sprt_two_wins_is_inconclusive() {
+    let c = default_sprt_config();
+    let llr = state(2, 0, 0).compute_llr(&c).unwrap();
+    assert!((0.0..1.0).contains(&llr), "2 wins: LLR {llr}");
+    assert_eq!(state(2, 0, 0).check_decision(&c), SprtResult::Inconclusive);
+}
+
+#[test]
+fn test_sprt_thirty_draws_is_inconclusive() {
+    let c = default_sprt_config();
+    assert_eq!(state(0, 30, 0).check_decision(&c), SprtResult::Inconclusive);
+}
+
+#[test]
+fn test_sprt_one_game_is_still_none() {
+    let c = default_sprt_config();
+    assert!(state(1, 0, 0).compute_llr(&c).is_none());
+}
+
+#[test]
+fn test_sprt_mixed_results_unchanged() {
+    let c = default_sprt_config();
+    for (w, d, l) in [
+        (60, 10, 30),
+        (30, 10, 60),
+        (2, 96, 2),
+        (26, 50, 24),
+        (5, 0, 1),
+    ] {
+        let got = state(w, d, l).compute_llr(&c).unwrap();
+        let want = reference_llr(w as f64, d as f64, l as f64, &c);
+        assert!(
+            (got - want).abs() < 1e-12,
+            "W{w} D{d} L{l}: {got} vs {want}"
+        );
+    }
 }

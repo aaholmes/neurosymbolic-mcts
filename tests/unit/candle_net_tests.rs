@@ -183,3 +183,35 @@ fn resolve_follows_symlinked_model_path() {
         WeightsFile::Pth(dir.path().join("gen_3.pth"))
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn resolve_pt_name_without_file_finds_symlinked_pth() {
+    // The orchestrator no longer writes TorchScript: weights/latest.pt is only a
+    // name, and weights/latest.pth is a symlink to gen_N.pth.
+    let dir = tempfile::tempdir().unwrap();
+    let gen = dir.path().join("gen_5.pth");
+    std::fs::copy(fixture("oraclenet_tiny.pth"), &gen).unwrap();
+    let latest_pth = dir.path().join("latest.pth");
+    std::os::unix::fs::symlink(&gen, &latest_pth).unwrap();
+    assert_eq!(
+        resolve_weights(&dir.path().join("latest.pt")).unwrap(),
+        WeightsFile::Pth(latest_pth.clone())
+    );
+    let sd = load_state_dict(&dir.path().join("latest.pt"), &Device::Cpu).unwrap();
+    assert!(sd.contains_key("k_logit"));
+}
+
+#[test]
+fn predict_batch_records_batch_sizes() {
+    let mut nn = NeuralNetPolicy::new();
+    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+        .unwrap();
+    let boards: Vec<_> = (0..4)
+        .map(|_| board_from_fen(positions::STARTING))
+        .collect();
+    nn.predict_batch(&boards, &[true; 4], &[0.0; 4]);
+    nn.predict_batch(&boards[..2], &[true; 2], &[0.0; 2]);
+    assert_eq!(nn.batch_sizes.count, 2);
+    assert!((nn.batch_sizes.mean_val() - 3.0).abs() < 1e-12);
+}
