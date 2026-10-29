@@ -69,7 +69,7 @@ impl SprtState {
 
     /// Compute the log-likelihood ratio (LLR) using the trinomial GSPRT formula.
     ///
-    /// Returns `None` if fewer than 2 games have been played or if variance is zero.
+    /// Returns `None` if fewer than 2 games have been played.
     ///
     /// Formula (matching fishtest):
     /// ```text
@@ -80,28 +80,17 @@ impl SprtState {
     /// var_s = var / N
     /// LLR = (s1 - s0) * (2*s_obs - s0 - s1) / (2 * var_s)
     /// ```
+    ///
+    /// When every game has the same result the variance is zero and the formula is
+    /// undefined. Half a game is then added to each of W, D and L, so that, for
+    /// example, 30 straight wins accept H1 while 2 straight wins stay inconclusive.
     pub fn compute_llr(&self, config: &SprtConfig) -> Option<f64> {
-        let n = self.total();
-        if n < 2 {
+        if self.total() < 2 {
             return None;
         }
-        let n_f = n as f64;
-        let w = self.wins as f64;
-        let d = self.draws as f64;
-
-        let s0 = 1.0 / (1.0 + f64::powf(10.0, -config.elo0 / 400.0));
-        let s1 = 1.0 / (1.0 + f64::powf(10.0, -config.elo1 / 400.0));
-
-        let s_obs = (w + 0.5 * d) / n_f;
-        let var = (w + d / 4.0) / n_f - s_obs * s_obs;
-
-        if var <= 0.0 {
-            return None;
-        }
-
-        let var_s = var / n_f;
-        let llr = (s1 - s0) * (2.0 * s_obs - s0 - s1) / (2.0 * var_s);
-        Some(llr)
+        let (w, d, l) = (self.wins as f64, self.draws as f64, self.losses as f64);
+        llr_from_counts(w, d, l, config)
+            .or_else(|| llr_from_counts(w + 0.5, d + 0.5, l + 0.5, config))
     }
 
     /// Check the SPRT decision given current results.
@@ -120,4 +109,18 @@ impl SprtState {
             }
         }
     }
+}
+
+/// Trinomial GSPRT LLR from (possibly fractional) counts; `None` if the variance is zero.
+fn llr_from_counts(w: f64, d: f64, l: f64, config: &SprtConfig) -> Option<f64> {
+    let n = w + d + l;
+    let s0 = 1.0 / (1.0 + f64::powf(10.0, -config.elo0 / 400.0));
+    let s1 = 1.0 / (1.0 + f64::powf(10.0, -config.elo1 / 400.0));
+    let s_obs = (w + 0.5 * d) / n;
+    let var = (w + d / 4.0) / n - s_obs * s_obs;
+    if var <= 0.0 {
+        return None;
+    }
+    let var_s = var / n;
+    Some((s1 - s0) * (2.0 * s_obs - s0 - s1) / (2.0 * var_s))
 }

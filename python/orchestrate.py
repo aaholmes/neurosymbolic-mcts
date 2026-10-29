@@ -216,20 +216,12 @@ class OrchestratorState:
         return cls(**data)
 
 
-def export_model_for_rust(model, output_path):
-    """Export PyTorch model to TorchScript at output_path (gen_N.pt).
-
-    The Rust engine does not read TorchScript: given gen_N.pt it loads the
-    state dict in gen_N.pth (or gen_N.safetensors) next to it. The .pt file
-    remains the handle that paths and copies refer to.
-    """
-    device = next(model.parameters()).device
-    model.eval()
-    example_board = torch.randn(1, 17, 8, 8, device=device)
-    example_scalars = torch.randn(1, 2, device=device)  # [q_result, qsearch_flag]
-    traced = torch.jit.trace(model, (example_board, example_scalars))
-    traced.save(output_path)
-    print(f"Exported TorchScript model to {output_path} (traced on {device})")
+def _parse_float(text):
+    """float(text), or None if text is missing or not a number (e.g. "N/A")."""
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
 
 
 # Cargo features for the Rust engine's network backend (candle). "cudnn" uses
@@ -285,18 +277,18 @@ class Orchestrator:
         os.makedirs(config.buffer_dir, exist_ok=True)
 
     def initialize_gen0(self):
-        """Create and export a fresh gen-0 model."""
+        """Create and save a fresh gen-0 model.
+
+        Only gen_0.pth is written. gen_0.pt is kept as the model's name: the Rust
+        engine, given gen_0.pt, loads the state dict in gen_0.pth.
+        """
         gen0_pt = os.path.join(self.config.weights_dir, "gen_0.pt")
         gen0_pth = os.path.join(self.config.weights_dir, "gen_0.pth")
 
-        if not os.path.exists(gen0_pt):
+        if not os.path.exists(gen0_pth):
             print("Initializing Generation 0...")
             torch.manual_seed(0)
             model = create_model(self.config)
-            # Move to CUDA so TorchScript traces device-dependent ops correctly
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = model.to(device)
-            export_model_for_rust(model, gen0_pt)
             torch.save({
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": {},
@@ -327,10 +319,9 @@ class Orchestrator:
     def handle_eval_result(self, accepted, generation, candidate_pt, candidate_pth, eval_results):
         """Update state based on evaluation results."""
         if accepted:
-            # Copy candidate to gen_N
+            # Copy candidate to gen_N (gen_N.pt is only a name; see initialize_gen0)
             gen_pt = os.path.join(self.config.weights_dir, f"gen_{generation}.pt")
             gen_pth = os.path.join(self.config.weights_dir, f"gen_{generation}.pth")
-            shutil.copy2(candidate_pt, gen_pt)
             shutil.copy2(candidate_pth, gen_pth)
 
             self.state.current_best_pt = gen_pt
@@ -344,11 +335,11 @@ class Orchestrator:
             self.state.accepted_count += 1
             self.state.model_elos[str(self.state.accepted_count)] = prev_elo + elo_delta
 
-            # Update latest symlink
-            latest_pt = os.path.join(self.config.weights_dir, "latest.pt")
-            if os.path.exists(latest_pt) or os.path.islink(latest_pt):
-                os.remove(latest_pt)
-            os.symlink(os.path.abspath(gen_pt), latest_pt)
+            # Update latest symlink (Rust given latest.pt resolves latest.pth)
+            latest_pth = os.path.join(self.config.weights_dir, "latest.pth")
+            if os.path.exists(latest_pth) or os.path.islink(latest_pth):
+                os.remove(latest_pth)
+            os.symlink(os.path.abspath(gen_pth), latest_pth)
 
             # Note: we do NOT clear the buffer on accept. Elo-weighted sampling
             # already downweights old data, and early stopping prevents overfitting.
@@ -593,19 +584,6 @@ class Orchestrator:
         if result.stdout:
             print(result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
 
-        # Export to TorchScript
-        print("Exporting candidate model...")
-        model = create_model(self.config)
-        checkpoint = torch.load(candidate_pth, map_location="cpu", weights_only=False)
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            model.load_state_dict(checkpoint)
-        # Move to CUDA so TorchScript traces device-dependent ops correctly
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
-        export_model_for_rust(model, candidate_pt)
-
         # Export CUDA weights for transformer
         if self.config.arch == "transformer":
             candidate_bin = candidate_pth.replace(".pth", ".bin")
@@ -762,7 +740,7 @@ class Orchestrator:
         draws = int(parts.get("DRAWS", 0))
         winrate = float(parts.get("WINRATE", 0.0))
         games_played = int(parts.get("GAMES_PLAYED", wins + losses + draws))
-        llr = float(parts.get("LLR", 0.0))
+        llr = _parse_float(parts.get("LLR"))  # "N/A" when the LLR is undefined
         sprt_result = parts.get("SPRT_RESULT", "")
 
         # If SPRT wasn't computed by the binary (CUDA path), compute it here

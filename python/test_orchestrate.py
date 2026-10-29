@@ -566,9 +566,7 @@ class TestAdaptiveMinibatches:
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
              patch.object(orch, '_compute_adaptive_minibatches', return_value=162) as mock_adaptive, \
-             patch("orchestrate.OracleNet") as mock_model_cls, \
-             patch("torch.load", return_value={"model_state_dict": {}}), \
-             patch("orchestrate.export_model_for_rust"):
+             patch("orchestrate.OracleNet") as mock_model_cls:
             mock_model = MagicMock()
             mock_model_cls.return_value = mock_model
 
@@ -590,9 +588,7 @@ class TestAdaptiveMinibatches:
         mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
-             patch("orchestrate.OracleNet") as mock_model_cls, \
-             patch("torch.load", return_value={"model_state_dict": {}}), \
-             patch("orchestrate.export_model_for_rust"):
+             patch("orchestrate.OracleNet") as mock_model_cls:
             mock_model = MagicMock()
             mock_model_cls.return_value = mock_model
 
@@ -760,9 +756,7 @@ class TestSlidingWindowBuffer:
         mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
-             patch("orchestrate.OracleNet") as mock_model_cls, \
-             patch("torch.load", return_value={"model_state_dict": {}}), \
-             patch("orchestrate.export_model_for_rust"):
+             patch("orchestrate.OracleNet") as mock_model_cls:
             mock_model_cls.return_value = MagicMock()
             # Even with small buffer, LR should be full
             orch.run_training(1, buffer_positions=5000)
@@ -1229,9 +1223,7 @@ class TestEloTracking:
         mock_result.returncode = 0
 
         with patch("subprocess.run", return_value=mock_result) as mock_run, \
-             patch("orchestrate.OracleNet") as mock_model_cls, \
-             patch("torch.load", return_value={"model_state_dict": {}}), \
-             patch("orchestrate.export_model_for_rust"):
+             patch("orchestrate.OracleNet") as mock_model_cls:
             mock_model_cls.return_value = MagicMock()
             orch.run_training(1, buffer_positions=10000)
 

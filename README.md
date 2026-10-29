@@ -155,10 +155,24 @@ are within 2% of the median):
 | 512 | 31.3 ms | 17.4 ms | 1.80× |
 | 2048 | 140 ms | 92.6 ms | 1.51× |
 
-The gain grows with batch size up to about 1,000 positions. Self-play uses batches of at most 16, where it is small, so
-end-to-end self-play (30 games, 200 simulations per move, 15 threads, 2 runs per backend) went from
-27.8 and 26.9 moves per second with LibTorch to 28.8 and 30.7 with candle, about 9% faster. Running
-more games in parallel, so that batches fill up, is where the larger speedups would show.
+The gain grows with batch size up to about 1,000 positions. In self-play, the batch size is limited
+by how many search threads are waiting for the network, since each thread has at most one request
+outstanding. Self-play throughput, in moves per second (60 games, 200 simulations per move, mean of
+2 runs per cell; the two runs differ by at most 1.4 moves per second):
+
+| Search threads | Batch cap | Mean batch | LibTorch | candle | Speedup |
+|---|---|---|---|---|---|
+| 15 | 16 | 10 | 30.5 | 34.2 | 1.12× |
+| 15 | 128 | 10 | 30.3 | 34.3 | 1.13× |
+| 60 | 16 | 14.5 | 49.4 | 56.7 | 1.15× |
+| 60 | 128 | 28 | 57.8 | 62.3 | 1.08× |
+
+The mean batch was recorded with candle only. In self-play candle is 8–15% faster, well short of
+its 1.6× gain on a single network call at batch 128. Running 60 threads instead of 15 matters more,
+nearly doubling throughput with either backend. At 60 threads on this 32-core machine the batches
+average only 28 positions, and candle's advantage shrinks to 8% at the larger cap. This suggests
+that most threads are busy with the CPU-side search rather than waiting for the network, so the
+search, not the network, now limits throughput; that has not yet been profiled.
 
 The outputs agree with plain 32-bit floating-point arithmetic to within 5e-6 when candle uses its
 own GPU kernels. With cuDNN, and with LibTorch, they differ by up to 3e-3 and 4e-3 respectively in
@@ -202,8 +216,8 @@ The engine, training loop and both search back ends work, and the result above i
 from a confidence interval on the Elo gap between the final models. Open directions:
 
 - **The Elo gap:** compute a bootstrap interval on the Elo difference between the final models.
-- **Larger batches:** run more games in parallel so that network calls reach the batch sizes where
-  candle is 1.6–1.8× faster than LibTorch.
+- **Self-play speed:** profile the CPU-side search at 60 threads, where it appears to limit
+  throughput, before trying larger batches. Faster inference alone gave 8–15%.
 - **Networks built around piece moves:** layers that pass information between squares a knight or
   queen move apart, rather than only between neighbours as a 3×3 convolution does. Each new
   architecture must be written in both PyTorch and Rust; the reference-output tests make that a

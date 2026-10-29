@@ -12,7 +12,7 @@
 #[cfg(feature = "neural")]
 mod candle_impl {
     use crate::board::Board;
-    use crate::mcts::tactical_mcts::TimingAccumulator;
+    use crate::mcts::tactical_mcts::{StatsAccumulator, TimingAccumulator};
     use crate::move_types::Move;
     use crate::nn::oracle_net::OracleNet;
     use crate::nn::weights::load_state_dict;
@@ -32,6 +32,8 @@ mod candle_impl {
         pub transfer_to_gpu_timing: TimingAccumulator,
         pub forward_timing: TimingAccumulator,
         pub transfer_from_gpu_timing: TimingAccumulator,
+        /// Number of positions in each forward pass.
+        pub batch_sizes: StatsAccumulator,
     }
 
     impl Default for NeuralNetPolicy {
@@ -52,6 +54,7 @@ mod candle_impl {
                 transfer_to_gpu_timing: TimingAccumulator::default(),
                 forward_timing: TimingAccumulator::default(),
                 transfer_from_gpu_timing: TimingAccumulator::default(),
+                batch_sizes: StatsAccumulator::default(),
             }
         }
 
@@ -131,6 +134,7 @@ mod candle_impl {
         ) -> candle_core::Result<Vec<(Vec<f32>, f32, f32)>> {
             let model = self.model.as_ref().expect("checked by caller");
             let b = boards.len();
+            self.batch_sizes.record(b as f64);
 
             // Phase 1: build inputs and copy them to the device
             let t0 = Instant::now();
@@ -194,6 +198,14 @@ mod candle_impl {
             Self::print_timing_row("CPU→device transfer", &self.transfer_to_gpu_timing);
             Self::print_timing_row("Forward pass", &self.forward_timing);
             Self::print_timing_row("device→CPU transfer", &self.transfer_from_gpu_timing);
+            if self.batch_sizes.count > 0 {
+                println!(
+                    "Batch size: mean {:.1}, s.d. {:.1}, over {} forward passes",
+                    self.batch_sizes.mean_val(),
+                    self.batch_sizes.std_val(),
+                    self.batch_sizes.count
+                );
+            }
         }
 
         fn print_timing_row(name: &str, acc: &TimingAccumulator) {
