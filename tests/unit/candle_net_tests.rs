@@ -20,8 +20,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn io() -> HashMap<String, Tensor> {
-    candle_core::safetensors::load(fixture("oraclenet_tiny_io.safetensors"), &Device::Cpu)
-        .unwrap()
+    candle_core::safetensors::load(fixture("oraclenet_tiny_io.safetensors"), &Device::Cpu).unwrap()
 }
 
 fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
@@ -54,7 +53,12 @@ fn forward_matches_pytorch_golden_outputs() {
     let k_ref: Vec<f32> = io["k"].flatten_all().unwrap().to_vec1().unwrap();
     assert!(dp < 1e-4, "log_policy max |diff| = {dp}");
     assert!(dv < 1e-4, "v_logit max |diff| = {dv}");
-    assert!((out.k - k_ref[0]).abs() < 1e-6, "k {} vs {}", out.k, k_ref[0]);
+    assert!(
+        (out.k - k_ref[0]).abs() < 1e-6,
+        "k {} vs {}",
+        out.k,
+        k_ref[0]
+    );
 }
 
 #[test]
@@ -163,4 +167,19 @@ fn board_to_tensor_has_17_planes() {
     let nn = NeuralNetPolicy::new();
     let t = nn.board_to_tensor(&board_from_fen(positions::STARTING));
     assert_eq!(t.dims(), &[17, 8, 8]);
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_follows_symlinked_model_path() {
+    // weights/latest.pt is a symlink to gen_N.pt, with no latest.pth beside it
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("gen_3.pt"), b"torchscript").unwrap();
+    std::fs::copy(fixture("oraclenet_tiny.pth"), dir.path().join("gen_3.pth")).unwrap();
+    let latest = dir.path().join("latest.pt");
+    std::os::unix::fs::symlink(dir.path().join("gen_3.pt"), &latest).unwrap();
+    assert_eq!(
+        resolve_weights(&latest).unwrap(),
+        WeightsFile::Pth(dir.path().join("gen_3.pth"))
+    );
 }

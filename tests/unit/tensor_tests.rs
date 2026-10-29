@@ -3,10 +3,10 @@
 #![cfg(feature = "neural")]
 
 use crate::common::{board_from_fen, positions};
+use candle_core::Tensor;
 use kingfisher::board::Board;
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::piece_types::{BLACK, KING, WHITE};
-use candle_core::Tensor;
 
 /// Test that tensor construction respects side-to-move flipping
 #[test]

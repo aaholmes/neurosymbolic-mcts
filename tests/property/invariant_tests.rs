@@ -63,8 +63,8 @@ proptest! {
 #[cfg(feature = "neural")]
 mod tensor_props {
     use super::*;
-    use kingfisher::neural_net::NeuralNetPolicy;
     use candle_core::Tensor;
+    use kingfisher::neural_net::NeuralNetPolicy;
 
     fn extract_plane(tensor: &Tensor, plane: usize) -> Vec<f32> {
         tensor

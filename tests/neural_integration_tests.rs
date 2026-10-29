@@ -20,11 +20,17 @@ fn test_neural_network_integration() {
     let move_gen = MoveGen::new();
 
     // Test neural network availability
-    let mut nn_policy = NeuralNetPolicy::new_demo_enabled(); // Tries to load models/model.pt
+    // Tiny randomized OracleNet committed for parity tests (python/export_parity_fixture.py)
+    let mut nn_policy = NeuralNetPolicy::new();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/oraclenet_tiny.safetensors"
+    );
+    nn_policy.load(fixture).expect("fixture model should load");
 
     assert!(
         nn_policy.is_available(),
-        "Neural network should be available when feature is enabled and model exists"
+        "Neural network should be available after loading the fixture"
     );
 
     println!("Neural Network available: {}", nn_policy.is_available());
@@ -34,8 +40,7 @@ fn test_neural_network_integration() {
     let board = Board::new();
 
     let tensor = nn_policy.board_to_tensor(&board);
-    // Note: tensor size might be hard to get generically if it returns tch::Tensor or stub ()
-    // But we know it should be 17*8*8 = 1088 values if real.
+    assert_eq!(tensor.dims(), &[17, 8, 8]);
 
     // Test neural network prediction
     println!("\n🔮 Testing neural network prediction...");
@@ -71,7 +76,7 @@ fn test_neural_network_integration() {
         println!("✅ Move priors for {} legal moves", move_priors.len());
         assert!(!move_priors.is_empty());
     } else {
-        panic!("Neural network prediction failed unexpectedly (should work with demo model)");
+        panic!("Neural network prediction failed unexpectedly");
     }
 
     // Test neural MCTS search

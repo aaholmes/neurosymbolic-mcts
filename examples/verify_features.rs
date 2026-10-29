@@ -6,7 +6,6 @@
 use kingfisher::board::Board;
 use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::piece_types::{BISHOP, KING, KNIGHT, PAWN, QUEEN, ROOK};
-// use tch::{Tensor, Device}; // NeuralNetPolicy handles tensor creation internals
 
 fn main() {
     println!("🧪 Neural Network Feature Visualizer");
@@ -24,25 +23,19 @@ fn main() {
 
     // We need to access the tensor conversion logic.
     // Since board_to_tensor is an internal helper of NeuralNetPolicy (or part of its impl),
-    // and might use `tch`, we rely on NeuralNetPolicy to expose it or we test via a public method if available.
+    // we rely on NeuralNetPolicy to expose it.
     // `NeuralNetPolicy` has `board_to_tensor` but it returns a `Tensor`.
     // We need to convert that `Tensor` back to CPU data to visualize.
 
     #[cfg(feature = "neural")]
     {
-        use tch::{Device, Kind};
         let nn = NeuralNetPolicy::new(); // Don't need to load weights, just need structure
         let tensor = nn.board_to_tensor(&board);
 
-        println!("Tensor Shape: {:?}", tensor.size());
+        println!("Tensor Shape: {:?}", tensor.dims());
 
-        // Extract data
         // Shape: [17, 8, 8]
-        let mut flat_data = vec![0.0f32; 17 * 8 * 8];
-        tensor
-            .view([-1])
-            .to_device(Device::Cpu)
-            .copy_data(&mut flat_data, 17 * 8 * 8);
+        let flat_data: Vec<f32> = tensor.flatten_all().unwrap().to_vec1().unwrap();
 
         let plane_names = [
             "Us Pawn",

@@ -57,6 +57,7 @@ noru = "2.2"   # NNUE inference (game-agnostic). Planned HalfKP eval for Q-searc
 default = []
 neural = ["dep:candle-core", "dep:candle-nn"]  # candle inference on CPU
 cuda = ["neural", "candle-core/cuda", "candle-nn/cuda"]  # needs nvcc >= 12.8 for sm_120 GPUs
+cudnn = ["cuda", "candle-core/cudnn", "candle-nn/cudnn"]  # cuDNN convolutions (libcudnn must be on the library path)
 neural-tch = ["dep:tch"]  # temporary: LibTorch backend kept for parity checks
 slow-tests = []
 
@@ -151,3 +152,8 @@ path = "src/bin/profile_engine.rs"
 [[bin]]
 name = "qsearch_gui"
 path = "src/bin/qsearch_gui.rs"
+
+[[test]]
+name = "tch_parity_tests"
+path = "tests/tch_parity_tests.rs"
+required-features = ["neural", "neural-tch"]
