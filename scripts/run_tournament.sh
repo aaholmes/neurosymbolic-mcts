@@ -1,13 +1,9 @@
 #!/bin/bash
 set -e
 
-# Build with neural feature (requires PyTorch)
-LIBTORCH_USE_PYTORCH=1 LIBTORCH_BYPASS_VERSION_CHECK=1 \
-  cargo build --release --features neural --bin round_robin
-
-# Set library path for PyTorch shared libs
-TORCH_LIB=$(python3 -c "import torch; print(torch.__file__.replace('__init__.py','lib'))")
-export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
+# Build with the candle GPU backend (needs nvcc >= 12.8 for RTX 50-series GPUs).
+# For cuDNN convolutions use --features cudnn, with libcudnn on LIBRARY_PATH and LD_LIBRARY_PATH.
+cargo build --release --features cuda --bin round_robin
 
 ./target/release/round_robin \
   --games-per-pair 100 --simulations 200 \

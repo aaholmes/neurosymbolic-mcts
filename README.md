@@ -8,8 +8,8 @@ an exact method can evaluate, such as a forced mate in N moves, becomes a termin
 Carlo tree search (MCTS) with its exact value, just as checkmate does, so the engine is rewarded for
 reaching it rather than only for checkmate. The training signal is denser, and unlike a learned
 reward model it cannot be gamed. The exact evaluation is also cheaper: an exact search costs about
-140 µs per position, compared with 1,765 µs for a network evaluation. Only positions no exact method
-can evaluate are sent to the neural network.
+140 µs per position, compared with about 1,500 µs for a network evaluation. Only positions no exact
+method can evaluate are sent to the neural network.
 
 Where no exact answer exists, the classical search still informs the network. A quiescence search
 plays out the forcing moves in a position, mainly captures, and scores the quiet position that
@@ -84,10 +84,14 @@ Each position is handled by the cheapest method that can evaluate it:
 |---|---|---|---|
 | 1 | Exact search for a forced mate in up to 5 moves (checking moves only), or a forced king march to the center in up to 3 | Proven value | 132–149 µs |
 | 2 | Quiescence search: captures and promotions are played out until the position is quiet, with all replies to check, one quiet check or fork per side, and a test for threats made by letting the side to move pass; the quiet position is scored with PeSTO, a standard hand-tuned evaluation of material and piece placement | Heuristic value | 8 µs |
-| 3 | Neural network | Learned value | 1,765 µs |
+| 3 | Neural network | Learned value | 1,487 µs |
 
-A position evaluated exactly in Tier 1 is terminal, like checkmate or stalemate, so its proven value propagates
-up the tree without being averaged with approximate evaluations of its children.
+The Tier 3 cost is the mean time per network call as the search sees it, measured with
+`profile_engine` (4 games played one after another, 200 simulations per move). It includes up to
+0.5 ms that the inference server waits for other requests to fill a batch.
+
+A position evaluated exactly in Tier 1 is terminal, like checkmate or stalemate, so its proven value
+propagates up the tree without being averaged with approximate evaluations of its children.
 
 The final value combines the network with the classical score:
 
@@ -108,6 +112,58 @@ visit $N = 0$, which makes the exploration bonus zero for every move, so the fir
 whichever the move generator lists first. With $\max(N, 1)$ the bonus is proportional to the
 network's prior $P(s,a)$ from the first visit, so the network's top choice is tried first. For
 $N \geq 1$ the two rules are identical.
+
+## How the components fit together
+
+| Component | Language | Role |
+|---|---|---|
+| Search engine (`src/`) | Rust | Board representation, move generation, the three tiers, MCTS, self-play and evaluation binaries |
+| Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle) | Runs the network on CPU or GPU, called from a server thread that batches requests from all search threads |
+| Training (`python/`) | Python, PyTorch | Defines the network, trains it on self-play data, and runs the whole loop (`orchestrate.py`) |
+| GPU search (`cuda/`) | CUDA C++ | An alternative in which the entire search runs on the GPU (see below) |
+
+The network is trained in PyTorch and run in Rust. The orchestrator calls the Rust binaries for
+self-play and evaluation, and they write training positions to disk for the Python trainer. The
+Rust side re-implements the network layer by layer and loads the PyTorch weights file (`.pth` or
+`.safetensors`) directly, so a trained model needs no export step. A committed set of PyTorch
+reference outputs, from a small network with every weight randomized, checks that the two
+implementations agree to within 1e-4.
+
+The search runs in Rust because a Tier 1 search visits about 1,000 positions per call, which
+needs bit-level board operations with no interpreter overhead. Network calls from all games
+are collected into batches, because a GPU call on 16 positions takes 1.38 ms, compared with 0.95 ms
+for a single position.
+
+### Inference with candle instead of LibTorch
+
+The engine originally ran the network through LibTorch, PyTorch's C++ library, using the `tch`
+Rust bindings. It now uses candle, a machine learning library written in Rust, which removed the
+LibTorch dependency and the work needed to make LibTorch find its CUDA libraries at run time. The
+network tests now run in continuous integration on CPU. On the GPU, convolutions go through cuDNN,
+each batch normalization is folded into the preceding convolution when the model loads, and the
+cuDNN algorithm is fixed by batch size rather than searched for on every call.
+
+Measured on one RTX 5060 Ti, with one trained model (6×128) and identical positions for both
+backends, the time for one batched network call (median of 200–500 calls; interquartile ranges
+are within 2% of the median):
+
+| Batch size | LibTorch | candle | Speedup |
+|---|---|---|---|
+| 1 | 0.97 ms | 0.95 ms | 1.02× |
+| 16 | 1.51 ms | 1.38 ms | 1.09× |
+| 128 | 7.19 ms | 4.40 ms | 1.63× |
+| 512 | 31.3 ms | 17.4 ms | 1.80× |
+| 2048 | 140 ms | 92.6 ms | 1.51× |
+
+The gain grows with batch size up to about 1,000 positions. Self-play uses batches of at most 16, where it is small, so
+end-to-end self-play (30 games, 200 simulations per move, 15 threads, 2 runs per backend) went from
+27.8 and 26.9 moves per second with LibTorch to 28.8 and 30.7 with candle, about 9% faster. Running
+more games in parallel, so that batches fill up, is where the larger speedups would show.
+
+The outputs agree with plain 32-bit floating-point arithmetic to within 5e-6 when candle uses its
+own GPU kernels. With cuDNN, and with LibTorch, they differ by up to 3e-3 and 4e-3 respectively in
+the value logit, consistent with cuDNN computing 32-bit convolutions in the lower-precision TF32
+format. On 512 positions all three agree on the top move.
 
 ## Training
 
@@ -140,6 +196,21 @@ It is limited by the GPU's ~99 KB of shared memory per multiprocessor, which cap
 so current work runs the search on CPU threads and batches network evaluations on the GPU. Design
 details and measurements: [BENCHMARKS.md](BENCHMARKS.md) and [CUDA_TC_ANALYSIS.md](CUDA_TC_ANALYSIS.md).
 
+## Current state and next steps
+
+The engine, training loop and both search back ends work, and the result above is complete apart
+from a confidence interval on the Elo gap between the final models. Open directions:
+
+- **The Elo gap:** compute a bootstrap interval on the Elo difference between the final models.
+- **Larger batches:** run more games in parallel so that network calls reach the batch sizes where
+  candle is 1.6–1.8× faster than LibTorch.
+- **Networks built around piece moves:** layers that pass information between squares a knight or
+  queen move apart, rather than only between neighbours as a 3×3 convolution does. Each new
+  architecture must be written in both PyTorch and Rust; the reference-output tests make that a
+  repeatable check.
+- **Other domains:** this tiered search for problems with classically solvable subproblems, such
+  as theorem proving.
+
 ## Building and running
 
 ```bash
@@ -147,7 +218,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 pip install torch numpy python-chess
 
 cargo build --release                      # search without the network
-cargo build --release --features neural    # with LibTorch for the network
+cargo build --release --features neural    # with the network, on CPU (candle)
+cargo build --release --features cuda      # with the network on the GPU (needs nvcc >= 12.8 for RTX 50-series)
+cargo build --release --features cudnn     # as cuda, with cuDNN convolutions (fastest; libcudnn on LIBRARY_PATH)
 ./target/release/caissawary                # the engine, speaking the Universal Chess Interface (UCI)
 
 cd cuda && mkdir -p build && cd build && cmake .. -DCMAKE_CUDA_ARCHITECTURES=89 && make
@@ -160,6 +233,7 @@ About 1,350 tests: 829 in Rust, 314 in CUDA and 203 in Python. The fast `cargo t
 
 ```bash
 cargo test                                        # fast Rust tests (~50 s)
+cargo test --features neural                      # plus the network, compared with PyTorch reference outputs
 cargo test --features slow-tests                  # full suite, including move-generation counts (~200 s)
 cd python && python -m pytest test_*.py -v        # training pipeline
 cuda/build/test_mcts_kernel                       # GPU search
@@ -169,6 +243,7 @@ cuda/build/test_budget_reuse
 cuda/build/test_nn_ops
 cuda/build/bench_throughput 100 200 36 [p2]       # end-to-end self-play throughput
 cuda/build/bench_forward_b2 1000                  # batched convolution microbenchmark
+cargo test --release --features cudnn --test nn_bench -- --ignored --nocapture   # network latency by batch size
 ```
 
 <details>

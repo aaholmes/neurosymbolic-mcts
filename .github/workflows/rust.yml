@@ -33,3 +33,9 @@ jobs:
 
     - name: Run Tests
       run: cargo test --verbose
+
+    - name: Lint with the neural network (candle, CPU)
+      run: cargo clippy --features neural -- -D warnings
+
+    - name: Run tests with the neural network (candle, CPU)
+      run: cargo test --features neural --verbose

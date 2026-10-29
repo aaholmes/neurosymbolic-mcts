@@ -499,7 +499,7 @@ def main():
     # Verify binary exists
     if not os.path.exists(BINARY):
         print(f"ERROR: Binary not found: {BINARY}")
-        print("Run: cargo build --release --bin evaluate_models --features neural")
+        print("Run: cargo build --release --bin evaluate_models --features cuda")
         sys.exit(1)
 
     # Load partial results if resuming

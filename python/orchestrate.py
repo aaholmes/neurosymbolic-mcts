@@ -217,9 +217,11 @@ class OrchestratorState:
 
 
 def export_model_for_rust(model, output_path):
-    """Export PyTorch model to TorchScript for Rust integration.
+    """Export PyTorch model to TorchScript at output_path (gen_N.pt).
 
-    Traces on CUDA if available for GPU inference in Rust.
+    The Rust engine does not read TorchScript: given gen_N.pt it loads the
+    state dict in gen_N.pth (or gen_N.safetensors) next to it. The .pt file
+    remains the handle that paths and copies refer to.
     """
     device = next(model.parameters()).device
     model.eval()
@@ -230,27 +232,38 @@ def export_model_for_rust(model, output_path):
     print(f"Exported TorchScript model to {output_path} (traced on {device})")
 
 
-def get_libtorch_env():
-    """Get environment with LibTorch and NVIDIA CUDA libs on LD_LIBRARY_PATH."""
+# Cargo features for the Rust engine's network backend (candle). "cudnn" uses
+# cuDNN convolutions (fastest); "cuda" needs only the CUDA toolkit.
+RUST_NN_FEATURES = os.environ.get("KF_RUST_NN_FEATURES", "cudnn")
+
+
+def get_rust_env():
+    """Environment for building and running the Rust engine on the GPU.
+
+    candle compiles its CUDA kernels with nvcc, which must support the GPU
+    (CUDA >= 12.8 for RTX 50-series), so CUDA_HOME or /usr/local/cuda goes first
+    on PATH. cuDNN comes from the nvidia-cudnn pip package that PyTorch installs.
+    """
     import multiprocessing
-    torch_lib_path = os.path.join(os.path.dirname(torch.__file__), "lib")
-
-    # Collect nvidia pip package lib dirs (cudart, cublas, cudnn, etc.)
-    # These are needed for libtorch_cuda.so to load successfully.
-    nvidia_dir = os.path.join(os.path.dirname(torch.__file__), "..", "nvidia")
-    nvidia_lib_paths = []
-    if os.path.isdir(nvidia_dir):
-        for name in os.listdir(nvidia_dir):
-            lib_dir = os.path.join(nvidia_dir, name, "lib")
-            if os.path.isdir(lib_dir):
-                nvidia_lib_paths.append(lib_dir)
-
-    all_paths = [torch_lib_path] + nvidia_lib_paths
     env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = ":".join(all_paths) + ":" + env.get("LD_LIBRARY_PATH", "")
-    env["LIBTORCH_USE_PYTORCH"] = "1"
-    env["LIBTORCH_BYPASS_VERSION_CHECK"] = "1"
-    # Ensure CUDA is visible to tch-rs (defaults to GPU 0 if not set)
+
+    cuda_home = env.get("CUDA_HOME", "/usr/local/cuda")
+    if os.path.isfile(os.path.join(cuda_home, "bin", "nvcc")):
+        env["PATH"] = os.path.join(cuda_home, "bin") + ":" + env.get("PATH", "")
+
+    cudnn_lib = os.path.join(os.path.dirname(torch.__file__), "..", "nvidia", "cudnn", "lib")
+    if os.path.isdir(cudnn_lib):
+        cudnn_lib = os.path.abspath(cudnn_lib)
+        env["LD_LIBRARY_PATH"] = cudnn_lib + ":" + env.get("LD_LIBRARY_PATH", "")
+        # The pip package ships only libcudnn.so.9; the linker needs libcudnn.so.
+        link_dir = os.path.abspath(os.path.join("target", "cudnn-link"))
+        link = os.path.join(link_dir, "libcudnn.so")
+        if not os.path.exists(link):
+            os.makedirs(link_dir, exist_ok=True)
+            os.symlink(os.path.join(cudnn_lib, "libcudnn.so.9"), link)
+        env["LIBRARY_PATH"] = link_dir + ":" + env.get("LIBRARY_PATH", "")
+
+    # Defaults to GPU 0 if not set
     if "CUDA_VISIBLE_DEVICES" not in env:
         env["CUDA_VISIBLE_DEVICES"] = "0"
     # Leave 1 core for inference server thread + OS
@@ -397,9 +410,9 @@ class Orchestrator:
             if result.stdout:
                 print(result.stdout.strip())
         else:
-            # Rust + LibTorch self-play
+            # Rust (candle) self-play
             cmd = [
-                "cargo", "run", "--release", "--features", "neural", "--bin", "self_play", "--",
+                "cargo", "run", "--release", "--features", RUST_NN_FEATURES, "--bin", "self_play", "--",
                 str(self.config.games_per_generation),
                 str(sims),
                 data_dir,
@@ -421,7 +434,7 @@ class Orchestrator:
                   f"{sims} sims, "
                   f"batch_size={self.config.inference_batch_size}...")
             result = subprocess.run(
-                cmd, env=get_libtorch_env(),
+                cmd, env=get_rust_env(),
                 capture_output=True, text=True, check=True,
             )
 
@@ -687,9 +700,9 @@ class Orchestrator:
             print(f"GPU Eval: up to {self.config.eval_max_games} games, CUDA transformer (SPRT early stopping)...")
             result = subprocess.run(cmd, capture_output=True, text=True)
         else:
-            # Rust + LibTorch eval
+            # Rust (candle) eval
             cmd = [
-                "cargo", "run", "--release", "--features", "neural",
+                "cargo", "run", "--release", "--features", RUST_NN_FEATURES,
                 "--bin", "evaluate_models", "--",
                 candidate_pt,
                 self.state.current_best_pt,
@@ -721,7 +734,7 @@ class Orchestrator:
             cmd.extend(["--save-training-data", eval_data_dir])
 
             result = subprocess.run(
-                cmd, env=get_libtorch_env(),
+                cmd, env=get_rust_env(),
                 capture_output=True, text=True,
             )
 

@@ -440,12 +440,11 @@ class TestOrchestratorExtended:
         policy, value, k = loaded(board, material)
         assert policy.shape == (1, 4672)
 
-    def test_get_libtorch_env(self, tmp_workspace):
-        from orchestrate import get_libtorch_env
-        env = get_libtorch_env()
-        assert "LD_LIBRARY_PATH" in env
-        assert "LIBTORCH_USE_PYTORCH" in env
-        assert env["LIBTORCH_BYPASS_VERSION_CHECK"] == "1"
+    def test_get_rust_env_puts_cudnn_on_library_paths(self, tmp_workspace):
+        from orchestrate import get_rust_env
+        env = get_rust_env()
+        assert "cudnn" in env["LD_LIBRARY_PATH"]
+        assert "cudnn-link" in env["LIBRARY_PATH"]
 
     def test_run_evaluation_parses_stdout(self, tmp_workspace):
         """Test evaluation output parsing with mocked subprocess."""
@@ -608,20 +607,20 @@ class TestAdaptiveMinibatches:
 class TestCudaEnv:
     def test_cuda_visible_devices_set_by_default(self):
         """CUDA_VISIBLE_DEVICES should default to '0' if not set."""
-        from orchestrate import get_libtorch_env
+        from orchestrate import get_rust_env
         with patch.dict(os.environ, {}, clear=False):
             # Remove CUDA_VISIBLE_DEVICES if present
             env_copy = os.environ.copy()
             env_copy.pop("CUDA_VISIBLE_DEVICES", None)
             with patch.dict(os.environ, env_copy, clear=True):
-                env = get_libtorch_env()
+                env = get_rust_env()
                 assert env["CUDA_VISIBLE_DEVICES"] == "0"
 
     def test_cuda_visible_devices_not_overridden(self):
         """CUDA_VISIBLE_DEVICES should not be overridden if already set."""
-        from orchestrate import get_libtorch_env
+        from orchestrate import get_rust_env
         with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1,2"}):
-            env = get_libtorch_env()
+            env = get_rust_env()
             assert env["CUDA_VISIBLE_DEVICES"] == "1,2"
 
 
@@ -1249,3 +1248,24 @@ class TestEloTracking:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestRustInferenceEnv:
+    """The Rust engine runs the network with candle, so it needs no LibTorch."""
+
+    def test_env_has_no_libtorch_settings(self):
+        from orchestrate import get_rust_env
+        env = get_rust_env()
+        assert not any(k.startswith("LIBTORCH") for k in env)
+
+    def test_env_keeps_thread_and_gpu_settings(self):
+        from orchestrate import get_rust_env
+        env = get_rust_env()
+        assert int(env["RAYON_NUM_THREADS"]) >= 1
+        assert "CUDA_VISIBLE_DEVICES" in env
+
+    def test_cargo_commands_use_candle_gpu_feature(self):
+        import orchestrate
+        assert orchestrate.RUST_NN_FEATURES in ("cuda", "cudnn")
+        src = open(orchestrate.__file__).read()
+        assert '"--features", "neural"' not in src
