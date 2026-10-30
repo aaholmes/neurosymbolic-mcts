@@ -155,3 +155,8 @@ path = "src/bin/qsearch_gui.rs"
 name = "nn_bench"
 path = "tests/nn_bench.rs"
 required-features = ["neural"]
+
+[[test]]
+name = "cuda_graph_spike"
+path = "tests/cuda_graph_spike.rs"
+required-features = ["cuda"]
