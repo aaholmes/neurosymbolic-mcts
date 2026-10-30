@@ -64,6 +64,10 @@ pub struct MctsNode {
     pub total_value: f64,
     /// Sum of squared values accumulated through this node (for variance calculation).
     pub total_value_squared: f64,
+    /// Selections in flight through this node whose results have not been
+    /// backed up yet. Selection counts each as a visit that lost, which steers
+    /// the other selections of the same round elsewhere (virtual loss).
+    pub virtual_loss: u32,
 
     // --- Evaluation / Mate Status ---
     /// Exact value when the node is terminal or resolved by mate search
@@ -135,6 +139,7 @@ impl MctsNode {
             visits: 0,
             total_value: 0.0,
             total_value_squared: 0.0,
+            virtual_loss: 0,
             parent: None,
             children: Vec::new(),
             terminal_or_mate_value: initial_terminal_value,
@@ -182,6 +187,7 @@ impl MctsNode {
             visits: 0,
             total_value: 0.0,
             total_value_squared: 0.0,
+            virtual_loss: 0,
             parent: Some(parent),
             children: Vec::new(),
             terminal_or_mate_value: initial_terminal_value,
@@ -396,6 +402,31 @@ impl MctsNode {
                 }
             }
             self.current_priority_category = None;
+        }
+    }
+
+    /// Add one virtual loss to `node` and every ancestor.
+    pub fn apply_virtual_loss(node: &Rc<RefCell<MctsNode>>) {
+        Self::walk_to_root(node, |n| n.virtual_loss += 1);
+    }
+
+    /// Undo one `apply_virtual_loss` on `node` and every ancestor.
+    pub fn remove_virtual_loss(node: &Rc<RefCell<MctsNode>>) {
+        Self::walk_to_root(node, |n| {
+            debug_assert!(n.virtual_loss > 0, "virtual loss removed twice");
+            n.virtual_loss = n.virtual_loss.saturating_sub(1);
+        });
+    }
+
+    fn walk_to_root(node: &Rc<RefCell<MctsNode>>, mut f: impl FnMut(&mut MctsNode)) {
+        let mut current = Some(node.clone());
+        while let Some(rc) = current {
+            let parent = {
+                let mut n = rc.borrow_mut();
+                f(&mut n);
+                n.parent.as_ref().and_then(|w| w.upgrade())
+            };
+            current = parent;
         }
     }
 

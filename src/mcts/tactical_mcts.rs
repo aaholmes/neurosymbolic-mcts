@@ -22,6 +22,7 @@ use crate::search::{
 };
 use crate::search::{koth_best_move, koth_center_in_n};
 use crate::transposition::TranspositionTable;
+use crossbeam_channel::Receiver;
 use rand_distr::{Distribution, Gamma};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -104,6 +105,11 @@ pub struct TacticalMctsConfig {
     pub randomize_move_order: bool,
     /// PeSTO evaluator for q-search (constructed once, reused across all searches)
     pub pesto: PestoEval,
+    /// Leaves selected per iteration before waiting for the network. Above 1,
+    /// virtual loss steers the selections apart and their network requests are
+    /// sent together, so one game keeps several positions waiting. 1 = one
+    /// leaf at a time (standard MCTS).
+    pub leaves_per_iteration: u32,
 }
 
 impl Default for TacticalMctsConfig {
@@ -128,6 +134,7 @@ impl Default for TacticalMctsConfig {
             dirichlet_epsilon: 0.0,
             randomize_move_order: false,
             pesto: PestoEval::new(),
+            leaves_per_iteration: 1,
         }
     }
 }
@@ -440,12 +447,13 @@ pub fn tactical_mcts_search_with_tt(
 
     evaluate_and_expand_node(root_node.clone(), move_gen, &mut stats, &config, logger);
 
-    for iteration in 0..config.max_iterations {
+    let mut iteration = 0;
+    while iteration < config.max_iterations {
         if start_time.elapsed() > config.time_limit {
             break;
         }
 
-        run_mcts_iteration(
+        iteration += run_mcts_iteration(
             &root_node,
             move_gen,
             &config,
@@ -479,11 +487,98 @@ pub fn tactical_mcts_search_with_tt(
     (best_move, stats, root_node)
 }
 
-/// Run one MCTS simulation iteration: select a leaf, evaluate it, expand it if
-/// it is a fresh non-terminal node, then backpropagate. Shared by all three
-/// search entrypoints to keep the tier ladder byte-for-byte identical.
+/// Run one MCTS iteration: select a leaf, evaluate it, expand it if it is a
+/// fresh non-terminal node, then backpropagate. With `leaves_per_iteration`
+/// above 1, several leaves are selected under virtual loss and their network
+/// requests are sent before waiting for any answer. Returns the number of
+/// simulations run. Shared by all three search entrypoints to keep the tier
+/// ladder byte-for-byte identical.
 #[allow(clippy::too_many_arguments)]
 fn run_mcts_iteration(
+    root_node: &Rc<RefCell<MctsNode>>,
+    move_gen: &MoveGen,
+    config: &TacticalMctsConfig,
+    transposition_table: &mut TranspositionTable,
+    stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
+    iteration: u32,
+) -> u32 {
+    let leaves = config
+        .leaves_per_iteration
+        .clamp(1, config.max_iterations.saturating_sub(iteration).max(1));
+    if leaves == 1 {
+        run_single_leaf(
+            root_node,
+            move_gen,
+            config,
+            transposition_table,
+            stats,
+            logger,
+            iteration,
+        );
+        return 1;
+    }
+
+    // 1. Select the leaves, each under virtual loss from the ones before it
+    let mut selected: Vec<Rc<RefCell<MctsNode>>> = Vec::with_capacity(leaves as usize);
+    for _ in 0..leaves {
+        let leaf = select_leaf_node(root_node.clone(), move_gen, config, stats, logger);
+        MctsNode::apply_virtual_loss(&leaf);
+        selected.push(leaf);
+    }
+    for leaf in &selected {
+        MctsNode::remove_virtual_loss(leaf);
+    }
+
+    // 2. Start each distinct leaf's evaluation; network requests go out without waiting
+    let mut unique: Vec<Rc<RefCell<MctsNode>>> = Vec::new();
+    for leaf in &selected {
+        if !unique.iter().any(|u| Rc::ptr_eq(u, leaf)) {
+            unique.push(leaf.clone());
+        }
+    }
+    let started: Vec<LeafEval> = unique
+        .iter()
+        .map(|leaf| {
+            begin_leaf_evaluation(
+                leaf.clone(),
+                move_gen,
+                config,
+                transposition_table,
+                stats,
+                logger,
+            )
+        })
+        .collect();
+
+    // 3. Wait for the answers
+    let values: Vec<f64> = unique
+        .iter()
+        .zip(started)
+        .map(|(leaf, ev)| match ev {
+            LeafEval::Done(v) => v,
+            LeafEval::Pending(p) => finish_leaf_evaluation(leaf.clone(), p, config, stats, logger),
+        })
+        .collect();
+
+    // 4. Expand and back up every selection (a leaf selected twice is backed up twice)
+    for leaf in &selected {
+        let i = unique.iter().position(|u| Rc::ptr_eq(u, leaf)).unwrap();
+        if !leaf.borrow().is_game_terminal()
+            && leaf.borrow().visits == 0
+            && leaf.borrow().terminal_or_mate_value.is_none()
+        {
+            evaluate_and_expand_node(leaf.clone(), move_gen, stats, config, logger);
+        }
+        MctsNode::backpropagate(leaf.clone(), values[i]);
+    }
+    stats.iterations = iteration + leaves;
+    leaves
+}
+
+/// One leaf per iteration (standard MCTS).
+#[allow(clippy::too_many_arguments)]
+fn run_single_leaf(
     root_node: &Rc<RefCell<MctsNode>>,
     move_gen: &MoveGen,
     config: &TacticalMctsConfig,
@@ -598,6 +693,20 @@ fn select_leaf_node(
     }
 }
 
+/// Result of starting a leaf evaluation.
+enum LeafEval {
+    /// The value is known (terminal, Tier 1, cached, or no network in use).
+    Done(f64),
+    /// A network request has been sent; finish with `finish_leaf_evaluation`.
+    Pending(PendingNn),
+}
+
+struct PendingNn {
+    receiver: Receiver<Option<(Vec<f32>, f32, f32)>>,
+    q_result: f32,
+    started: Instant,
+}
+
 fn evaluate_leaf_node(
     node: Rc<RefCell<MctsNode>>,
     move_gen: &MoveGen,
@@ -606,6 +715,28 @@ fn evaluate_leaf_node(
     stats: &mut TacticalMctsStats,
     logger: Option<&Arc<SearchLogger>>,
 ) -> f64 {
+    match begin_leaf_evaluation(
+        node.clone(),
+        move_gen,
+        config,
+        transposition_table,
+        stats,
+        logger,
+    ) {
+        LeafEval::Done(v) => v,
+        LeafEval::Pending(p) => finish_leaf_evaluation(node, p, config, stats, logger),
+    }
+}
+
+/// Tiers 1 and 2 for a leaf, then send its network request without waiting.
+fn begin_leaf_evaluation(
+    node: Rc<RefCell<MctsNode>>,
+    move_gen: &MoveGen,
+    config: &TacticalMctsConfig,
+    transposition_table: &mut TranspositionTable,
+    stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
+) -> LeafEval {
     let mut node_ref = node.borrow_mut();
     let board = &node_ref.state;
 
@@ -613,7 +744,7 @@ fn evaluate_leaf_node(
         // A cached terminal/mate value is always exact (in [-1, 1]); reuse it
         // and skip the NN entirely.
         stats.nn_saved_by_tier1 += 1;
-        return cached_value;
+        return LeafEval::Done(cached_value);
     }
 
     if config.enable_koth && config.enable_tier1_gate {
@@ -628,7 +759,7 @@ fn evaluate_leaf_node(
             node_ref.is_terminal = true;
             stats.nn_saved_by_tier1 += 1;
             stats.tier1_solutions += 1;
-            return -1.0;
+            return LeafEval::Done(-1.0);
         }
 
         let (koth_result, koth_nodes) =
@@ -643,7 +774,7 @@ fn evaluate_leaf_node(
             node_ref.terminal_distance = Some(dist);
             stats.nn_saved_by_tier1 += 1;
             stats.tier1_solutions += 1;
-            return 1.0;
+            return LeafEval::Done(1.0);
         }
     }
 
@@ -672,7 +803,7 @@ fn evaluate_leaf_node(
                     node_ref.terminal_distance = Some(mate_depth.unsigned_abs() as u8);
                     node_ref.origin = NodeOrigin::Gate;
                     stats.nn_saved_by_tier1 += 1;
-                    return mate_value;
+                    return LeafEval::Done(mate_value);
                 }
             }
         } else {
@@ -703,14 +834,14 @@ fn evaluate_leaf_node(
                 node_ref.terminal_distance = Some(mate_result.0.unsigned_abs() as u8);
                 stats.nn_saved_by_tier1 += 1;
                 stats.tier1_solutions += 1;
-                return mate_value;
+                return LeafEval::Done(mate_value);
             }
         }
     }
 
     if node_ref.nn_value.is_none() {
-        let mut k_val: f32 = CLASSICAL_K;
-        let mut v_logit: f64 = f64::NEG_INFINITY; // sentinel: no NN result yet
+        let k_val: f32 = CLASSICAL_K;
+        let v_logit: f64 = f64::NEG_INFINITY; // sentinel: no NN result
 
         // 1. Run Q-search FIRST so completion flag is available for NN inference
         let (q_result, qsearch_completed) = if config.enable_material_value {
@@ -746,19 +877,72 @@ fn evaluate_leaf_node(
         if config.enable_tier3_neural {
             if let Some(server) = &config.inference_server {
                 if config.use_neural_policy {
-                    let nn_start = Instant::now();
+                    let started = Instant::now();
                     let receiver =
                         server.predict_async(node_ref.state.clone(), qsearch_completed, q_result);
-                    if let Ok(Some((policy, nn_v_logit, k))) = receiver.recv() {
-                        v_logit = nn_v_logit as f64;
-                        k_val = k;
-                        node_ref.raw_nn_policy = Some(policy);
-                    }
-                    stats.nn_timing.record(nn_start.elapsed());
+                    return LeafEval::Pending(PendingNn {
+                        receiver,
+                        q_result,
+                        started,
+                    });
                 }
             }
         }
+        set_leaf_value(
+            &mut node_ref,
+            v_logit,
+            k_val,
+            q_result,
+            config,
+            stats,
+            logger,
+        );
+    }
 
+    LeafEval::Done(node_ref.nn_value.unwrap())
+}
+
+/// Wait for a leaf's network answer and set its value.
+fn finish_leaf_evaluation(
+    node: Rc<RefCell<MctsNode>>,
+    pending: PendingNn,
+    config: &TacticalMctsConfig,
+    stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
+) -> f64 {
+    let mut node_ref = node.borrow_mut();
+    let mut k_val: f32 = CLASSICAL_K;
+    let mut v_logit: f64 = f64::NEG_INFINITY; // sentinel: no NN result
+    if let Ok(Some((policy, nn_v_logit, k))) = pending.receiver.recv() {
+        v_logit = nn_v_logit as f64;
+        k_val = k;
+        node_ref.raw_nn_policy = Some(policy);
+    }
+    stats.nn_timing.record(pending.started.elapsed());
+    set_leaf_value(
+        &mut node_ref,
+        v_logit,
+        k_val,
+        pending.q_result,
+        config,
+        stats,
+        logger,
+    );
+    node_ref.nn_value.unwrap()
+}
+
+/// Combine the network output (or the classical fallback) with the material
+/// score and store the leaf's value.
+fn set_leaf_value(
+    node_ref: &mut MctsNode,
+    v_logit: f64,
+    mut k_val: f32,
+    q_result: f32,
+    config: &TacticalMctsConfig,
+    stats: &mut TacticalMctsStats,
+    logger: Option<&Arc<SearchLogger>>,
+) {
+    {
         if config.enable_material_value {
             if v_logit.is_finite() {
                 // NN path: combine v_logit + k * q_result
@@ -806,8 +990,6 @@ fn evaluate_leaf_node(
         }
         node_ref.k_val = k_val;
     }
-
-    node_ref.nn_value.unwrap()
 }
 
 fn evaluate_and_expand_node(
@@ -936,12 +1118,13 @@ pub fn tactical_mcts_search_for_training(
     let logger = config.logger.as_ref();
     evaluate_and_expand_node(root_node.clone(), move_gen, &mut stats, &config, logger);
     let mut transposition_table = TranspositionTable::new();
-    for iteration in 0..config.max_iterations {
+    let mut iteration = 0;
+    while iteration < config.max_iterations {
         if start_time.elapsed() > config.time_limit {
             break;
         }
 
-        run_mcts_iteration(
+        iteration += run_mcts_iteration(
             &root_node,
             move_gen,
             &config,
@@ -1029,12 +1212,13 @@ pub fn tactical_mcts_search_for_training_with_reuse(
         evaluate_and_expand_node(root_node.clone(), move_gen, &mut stats, &config, logger);
     }
 
-    for iteration in 0..config.max_iterations {
+    let mut iteration = 0;
+    while iteration < config.max_iterations {
         if start_time.elapsed() > config.time_limit {
             break;
         }
 
-        run_mcts_iteration(
+        iteration += run_mcts_iteration(
             &root_node,
             move_gen,
             &config,

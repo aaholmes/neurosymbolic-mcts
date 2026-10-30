@@ -66,7 +66,9 @@ pub fn select_child_with_tactical_priority(
     if depth == 0 {
         let node_ref = node.borrow();
         for child in &node_ref.children {
-            if child.borrow().visits == 0 {
+            let c = child.borrow();
+            if c.visits + c.virtual_loss == 0 {
+                drop(c);
                 return Some(child.clone());
             }
         }
@@ -164,7 +166,7 @@ fn select_ucb_with_policy(
         return None;
     }
 
-    let parent_visits = node_ref.visits;
+    let parent_visits = node_ref.visits + node_ref.virtual_loss;
     let num_legal_moves = node_ref.children.len();
 
     // Calculate UCB values for all children
@@ -257,17 +259,21 @@ pub fn calculate_ucb_value(
     prior_prob: f64,
     exploration_constant: f64,
 ) -> f64 {
+    // Selections still in flight count as visits that lost (virtual loss).
+    let visits = child.visits + child.virtual_loss;
+    let total_value = child.total_value - child.virtual_loss as f64;
+
     // Q Value — unvisited nodes start at 0.0
-    let q = if child.visits == 0 {
+    let q = if visits == 0 {
         0.0
     } else {
-        child.total_value / child.visits as f64
+        total_value / visits as f64
     };
 
     // U Value (PUCT): max(N,1) ensures the first simulation follows the policy prior
     // rather than collapsing to zero and picking by move-generator order.
     let u = exploration_constant * prior_prob * (parent_visits as f64).max(1.0).sqrt()
-        / (1.0 + child.visits as f64);
+        / (1.0 + visits as f64);
 
     q + u
 }

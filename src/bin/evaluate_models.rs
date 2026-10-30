@@ -26,7 +26,7 @@ use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -260,6 +260,7 @@ pub fn play_evaluation_game_with_servers(
         enable_tier3_neural: candidate_has_nn,
         randomize_move_order: true,
         qsearch_variant,
+        leaves_per_iteration: CANDIDATE_LEAVES.load(Ordering::Relaxed),
         ..Default::default()
     };
 
@@ -279,6 +280,7 @@ pub fn play_evaluation_game_with_servers(
         enable_tier3_neural: current_has_nn,
         randomize_move_order: true,
         qsearch_variant,
+        leaves_per_iteration: CURRENT_LEAVES.load(Ordering::Relaxed),
         ..Default::default()
     };
 
@@ -878,6 +880,10 @@ fn parse_arg_f64(args: &[String], flag: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// Leaves per MCTS iteration for each side, set once from the command line in main.
+static CANDIDATE_LEAVES: AtomicU32 = AtomicU32::new(1);
+static CURRENT_LEAVES: AtomicU32 = AtomicU32::new(1);
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -929,6 +935,17 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|v| QSearchVariant::from_str(v))
         .unwrap_or(QSearchVariant::Extended);
+
+    let leaves = |flag: &str| -> u32 {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1u32)
+            .max(1)
+    };
+    CANDIDATE_LEAVES.store(leaves("--candidate-leaves"), Ordering::Relaxed);
+    CURRENT_LEAVES.store(leaves("--current-leaves"), Ordering::Relaxed);
 
     // Inference workers per model, each on its own CUDA stream
     let inference_workers: usize = args

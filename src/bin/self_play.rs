@@ -22,8 +22,12 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Set once from --leaves-per-game in main.
+static LEAVES_PER_GAME: AtomicU32 = AtomicU32::new(1);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -72,6 +76,14 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    // Leaves each game selects per MCTS iteration before waiting for the network
+    let leaves_per_game: u32 = args
+        .iter()
+        .position(|a| a == "--leaves-per-game")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    LEAVES_PER_GAME.store(leaves_per_game.max(1), Ordering::Relaxed);
 
     let num_threads: Option<usize> = args
         .iter()
@@ -134,8 +146,8 @@ fn main() {
         match InferenceServer::load(path, inference_workers, inference_batch_size) {
             Ok(server) => {
                 println!(
-                    "   Shared InferenceServer: batch_size={}, workers={}",
-                    inference_batch_size, inference_workers
+                    "   Shared InferenceServer: batch_size={}, workers={}, leaves per game={}",
+                    inference_batch_size, inference_workers, leaves_per_game
                 );
                 Some(Arc::new(server))
             }
@@ -231,6 +243,7 @@ fn play_game(
         enable_tier3_neural: has_nn,
         randomize_move_order: true,
         qsearch_variant,
+        leaves_per_iteration: LEAVES_PER_GAME.load(Ordering::Relaxed),
         ..Default::default()
     };
     let mut transposition_table = TranspositionTable::new();
