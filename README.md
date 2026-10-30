@@ -8,7 +8,7 @@ an exact method can evaluate, such as a forced mate in N moves, becomes a termin
 Carlo tree search (MCTS) with its exact value, just as checkmate does, so the engine is rewarded for
 reaching it rather than only for checkmate. The training signal is denser, and unlike a learned
 reward model it cannot be gamed. The exact evaluation is also cheaper: an exact search costs about
-140 µs per position, compared with about 1,500 µs for a network evaluation. Only positions no exact
+140 µs per position, compared with about 1,350 µs for a network evaluation. Only positions no exact
 method can evaluate are sent to the neural network.
 
 Where no exact answer exists, the classical search still informs the network. A quiescence search
@@ -84,7 +84,7 @@ Each position is handled by the cheapest method that can evaluate it:
 |---|---|---|---|
 | 1 | Exact search for a forced mate in up to 5 moves (checking moves only), or a forced king march to the center in up to 3 | Proven value | 132–149 µs |
 | 2 | Quiescence search: captures and promotions are played out until the position is quiet, with all replies to check, one quiet check or fork per side, and a test for threats made by letting the side to move pass; the quiet position is scored with PeSTO, a standard hand-tuned evaluation of material and piece placement | Heuristic value | 8 µs |
-| 3 | Neural network | Learned value | 1,487 µs |
+| 3 | Neural network | Learned value | 1,346 µs |
 
 The Tier 3 cost is the mean time per network call as the search sees it, measured with
 `profile_engine` (4 games played one after another, 200 simulations per move). It includes up to
@@ -118,7 +118,7 @@ $N \geq 1$ the two rules are identical.
 | Component | Language | Role |
 |---|---|---|
 | Search engine (`src/`) | Rust | Board representation, move generation, the three tiers, MCTS, self-play and evaluation binaries |
-| Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle) | Runs the network on CPU or GPU, called from a server thread that batches requests from all search threads |
+| Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle), CUDA | Runs the network on CPU or GPU, called from a server thread that batches requests from all search threads |
 | Training (`python/`) | Python, PyTorch | Defines the network, trains it on self-play data, and runs the whole loop (`orchestrate.py`) |
 | GPU search (`cuda/`) | CUDA C++ | An alternative in which the entire search runs on the GPU (see below) |
 
@@ -131,20 +131,20 @@ implementations agree to within 1e-4.
 
 The search runs in Rust because a Tier 1 search visits about 1,000 positions per call, which
 needs bit-level board operations with no interpreter overhead. Network calls from all games
-are collected into batches, because a GPU call on 16 positions takes 1.38 ms, compared with 0.95 ms
+are collected into batches, because a GPU call on 16 positions takes 1.08 ms, compared with 0.82 ms
 for a single position.
 
 ### Inference with candle instead of LibTorch
 
 The engine originally ran the network through LibTorch, PyTorch's C++ library, using the `tch`
 Rust bindings. It now uses candle, a machine learning library written in Rust, which removed the
-LibTorch dependency and the work needed to make LibTorch find its CUDA libraries at run time. The
+LibTorch dependency and the work needed to make LibTorch find its CUDA libraries at run time; the
 network tests now run in continuous integration on CPU. On the GPU, convolutions go through cuDNN,
 each batch normalization is folded into the preceding convolution when the model loads, and the
 cuDNN algorithm is fixed by batch size rather than searched for on every call.
 
-Measured on one RTX 5060 Ti, with one trained model (6×128) and identical positions for both
-backends, the time for one batched network call (median of 200–500 calls; interquartile ranges
+Time for one batched network call on an RTX 5060 Ti, 6×128 model, identical positions for both
+backends, before the fused kernels described below (median of 200–500 calls; interquartile ranges
 are within 2% of the median):
 
 | Batch size | LibTorch | candle | Speedup |
@@ -155,31 +155,50 @@ are within 2% of the median):
 | 512 | 31.3 ms | 17.4 ms | 1.80× |
 | 2048 | 140 ms | 92.6 ms | 1.51× |
 
-The gain grows with batch size up to about 1,000 positions. In self-play, the batch size is limited
-by how many search threads are waiting for the network, since each thread has at most one request
-outstanding. Self-play throughput, in moves per second (60 games, 200 simulations per move, mean of
-2 runs per cell; the two runs differ by at most 1.4 moves per second):
+In self-play the switch gave only 8–15% more moves per second (60 games, 200 simulations per move,
+15 or 60 search threads, batch cap 16 or 128), because self-play batches are small: 10–28 positions
+on average, where candle's advantage is smallest.
 
-| Search threads | Batch cap | Mean batch | LibTorch | candle | Speedup |
-|---|---|---|---|---|---|
-| 15 | 16 | 10 | 30.5 | 34.2 | 1.12× |
-| 15 | 128 | 10 | 30.3 | 34.3 | 1.13× |
-| 60 | 16 | 14.5 | 49.4 | 56.7 | 1.15× |
-| 60 | 128 | 28 | 57.8 | 62.3 | 1.08× |
+Candle's own GPU kernels agree with plain 32-bit floating-point arithmetic to within 5e-6. With
+cuDNN, and with LibTorch, the value logit differs by up to 3e-3 and 4e-3, consistent with cuDNN
+computing 32-bit convolutions in the lower-precision TF32 format. On 512 positions all three agree
+on the top move.
 
-The mean batch was recorded with candle only. In self-play candle is 8–15% faster, well short of
-its 1.6× gain on a single network call at batch 128. Running 60 threads instead of 15 matters more,
-nearly doubling throughput with either backend. The network still limits throughput: at 60 threads
-the inference worker spends 77% (batch cap 128) to 90% (cap 16) of the wall time on forward passes
-and transfers. Batches stay small, 28 positions on average at 60 threads, for two reasons. Each
-game has only one position waiting for the network at a time, and a single worker builds, runs and
-reads back one batch after another. At these sizes a forward pass costs mostly a fixed ~0.9 ms, so
-larger batches are nearly free.
+### Self-play throughput
 
-The outputs agree with plain 32-bit floating-point arithmetic to within 5e-6 when candle uses its
-own GPU kernels. With cuDNN, and with LibTorch, they differ by up to 3e-3 and 4e-3 respectively in
-the value logit, consistent with cuDNN computing 32-bit convolutions in the lower-precision TF32
-format. On 512 positions all three agree on the top move.
+With 60 search threads the single inference thread spends 77–90% of wall time on network calls,
+so the network limits self-play. Two problems keep each call expensive: every game has only one
+position waiting for the network at a time, which keeps batches small, and each call has a large
+fixed cost. Four changes were measured in matched runs (the generation-34 model, King of the Hill,
+60 games, 200 simulations per move, 60 threads, batch cap 128, 2 runs per setting, which differ by
+at most 2%):
+
+| Setup | Mean batch | Moves per second |
+|---|---|---|
+| Baseline | 28 | 61.7 |
+| Fused kernels (now the default) | 28 | 72.0 |
+| Four leaves per game | 57 | 97.3 |
+| Four leaves per game, fused kernels | 63 | 116.2 |
+
+- **Fused kernels (adopted).** A GPU profile showed candle's broadcast kernels for bias adds, ReLU
+  and the squeeze-and-excitation channel scaling taking about 40% of GPU time, 18–30 µs each on
+  tensors that need about 2 µs. Three custom CUDA kernels, compiled when the model loads, now do
+  that arithmetic in one pass each, matching the unfused operations to 1e-5. A network call is 13%
+  faster at batch 1, 22% at batch 16 and 29% at batch 128, and self-play games are unchanged move
+  for move.
+- **Several leaves per game (optional, off by default).** Each game selects K leaves before waiting
+  for the network; after each selection a temporary "virtual loss" makes that path look worse, so
+  the next selection goes elsewhere. K = 4 doubles the mean batch and raises throughput 58%, but
+  at equal simulations it plays weaker: in 200 games of the generation-34 model playing itself,
+  K = 4 scored 0.435, or −45 Elo [−92, +2] relative to K = 1 (`--leaves-per-game`).
+- **Several inference threads (rejected).** With 1, 2 and 3 threads, each on its own CUDA stream,
+  self-play ran at 60.5, 55.2 and 36.8 moves per second, because each batch took longer when two
+  ran concurrently. Whether the contention is inside the shared CUDA context or for CPU cores was
+  not isolated.
+- **CUDA graphs (rejected).** Replaying a recorded forward pass skips kernel launches and gave
+  identical outputs, but saved only a fixed ~0.29 ms per call: 21% at batch 16 and 7% at batch 128.
+  The replayed pass still took 0.70 ms at batch 1, so the GPU time of the ~136 small kernels costs
+  more than launching them, and graphs would need one recording per batch size.
 
 ## Training
 
@@ -218,8 +237,9 @@ The engine, training loop and both search back ends work, and the result above i
 from a confidence interval on the Elo gap between the final models. Open directions:
 
 - **The Elo gap:** compute a bootstrap interval on the Elo difference between the final models.
-- **Self-play speed:** keep more batches and more positions per game waiting for the network,
-  and cut the fixed cost of each network call. Faster inference alone gave 8–15%.
+- **Self-play speed:** test whether several leaves per game are worth their strength cost, in a
+  match at equal wall time rather than equal simulations. About one kernel in eight is a layout
+  conversion that cuDNN adds around each convolution, a further target.
 - **Networks built around piece moves:** layers that pass information between squares a knight or
   queen move apart, rather than only between neighbours as a 3×3 convolution does. Each new
   architecture must be written in both PyTorch and Rust; the reference-output tests make that a
@@ -244,8 +264,8 @@ cd cuda && mkdir -p build && cd build && cmake .. -DCMAKE_CUDA_ARCHITECTURES=89 
 
 ## Testing
 
-About 1,350 tests: 829 in Rust, 314 in CUDA and 203 in Python. The fast `cargo test` suite runs about
-750 of the Rust tests in about 50 s. See [TESTING.md](TESTING.md).
+About 1,400 tests: 870 in Rust, 314 in CUDA and 208 in Python. The fast `cargo test` suite takes
+about 50 s. See [TESTING.md](TESTING.md).
 
 ```bash
 cargo test                                        # fast Rust tests (~50 s)
@@ -260,6 +280,7 @@ cuda/build/test_nn_ops
 cuda/build/bench_throughput 100 200 36 [p2]       # end-to-end self-play throughput
 cuda/build/bench_forward_b2 1000                  # batched convolution microbenchmark
 cargo test --release --features cudnn --test nn_bench -- --ignored --nocapture   # network latency by batch size
+cargo test --release --features cudnn --test cuda_graph_spike -- --ignored --nocapture   # CUDA graph replay
 ```
 
 <details>
