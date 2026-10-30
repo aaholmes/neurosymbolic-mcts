@@ -169,10 +169,12 @@ outstanding. Self-play throughput, in moves per second (60 games, 200 simulation
 
 The mean batch was recorded with candle only. In self-play candle is 8–15% faster, well short of
 its 1.6× gain on a single network call at batch 128. Running 60 threads instead of 15 matters more,
-nearly doubling throughput with either backend. At 60 threads on this 32-core machine the batches
-average only 28 positions, and candle's advantage shrinks to 8% at the larger cap. This suggests
-that most threads are busy with the CPU-side search rather than waiting for the network, so the
-search, not the network, now limits throughput; that has not yet been profiled.
+nearly doubling throughput with either backend. The network still limits throughput: at 60 threads
+the inference worker spends 77% (batch cap 128) to 90% (cap 16) of the wall time on forward passes
+and transfers. Batches stay small, 28 positions on average at 60 threads, for two reasons. Each
+game has only one position waiting for the network at a time, and a single worker builds, runs and
+reads back one batch after another. At these sizes a forward pass costs mostly a fixed ~0.9 ms, so
+larger batches are nearly free.
 
 The outputs agree with plain 32-bit floating-point arithmetic to within 5e-6 when candle uses its
 own GPU kernels. With cuDNN, and with LibTorch, they differ by up to 3e-3 and 4e-3 respectively in
@@ -216,8 +218,8 @@ The engine, training loop and both search back ends work, and the result above i
 from a confidence interval on the Elo gap between the final models. Open directions:
 
 - **The Elo gap:** compute a bootstrap interval on the Elo difference between the final models.
-- **Self-play speed:** profile the CPU-side search at 60 threads, where it appears to limit
-  throughput, before trying larger batches. Faster inference alone gave 8–15%.
+- **Self-play speed:** keep more batches and more positions per game waiting for the network,
+  and cut the fixed cost of each network call. Faster inference alone gave 8–15%.
 - **Networks built around piece moves:** layers that pass information between squares a knight or
   queen move apart, rather than only between neighbours as a 3×3 convolution does. Each new
   architecture must be written in both PyTorch and Rust; the reference-output tests make that a
