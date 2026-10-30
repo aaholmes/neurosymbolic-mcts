@@ -55,6 +55,7 @@ class TrainingConfig:
 
     # Parallelism
     inference_batch_size: int = 16
+    inference_workers: int = 1  # inference threads per model, each on its own CUDA stream
     game_threads: int = 0  # 0 = auto (RAYON_NUM_THREADS or rayon default)
 
     # Training variants
@@ -124,6 +125,8 @@ class TrainingConfig:
                             help="Which self-play games to log (default: first)")
         parser.add_argument("--inference-batch-size", type=int, default=16,
                             help="Batch size for GPU inference server (default: 16)")
+        parser.add_argument("--inference-workers", type=int, default=1,
+                            help="Inference threads per model, each on its own CUDA stream (default: 1)")
         parser.add_argument("--game-threads", type=int, default=0,
                             help="Parallel game threads for self-play/eval (0 = auto)")
         parser.add_argument("--skip-self-play", action="store_true",
@@ -171,6 +174,7 @@ class TrainingConfig:
             max_generations=args.max_generations,
             log_games=args.log_games,
             inference_batch_size=args.inference_batch_size,
+            inference_workers=args.inference_workers,
             game_threads=args.game_threads,
             single_variant=not args.multi_variant,
             arch=args.arch,
@@ -413,6 +417,7 @@ class Orchestrator:
                 str(self.config.enable_material_value).lower(),
                 self.config.log_games,
                 "--batch-size", str(self.config.inference_batch_size),
+                "--inference-workers", str(self.config.inference_workers),
                 "--seed-offset", str(seed_offset),
             ]
             if self.config.game_threads > 0:
@@ -701,6 +706,7 @@ class Orchestrator:
             if self.config.qsearch_variant != "extended":
                 cmd.extend(["--qsearch", self.config.qsearch_variant])
             cmd.extend(["--batch-size", str(self.config.inference_batch_size)])
+            cmd.extend(["--inference-workers", str(self.config.inference_workers)])
             cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
             if self.config.game_threads > 0:
                 cmd.extend(["--threads", str(self.config.game_threads)])

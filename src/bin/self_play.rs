@@ -10,7 +10,6 @@ use kingfisher::mcts::{
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
-use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::search::mate_search;
 use kingfisher::search::quiescence::{
     forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange,
@@ -66,6 +65,13 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse().ok())
         .unwrap_or(16);
+    // Inference workers sharing the request queue, each on its own CUDA stream
+    let inference_workers: usize = args
+        .iter()
+        .position(|a| a == "--inference-workers")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
 
     let num_threads: Option<usize> = args
         .iter()
@@ -125,16 +131,18 @@ fn main() {
 
     // Create a single shared InferenceServer for all game threads
     let shared_server: Option<Arc<InferenceServer>> = if let Some(ref path) = model_path {
-        let mut nn = NeuralNetPolicy::new();
-        if let Err(e) = nn.load(path) {
-            eprintln!("Failed to load model from {}: {}", path, e);
-            None
-        } else {
-            println!(
-                "   Shared InferenceServer: batch_size={}",
-                inference_batch_size
-            );
-            Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
+        match InferenceServer::load(path, inference_workers, inference_batch_size) {
+            Ok(server) => {
+                println!(
+                    "   Shared InferenceServer: batch_size={}, workers={}",
+                    inference_batch_size, inference_workers
+                );
+                Some(Arc::new(server))
+            }
+            Err(e) => {
+                eprintln!("Failed to load model from {}: {}", path, e);
+                None
+            }
         }
     } else {
         None

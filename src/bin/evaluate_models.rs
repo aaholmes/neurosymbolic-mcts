@@ -13,7 +13,6 @@ use kingfisher::mcts::{
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
-use kingfisher::neural_net::NeuralNetPolicy;
 use kingfisher::search::quiescence::{
     forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange,
 };
@@ -533,6 +532,7 @@ pub fn evaluate_models(
         true,
         true,
         8,
+        1,
         0,
         DEFAULT_EXPLORE_BASE,
         QSearchVariant::Extended,
@@ -551,37 +551,40 @@ pub fn evaluate_models_koth(
     current_enable_tier1: bool,
     current_enable_material: bool,
     inference_batch_size: usize,
+    inference_workers: usize,
     seed_offset: u64,
     explore_base: f64,
     qsearch_variant: QSearchVariant,
 ) -> EvalResults {
     // Load each model once, create shared InferenceServers
     let candidate_server: Option<Arc<InferenceServer>> = {
-        let mut nn = NeuralNetPolicy::new();
-        if let Err(e) = nn.load(candidate_path) {
-            eprintln!("Failed to load candidate model: {}", e);
-            return EvalResults {
-                wins: 0,
-                losses: 0,
-                draws: 0,
-                reasons: HashMap::new(),
-            };
+        match InferenceServer::load(candidate_path, inference_workers, inference_batch_size) {
+            Ok(server) => Some(Arc::new(server)),
+            Err(e) => {
+                eprintln!("Failed to load candidate model: {}", e);
+                return EvalResults {
+                    wins: 0,
+                    losses: 0,
+                    draws: 0,
+                    reasons: HashMap::new(),
+                };
+            }
         }
-        Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
     };
 
     let current_server: Option<Arc<InferenceServer>> = {
-        let mut nn = NeuralNetPolicy::new();
-        if let Err(e) = nn.load(current_path) {
-            eprintln!("Failed to load current model: {}", e);
-            return EvalResults {
-                wins: 0,
-                losses: 0,
-                draws: 0,
-                reasons: HashMap::new(),
-            };
+        match InferenceServer::load(current_path, inference_workers, inference_batch_size) {
+            Ok(server) => Some(Arc::new(server)),
+            Err(e) => {
+                eprintln!("Failed to load current model: {}", e);
+                return EvalResults {
+                    wins: 0,
+                    losses: 0,
+                    draws: 0,
+                    reasons: HashMap::new(),
+                };
+            }
         }
-        Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
     };
 
     let results = Mutex::new(EvalResults {
@@ -650,6 +653,7 @@ pub fn evaluate_models_koth_sprt(
     current_enable_tier1: bool,
     current_enable_material: bool,
     inference_batch_size: usize,
+    inference_workers: usize,
     sprt_config: &SprtConfig,
     seed_offset: u64,
     save_training_data: Option<&str>,
@@ -660,39 +664,41 @@ pub fn evaluate_models_koth_sprt(
 
     // Load each model once, create shared InferenceServers
     let candidate_server: Option<Arc<InferenceServer>> = {
-        let mut nn = NeuralNetPolicy::new();
-        if let Err(e) = nn.load(candidate_path) {
-            eprintln!("Failed to load candidate model: {}", e);
-            return (
-                EvalResults {
-                    wins: 0,
-                    losses: 0,
-                    draws: 0,
-                    reasons: HashMap::new(),
-                },
-                None,
-                SprtResult::Inconclusive,
-            );
+        match InferenceServer::load(candidate_path, inference_workers, inference_batch_size) {
+            Ok(server) => Some(Arc::new(server)),
+            Err(e) => {
+                eprintln!("Failed to load candidate model: {}", e);
+                return (
+                    EvalResults {
+                        wins: 0,
+                        losses: 0,
+                        draws: 0,
+                        reasons: HashMap::new(),
+                    },
+                    None,
+                    SprtResult::Inconclusive,
+                );
+            }
         }
-        Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
     };
 
     let current_server: Option<Arc<InferenceServer>> = {
-        let mut nn = NeuralNetPolicy::new();
-        if let Err(e) = nn.load(current_path) {
-            eprintln!("Failed to load current model: {}", e);
-            return (
-                EvalResults {
-                    wins: 0,
-                    losses: 0,
-                    draws: 0,
-                    reasons: HashMap::new(),
-                },
-                None,
-                SprtResult::Inconclusive,
-            );
+        match InferenceServer::load(current_path, inference_workers, inference_batch_size) {
+            Ok(server) => Some(Arc::new(server)),
+            Err(e) => {
+                eprintln!("Failed to load current model: {}", e);
+                return (
+                    EvalResults {
+                        wins: 0,
+                        losses: 0,
+                        draws: 0,
+                        reasons: HashMap::new(),
+                    },
+                    None,
+                    SprtResult::Inconclusive,
+                );
+            }
         }
-        Some(Arc::new(InferenceServer::new(nn, inference_batch_size)))
     };
 
     let sprt_state = Arc::new(Mutex::new(SprtState::new()));
@@ -924,6 +930,14 @@ fn main() {
         .and_then(|v| QSearchVariant::from_str(v))
         .unwrap_or(QSearchVariant::Extended);
 
+    // Inference workers per model, each on its own CUDA stream
+    let inference_workers: usize = args
+        .iter()
+        .position(|a| a == "--inference-workers")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+
     let inference_batch_size: usize = args
         .iter()
         .position(|a| a == "--batch-size")
@@ -1003,6 +1017,7 @@ fn main() {
             current_enable_tier1,
             current_enable_material,
             inference_batch_size,
+            inference_workers,
             &sprt_config,
             seed_offset,
             save_training_data.as_deref(),
@@ -1052,6 +1067,7 @@ fn main() {
             current_enable_tier1,
             current_enable_material,
             inference_batch_size,
+            inference_workers,
             seed_offset,
             explore_base,
             qsearch_variant,

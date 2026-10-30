@@ -962,6 +962,33 @@ class TestSPRT:
         assert accepted is False
         assert results["sprt_result"] == "inconclusive"
 
+    def test_inference_workers_passed_to_rust(self, tmp_workspace):
+        """--inference-workers reaches both the evaluation and self-play commands."""
+        orch = self._make_orch(tmp_workspace, inference_workers=2)
+        orch.state.current_best_pt = "current.pt"
+        mock_result = MagicMock()
+        mock_result.stdout = (
+            "WINS=1 LOSSES=1 DRAWS=0 WINRATE=0.5 ACCEPTED=false "
+            "GAMES_PLAYED=2 LLR=0.00 SPRT_RESULT=inconclusive\n"
+        )
+        mock_result.stderr = ""
+        mock_result.returncode = 1
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            orch.run_evaluation("candidate.pt")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--inference-workers") + 1] == "2"
+
+        mock_result.stdout = ""
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            orch.run_self_play(1)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--inference-workers") + 1] == "2"
+
+    def test_inference_workers_default_and_flag(self):
+        assert TrainingConfig().inference_workers == 1
+        with patch("sys.argv", ["orchestrate.py", "--inference-workers", "3"]):
+            assert TrainingConfig.from_args().inference_workers == 3
+
     def test_run_evaluation_passes_sprt_args(self, tmp_workspace):
         """Verify SPRT CLI args are passed to the Rust binary."""
         orch = self._make_orch(

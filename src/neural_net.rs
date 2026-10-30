@@ -47,6 +47,17 @@ mod candle_impl {
             Self::with_device(Device::cuda_if_available(0).unwrap_or(Device::Cpu))
         }
 
+        /// A policy on its own CUDA stream (or the CPU without a GPU), so that
+        /// several inference workers can overlap their GPU work.
+        pub fn new_on_own_stream() -> Self {
+            let device = if candle_core::utils::cuda_is_available() {
+                Device::new_cuda_with_stream(0).unwrap_or(Device::Cpu)
+            } else {
+                Device::Cpu
+            };
+            Self::with_device(device)
+        }
+
         pub fn with_device(device: Device) -> Self {
             NeuralNetPolicy {
                 model: None,
@@ -257,6 +268,9 @@ mod stub {
                 forward_timing: TimingAccumulator::default(),
                 transfer_from_gpu_timing: TimingAccumulator::default(),
             }
+        }
+        pub fn new_on_own_stream() -> Self {
+            Self::new()
         }
         pub fn load(&mut self, _path: &str) -> Result<(), String> {
             Err(
