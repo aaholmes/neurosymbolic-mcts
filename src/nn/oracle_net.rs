@@ -1,7 +1,7 @@
 //! OracleNet (SE-ResNet) inference, a layer-for-layer port of
 //! `python/model.py::OracleNet` in eval mode.
 
-use super::{NetOutput, PolicyValueNet};
+use super::{fused, NetOutput, PolicyValueNet};
 use candle_core::conv::CudnnFwdAlgo;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::{linear, linear_no_bias, Linear, VarBuilder};
@@ -67,7 +67,7 @@ impl Conv {
     fn plain(in_c: usize, out_c: usize, kernel: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             weight: vb.get((out_c, in_c, kernel, kernel), "weight")?,
-            bias: vb.get(out_c, "bias")?.reshape((1, out_c, 1, 1))?,
+            bias: vb.get(out_c, "bias")?,
             padding: kernel / 2,
         })
     }
@@ -97,15 +97,20 @@ impl Conv {
         };
         Ok(Self {
             weight: w.broadcast_mul(&scale.reshape((out_c, 1, 1, 1))?)?,
-            bias: b.mul(&scale)?.add(&beta)?.reshape((1, out_c, 1, 1))?,
+            bias: b.mul(&scale)?.add(&beta)?,
             padding: kernel / 2,
         })
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    /// The convolution without its bias.
+    fn conv(&self, x: &Tensor) -> Result<Tensor> {
         let algo = fwd_algo(x.dim(0)?);
-        x.conv2d_with_algo(&self.weight, self.padding, 1, 1, 1, algo)?
-            .broadcast_add(&self.bias)
+        x.conv2d_with_algo(&self.weight, self.padding, 1, 1, 1, algo)
+    }
+
+    /// Convolution plus bias, optionally followed by ReLU.
+    fn forward(&self, x: &Tensor, relu: bool) -> Result<Tensor> {
+        fused::bias_act(&self.conv(x)?, &self.bias, relu)
     }
 }
 
@@ -125,12 +130,17 @@ impl SeBlock {
         })
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let (b, c, _, _) = x.dims4()?;
-        let y = x.mean((2, 3))?;
+    /// `relu(se(conv + bias) + residual)`, where `conv` has not had its bias added yet.
+    fn forward_with_residual(
+        &self,
+        conv: &Tensor,
+        bias: &Tensor,
+        residual: &Tensor,
+    ) -> Result<Tensor> {
+        let y = fused::channel_mean_bias(conv, bias)?;
         let y = self.fc1.forward(&y)?.relu()?;
-        let y = candle_nn::ops::sigmoid(&self.fc2.forward(&y)?)?;
-        x.broadcast_mul(&y.reshape((b, c, 1, 1))?)
+        let gate = candle_nn::ops::sigmoid(&self.fc2.forward(&y)?)?;
+        fused::se_tail(conv, bias, &gate, residual)
     }
 }
 
@@ -150,9 +160,9 @@ impl ResBlock {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let out = self.conv1.forward(x)?.relu()?;
-        let out = self.conv2.forward(&out)?;
-        (self.se.forward(&out)? + x)?.relu()
+        let out = self.conv1.forward(x, true)?;
+        let out = self.conv2.conv(&out)?;
+        self.se.forward_with_residual(&out, &self.conv2.bias, x)
     }
 }
 
@@ -226,19 +236,19 @@ impl PolicyValueNet for OracleNet {
         let b = planes.dim(0)?;
         let q_result = scalars.narrow(1, 0, 1)?;
 
-        let mut x = self.start_conv.forward(planes)?.relu()?;
+        let mut x = self.start_conv.forward(planes, true)?;
         for block in &self.blocks {
             x = block.forward(&x)?;
         }
 
         // Policy: [B, 73, 8, 8] -> [B, 8, 8, 73] -> [B, 4672] (AlphaZero move index order)
-        let p = self.p_conv.forward(&x)?.relu()?;
-        let p = self.p_head.forward(&p)?.permute((0, 2, 3, 1))?;
+        let p = self.p_conv.forward(&x, true)?;
+        let p = self.p_head.forward(&p, false)?.permute((0, 2, 3, 1))?;
         let p = p.contiguous()?.reshape((b, POLICY_SIZE))?;
         let log_policy = candle_nn::ops::log_softmax(&p, D::Minus1)?;
 
         // Value: 1x1 conv -> [B, 64], append q_result -> [B, 65] -> FC -> v_logit
-        let v = self.v_conv.forward(&x)?.relu()?.reshape((b, 64))?;
+        let v = self.v_conv.forward(&x, true)?.reshape((b, 64))?;
         let v = Tensor::cat(&[&v, &q_result], 1)?;
         let v = self.v_fc.forward(&v)?.relu()?;
         let v_logit = self.v_out.forward(&v)?;

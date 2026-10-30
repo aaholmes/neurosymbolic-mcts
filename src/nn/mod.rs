@@ -3,6 +3,7 @@
 //! Networks are trained in PyTorch (`python/model.py`) and re-implemented here
 //! layer for layer, loading the PyTorch state dict by its parameter names.
 
+pub mod fused;
 pub mod oracle_net;
 pub mod weights;
 
