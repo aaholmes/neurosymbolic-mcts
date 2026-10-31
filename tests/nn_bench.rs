@@ -3,6 +3,7 @@
 //!
 //! BENCH_MODEL=weights/gen_34.pt \
 //!   cargo test --release --features cudnn --test nn_bench -- --ignored --nocapture
+//! BENCH_BATCHES=64,128,256 picks the batch sizes (up to 512).
 
 use kingfisher::board::Board;
 use kingfisher::move_generation::MoveGen;
@@ -48,7 +49,10 @@ fn time_batches(
     mut run: impl FnMut(&[Board], &[bool], &[f32]),
     data: &(Vec<Board>, Vec<bool>, Vec<f32>),
 ) {
-    for &bs in &[1usize, 8, 16, 32, 64, 128, 256] {
+    let sizes: Vec<usize> = std::env::var("BENCH_BATCHES")
+        .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+        .unwrap_or_else(|_| vec![1, 8, 16, 32, 64, 128, 256]);
+    for &bs in &sizes {
         let (b, f, q) = (&data.0[..bs], &data.1[..bs], &data.2[..bs]);
         for _ in 0..50 {
             run(b, f, q);
@@ -75,7 +79,7 @@ fn time_batches(
 #[ignore]
 fn bench_predict_batch() {
     let path = std::env::var("BENCH_MODEL").unwrap_or_else(|_| "weights/gen_34.pt".to_string());
-    let data = sample_positions(256, 11);
+    let data = sample_positions(512, 11);
     let mut nn = NeuralNetPolicy::new();
     nn.load(&path).unwrap();
     time_batches(

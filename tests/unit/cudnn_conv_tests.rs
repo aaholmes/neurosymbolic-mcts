@@ -4,7 +4,8 @@
 #![cfg(feature = "cudnn")]
 
 use candle_core::{DType, Device, Tensor};
-use kingfisher::nn::cudnn_conv::conv2d;
+use kingfisher::nn::cudnn_conv::{conv2d, conv2d_bias_act};
+use kingfisher::nn::fused::bias_act;
 
 /// Largest |a - b| relative to the largest |b| (at least 1).
 fn rel_diff(a: &Tensor, b: &Tensor) -> f32 {
@@ -69,4 +70,42 @@ fn cached_conv_rejects_mismatched_channels() {
     let x = Tensor::zeros((2, 16, 8, 8), DType::F32, &dev).unwrap();
     let w = Tensor::zeros((8, 17, 3, 3), DType::F32, &dev).unwrap();
     assert!(conv2d(&x, &w, 1).is_err());
+}
+
+#[test]
+fn fused_conv_bias_activation_matches_conv_then_bias_act() {
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    for (cin, cout, k) in SHAPES {
+        let w = Tensor::randn(0f32, 0.1, (cout, cin, k, k), &dev).unwrap();
+        let bias = Tensor::randn(0f32, 0.5, cout, &dev).unwrap();
+        for b in [1, 7, 64, 130] {
+            let x = Tensor::randn(0f32, 1., (b, cin, 8, 8), &dev).unwrap();
+            for (dtype, tol) in [(DType::F16, 5e-3), (DType::BF16, 3e-2)] {
+                let (x, w, bias) = (
+                    x.to_dtype(dtype).unwrap(),
+                    w.to_dtype(dtype).unwrap(),
+                    bias.to_dtype(dtype).unwrap(),
+                );
+                for relu in [true, false] {
+                    let reference = bias_act(&conv2d(&x, &w, k / 2).unwrap(), &bias, relu).unwrap();
+                    let got = conv2d_bias_act(&x, &w, &bias, k / 2, relu).unwrap();
+                    assert_eq!(got.dtype(), dtype);
+                    let d = rel_diff(&got, &reference);
+                    assert!(
+                        d <= tol,
+                        "{dtype:?} cin {cin} cout {cout} k {k} batch {b} relu {relu}: {d}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fused_conv_rejects_a_bias_of_the_wrong_length() {
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    let x = Tensor::zeros((2, 16, 8, 8), DType::F16, &dev).unwrap();
+    let w = Tensor::zeros((8, 16, 3, 3), DType::F16, &dev).unwrap();
+    let bias = Tensor::zeros(7, DType::F16, &dev).unwrap();
+    assert!(conv2d_bias_act(&x, &w, &bias, 1, true).is_err());
 }

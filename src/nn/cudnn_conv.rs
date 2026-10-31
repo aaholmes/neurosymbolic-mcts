@@ -10,14 +10,15 @@
 
 use candle_core::backend::BackendStorage;
 use candle_core::cuda_backend::cudarc::cudnn::{
-    sys, ConvDescriptor, ConvForward, Cudnn, CudnnDataType, FilterDescriptor, TensorDescriptor,
+    result, sys, ConvDescriptor, ConvForward, Cudnn, CudnnDataType, FilterDescriptor,
+    TensorDescriptor,
 };
 use candle_core::cuda_backend::cudarc::driver::{
-    CudaSlice, CudaStream, DeviceRepr, ValidAsZeroBits,
+    CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, ValidAsZeroBits,
 };
 use candle_core::cuda_backend::{CudaDType, WrapErr};
 use candle_core::{
-    CpuStorage, CudaStorage, CustomOp2, DType, Layout, Result, Shape, Tensor, WithDType,
+    CpuStorage, CudaStorage, CustomOp2, CustomOp3, DType, Layout, Result, Shape, Tensor, WithDType,
 };
 use std::any::Any;
 use std::cell::RefCell;
@@ -38,6 +39,279 @@ pub fn conv2d(x: &Tensor, w: &Tensor, padding: usize) -> Result<Tensor> {
     }
     x.contiguous()?
         .apply_op2_no_bwd(&w.contiguous()?, &Conv { padding })
+}
+
+/// `relu?(conv2d(x, w) + bias)` in one cuDNN call, for `bias: [Cout]` in the dtype
+/// of `x`; shapes and padding as for [`conv2d`]. Saves the separate bias kernel
+/// and one pass over the output.
+pub fn conv2d_bias_act(
+    x: &Tensor,
+    w: &Tensor,
+    bias: &Tensor,
+    padding: usize,
+    relu: bool,
+) -> Result<Tensor> {
+    let (_, cin, _, _) = x.dims4()?;
+    let (cout, cin_w, kh, kw) = w.dims4()?;
+    if cin != cin_w || kh != kw || bias.dims() != [cout] {
+        candle_core::bail!(
+            "conv2d_bias_act: input {:?}, filter {:?} and bias {:?} do not fit",
+            x.dims(),
+            w.dims(),
+            bias.dims()
+        );
+    }
+    x.contiguous()?.apply_op3_no_bwd(
+        &w.contiguous()?,
+        &bias.contiguous()?,
+        &FusedConv { padding, relu },
+    )
+}
+
+struct FusedConv {
+    padding: usize,
+    relu: bool,
+}
+
+impl CustomOp3 for FusedConv {
+    fn name(&self) -> &'static str {
+        "kf-cudnn-conv2d-bias-act"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("kf-cudnn-conv2d-bias-act runs on CUDA only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        xs: &CudaStorage,
+        xl: &Layout,
+        ws: &CudaStorage,
+        wl: &Layout,
+        bs: &CudaStorage,
+        bl: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        match xs.dtype() {
+            DType::F16 => self.run::<half::f16>(xs, xl, ws, wl, bs, bl),
+            DType::BF16 => self.run::<half::bf16>(xs, xl, ws, wl, bs, bl),
+            d => candle_core::bail!("kf-cudnn-conv2d-bias-act does not support {d:?}"),
+        }
+    }
+}
+
+/// Raw cuDNN descriptors for one fused convolution, destroyed on drop. cudarc's safe
+/// wrapper takes the unused residual input `z` and the output as separate borrows,
+/// but with alpha2 = 0 cuDNN expects `z` to alias the output.
+struct FusedPlan {
+    x: sys::cudnnTensorDescriptor_t,
+    w: sys::cudnnFilterDescriptor_t,
+    y: sys::cudnnTensorDescriptor_t,
+    bias: sys::cudnnTensorDescriptor_t,
+    conv: sys::cudnnConvolutionDescriptor_t,
+    act: sys::cudnnActivationDescriptor_t,
+    workspace: usize,
+}
+
+impl Drop for FusedPlan {
+    fn drop(&mut self) {
+        // SAFETY: each descriptor was created by this plan and is destroyed once.
+        unsafe {
+            let _ = result::destroy_tensor_descriptor(self.x);
+            let _ = result::destroy_filter_descriptor(self.w);
+            let _ = result::destroy_tensor_descriptor(self.y);
+            let _ = result::destroy_tensor_descriptor(self.bias);
+            let _ = result::destroy_convolution_descriptor(self.conv);
+            let _ = sys::cudnnDestroyActivationDescriptor(self.act);
+        }
+    }
+}
+
+/// A raw cuDNN handle bound to one stream.
+struct RawHandle(sys::cudnnHandle_t);
+
+impl Drop for RawHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle was created by `raw_handle` and is destroyed once.
+        unsafe {
+            let _ = result::destroy_handle(self.0);
+        }
+    }
+}
+
+type FusedKey = (usize, DType, [usize; 8]);
+
+thread_local! {
+    static RAW_HANDLES: RefCell<HashMap<usize, RawHandle>> = RefCell::new(HashMap::new());
+    static FUSED_PLANS: RefCell<HashMap<FusedKey, FusedPlan>> = RefCell::new(HashMap::new());
+}
+
+fn raw_handle(sid: usize, stream: &CudaStream) -> Result<sys::cudnnHandle_t> {
+    RAW_HANDLES.with(|m| -> Result<sys::cudnnHandle_t> {
+        if let Some(h) = m.borrow().get(&sid) {
+            return Ok(h.0);
+        }
+        let h = result::create_handle()?;
+        // SAFETY: `h` is a fresh handle and the stream outlives this thread's use of it.
+        unsafe { result::set_stream(h, stream.cu_stream() as _) }?;
+        m.borrow_mut().insert(sid, RawHandle(h));
+        Ok(h)
+    })
+}
+
+fn make_fused_plan(
+    handle: sys::cudnnHandle_t,
+    dtype: sys::cudnnDataType_t,
+    [b, cin, h, w, cout, k, pad, relu]: [usize; 8],
+) -> Result<FusedPlan> {
+    let i = |v: usize| v as i32;
+    let nchw = sys::cudnnTensorFormat_t::CUDNN_TENSOR_NCHW;
+    let (ho, wo) = (h + 2 * pad + 1 - k, w + 2 * pad + 1 - k);
+    // SAFETY: every descriptor is freshly created before it is set, and owned by the plan.
+    unsafe {
+        let mut plan = FusedPlan {
+            x: result::create_tensor_descriptor()?,
+            w: result::create_filter_descriptor()?,
+            y: result::create_tensor_descriptor()?,
+            bias: result::create_tensor_descriptor()?,
+            conv: result::create_convolution_descriptor()?,
+            act: result::create_activation_descriptor()?,
+            workspace: 0,
+        };
+        result::set_tensor4d_descriptor(plan.x, nchw, dtype, [i(b), i(cin), i(h), i(w)])?;
+        result::set_filter4d_descriptor(plan.w, dtype, nchw, [i(cout), i(cin), i(k), i(k)])?;
+        result::set_tensor4d_descriptor(plan.y, nchw, dtype, [i(b), i(cout), i(ho), i(wo)])?;
+        result::set_tensor4d_descriptor(plan.bias, nchw, dtype, [1, i(cout), 1, 1])?;
+        result::set_convolution2d_descriptor(
+            plan.conv,
+            i(pad),
+            i(pad),
+            1,
+            1,
+            1,
+            1,
+            sys::cudnnConvolutionMode_t::CUDNN_CROSS_CORRELATION,
+            sys::cudnnDataType_t::CUDNN_DATA_FLOAT,
+        )?;
+        result::set_convolution_math_type(plan.conv, sys::cudnnMathType_t::CUDNN_TENSOR_OP_MATH)?;
+        let mode = if relu == 1 {
+            sys::cudnnActivationMode_t::CUDNN_ACTIVATION_RELU
+        } else {
+            sys::cudnnActivationMode_t::CUDNN_ACTIVATION_IDENTITY
+        };
+        result::set_activation_descriptor(
+            plan.act,
+            mode,
+            sys::cudnnNanPropagation_t::CUDNN_NOT_PROPAGATE_NAN,
+            0.0,
+        )?;
+        let workspace = result::get_convolution_forward_workspace_size(
+            handle, plan.x, plan.w, plan.conv, plan.y, FUSED_ALGO,
+        )?;
+        plan.workspace = workspace;
+        Ok(plan)
+    }
+}
+
+/// cuDNN allows the identity activation only with this algorithm.
+const FUSED_ALGO: sys::cudnnConvolutionFwdAlgo_t =
+    sys::cudnnConvolutionFwdAlgo_t::CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+
+impl FusedConv {
+    #[allow(clippy::too_many_arguments)]
+    fn run<T>(
+        &self,
+        xs: &CudaStorage,
+        xl: &Layout,
+        ws: &CudaStorage,
+        wl: &Layout,
+        bs: &CudaStorage,
+        bl: &Layout,
+    ) -> Result<(CudaStorage, Shape)>
+    where
+        T: CudnnDataType + CudaDType + DeviceRepr + ValidAsZeroBits + WithDType,
+    {
+        let (b, cin, h, w) = xl.shape().dims4()?;
+        let (cout, _, k, _) = wl.shape().dims4()?;
+        let p = self.padding;
+        let (ho, wo) = (h + 2 * p + 1 - k, w + 2 * p + 1 - k);
+        let stream: Arc<CudaStream> = xs.device.cuda_stream();
+        let sid = Arc::as_ptr(&stream) as usize;
+        let handle = raw_handle(sid, &stream)?;
+        let dims = [b, cin, h, w, cout, k, p, self.relu as usize];
+        let key: FusedKey = (sid, T::DTYPE, dims);
+
+        let x = xs.as_cuda_slice::<T>()?;
+        let x = x.slice(xl.start_offset()..xl.start_offset() + xl.shape().elem_count());
+        let f = ws.as_cuda_slice::<T>()?;
+        let f = f.slice(wl.start_offset()..wl.start_offset() + wl.shape().elem_count());
+        let bias = bs.as_cuda_slice::<T>()?;
+        let bias = bias.slice(bl.start_offset()..bl.start_offset() + bl.shape().elem_count());
+        // SAFETY: cuDNN writes every output element (alpha2 = 0, so `z` is not used).
+        let mut out = unsafe { stream.alloc::<T>(b * cout * ho * wo) }.w()?;
+
+        FUSED_PLANS.with(|plans| -> Result<()> {
+            let mut plans = plans.borrow_mut();
+            let plan = match plans.entry(key) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(make_fused_plan(handle, T::DATA_TYPE, dims)?)
+                }
+            };
+            WORKSPACES.with(|wsm| -> Result<()> {
+                let mut wsm = wsm.borrow_mut();
+                if wsm.get(&sid).is_none_or(|w| w.len() < plan.workspace) {
+                    // SAFETY: cuDNN uses the workspace as scratch space only.
+                    let buf = unsafe { stream.alloc::<u8>(plan.workspace.max(1)) }.w()?;
+                    wsm.insert(sid, buf);
+                }
+                let workspace = wsm.get_mut(&sid).expect("just inserted");
+                let (one, zero) = (1f32, 0f32);
+                let (xp, _gx) = x.device_ptr(&stream);
+                let (fp, _gf) = f.device_ptr(&stream);
+                let (bp, _gb) = bias.device_ptr(&stream);
+                let (wp, _gw) = workspace.device_ptr_mut(&stream);
+                let (yp, _gy) = out.device_ptr_mut(&stream);
+                // SAFETY: the descriptors match these buffers' shapes and dtype; half-precision
+                // data takes f32 scaling factors; `z` aliases `y` as cuDNN allows.
+                unsafe {
+                    result::convolution_bias_activation_forward(
+                        handle,
+                        (&one) as *const f32 as *const _,
+                        plan.x,
+                        xp as *const _,
+                        plan.w,
+                        fp as *const _,
+                        plan.conv,
+                        FUSED_ALGO,
+                        wp as *mut _,
+                        plan.workspace,
+                        (&zero) as *const f32 as *const _,
+                        plan.y,
+                        yp as *const _,
+                        plan.bias,
+                        bp as *const _,
+                        plan.act,
+                        plan.y,
+                        yp as *mut _,
+                    )
+                }?;
+                Ok(())
+            })
+        })?;
+
+        Ok((
+            CudaStorage::wrap_cuda_slice(out, xs.device.clone()),
+            Shape::from((b, cout, ho, wo)),
+        ))
+    }
 }
 
 struct Conv {

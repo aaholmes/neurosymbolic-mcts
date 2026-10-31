@@ -129,8 +129,19 @@ impl Conv {
         x.conv2d_with_algo(&self.weight, self.padding, 1, 1, 1, algo)
     }
 
-    /// Convolution plus bias, optionally followed by ReLU.
+    /// Convolution plus bias, optionally followed by ReLU: one fused cuDNN call in
+    /// half precision, a separate bias kernel otherwise.
     fn forward(&self, x: &Tensor, relu: bool) -> Result<Tensor> {
+        #[cfg(feature = "cudnn")]
+        if x.device().is_cuda() && x.dtype() != DType::F32 && !candle_conv() {
+            return super::cudnn_conv::conv2d_bias_act(
+                x,
+                &self.weight,
+                &self.bias,
+                self.padding,
+                relu,
+            );
+        }
         fused::bias_act(&self.conv(x)?, &self.bias, relu)
     }
 }
