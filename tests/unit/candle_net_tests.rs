@@ -126,6 +126,46 @@ fn policy_load_reports_missing_file() {
     assert!(!nn.is_available());
 }
 
+/// A batch can be launched, left running while another is launched, and read
+/// back later; the results equal `predict_batch`.
+#[test]
+fn launched_batches_finish_with_predict_batch_results() {
+    let mut nn = NeuralNetPolicy::new();
+    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+        .unwrap();
+    let a: Vec<_> = [positions::STARTING, positions::CASTLING_BOTH]
+        .iter()
+        .map(|f| board_from_fen(f))
+        .collect();
+    let b = vec![board_from_fen(positions::EN_PASSANT)];
+
+    let expected_a = nn.predict_batch(&a, &[true, false], &[0.5, -1.0]);
+    let expected_b = nn.predict_batch(&b, &[true], &[2.0]);
+
+    let first = nn.launch_batch(&a, &[true, false], &[0.5, -1.0]);
+    let second = nn.launch_batch(&b, &[true], &[2.0]);
+    let got_a = nn.finish_batch(first);
+    let got_b = nn.finish_batch(second);
+    for (got, exp) in got_a
+        .iter()
+        .chain(&got_b)
+        .zip(expected_a.iter().chain(&expected_b))
+    {
+        let (p, v, k) = got.clone().unwrap();
+        let (pe, ve, ke) = exp.clone().unwrap();
+        assert_eq!(p, pe);
+        assert_eq!((v, k), (ve, ke));
+    }
+}
+
+#[test]
+fn launching_without_a_model_finishes_with_no_predictions() {
+    let mut nn = NeuralNetPolicy::new();
+    let pending = nn.launch_batch(&[board_from_fen(positions::STARTING)], &[true], &[0.0]);
+    assert!(nn.is_finished(&pending));
+    assert_eq!(nn.finish_batch(pending), vec![None]);
+}
+
 #[test]
 fn predict_batch_matches_single_predictions() {
     let mut nn = NeuralNetPolicy::new();

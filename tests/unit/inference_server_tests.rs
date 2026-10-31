@@ -176,6 +176,102 @@ mod with_model {
     }
 
     #[test]
+    fn pipelined_worker_answers_each_request_with_its_own_result() {
+        let boards = sample_boards();
+        let mut reference = tiny_policy();
+        let expected: Vec<_> = (0..200)
+            .map(|i| {
+                let b = &boards[i % boards.len()];
+                reference.predict(b, i % 2 == 0, i as f32 * 0.01).unwrap()
+            })
+            .collect();
+        let server = std::sync::Arc::new(InferenceServer::new(tiny_policy(), 16));
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let server = server.clone();
+                let boards = boards.clone();
+                std::thread::spawn(move || {
+                    (t..200)
+                        .step_by(8)
+                        .map(|i| {
+                            let b = boards[i % boards.len()].clone();
+                            let r = server
+                                .predict_async(b, i % 2 == 0, i as f32 * 0.01)
+                                .recv()
+                                .unwrap()
+                                .unwrap();
+                            (i, r)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for h in handles {
+            for (i, (p, v, k)) in h.join().unwrap() {
+                let (pe, ve, ke) = &expected[i];
+                let dp = p
+                    .iter()
+                    .zip(pe)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+                assert!(
+                    dp < 1e-5 && (v - ve).abs() < 1e-5 && k == *ke,
+                    "request {i}"
+                );
+            }
+        }
+        let stats = std::sync::Arc::try_unwrap(server).unwrap().shutdown();
+        assert_eq!(stats[0].positions, 200);
+    }
+
+    #[test]
+    fn requests_queued_before_shutdown_are_all_answered() {
+        let server = InferenceServer::new(tiny_policy(), 4);
+        let receivers: Vec<_> = (0..50)
+            .map(|_| server.predict_async(Board::new(), true, 0.0))
+            .collect();
+        let stats = server.shutdown();
+        for r in receivers {
+            assert!(r.recv().unwrap().is_some());
+        }
+        assert_eq!(stats[0].positions, 50);
+    }
+
+    #[test]
+    fn worker_records_gpu_idle_time_between_batches() {
+        let server = InferenceServer::new(tiny_policy(), 16);
+        for _ in 0..3 {
+            server
+                .predict_async(Board::new(), true, 0.0)
+                .recv()
+                .unwrap();
+        }
+        let s = server.shutdown().remove(0);
+        assert_eq!(s.batches, 3);
+        // Measured from each batch's readback to the next launch
+        assert_eq!(s.gpu_idle.count, 2);
+    }
+
+    #[test]
+    fn zero_idle_window_answers_a_lone_request_without_waiting() {
+        use std::time::{Duration, Instant};
+        let slow = InferenceServer::with_workers_and_window(
+            vec![tiny_policy()],
+            16,
+            Duration::from_millis(300),
+        );
+        let fast =
+            InferenceServer::with_workers_and_window(vec![tiny_policy()], 16, Duration::ZERO);
+        let time = |s: &InferenceServer| {
+            let t = Instant::now();
+            s.predict_async(Board::new(), true, 0.0).recv().unwrap();
+            t.elapsed()
+        };
+        assert!(time(&slow) >= Duration::from_millis(300));
+        assert!(time(&fast) < Duration::from_millis(150));
+    }
+
+    #[test]
     fn shutdown_joins_every_worker() {
         let server =
             InferenceServer::with_workers(vec![tiny_policy(), tiny_policy(), tiny_policy()], 4);

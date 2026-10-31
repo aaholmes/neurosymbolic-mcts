@@ -76,6 +76,14 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    // How long an idle inference worker waits for a batch to fill (microseconds)
+    let idle_window = args
+        .iter()
+        .position(|a| a == "--idle-window-us")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .map(std::time::Duration::from_micros)
+        .unwrap_or(kingfisher::mcts::inference_server::DEFAULT_IDLE_WINDOW);
     // Leaves each game selects per MCTS iteration before waiting for the network
     let leaves_per_game: u32 = args
         .iter()
@@ -143,7 +151,12 @@ fn main() {
 
     // Create a single shared InferenceServer for all game threads
     let shared_server: Option<Arc<InferenceServer>> = if let Some(ref path) = model_path {
-        match InferenceServer::load(path, inference_workers, inference_batch_size) {
+        match InferenceServer::load_with_window(
+            path,
+            inference_workers,
+            inference_batch_size,
+            idle_window,
+        ) {
             Ok(server) => {
                 println!(
                     "   Shared InferenceServer: batch_size={}, workers={}, leaves per game={}",

@@ -26,6 +26,37 @@ mod candle_impl {
 
     type Prediction = Option<(Vec<f32>, f32, f32)>;
 
+    /// A batch whose forward pass has been queued (see `launch_batch`).
+    pub struct InFlight {
+        inner: Option<Launched>,
+        len: usize,
+    }
+
+    struct Launched {
+        policy: Tensor,
+        v_logit: Tensor,
+        k: f32,
+        /// Recorded after the forward pass; complete once the GPU has run it.
+        #[cfg(feature = "cuda")]
+        done: Option<candle_core::cuda::cudarc::driver::CudaEvent>,
+    }
+
+    impl Launched {
+        fn is_complete(&self) -> bool {
+            #[cfg(feature = "cuda")]
+            if let Some(event) = &self.done {
+                return event.is_complete();
+            }
+            true
+        }
+    }
+
+    fn report_error(e: &candle_core::Error) {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| eprintln!("[NN-ERROR] predict_batch failed: {}", e));
+    }
+
     pub struct NeuralNetPolicy {
         model: Option<OracleNet>,
         device: Device,
@@ -55,6 +86,7 @@ mod candle_impl {
             } else {
                 Device::Cpu
             };
+            #[cfg(feature = "cuda")]
             if let Device::Cuda(dev) = &device {
                 // A second stream switches candle to recording and waiting on CUDA
                 // events around every tensor access (hundreds of calls per batch).
@@ -135,31 +167,64 @@ mod candle_impl {
             qsearch_flags: &[bool],
             q_results: &[f32],
         ) -> Vec<Prediction> {
-            if self.model.is_none() || boards.is_empty() {
-                return vec![None; boards.len()];
-            }
-            match self.try_predict_batch(boards, qsearch_flags, q_results) {
-                Ok(results) => results.into_iter().map(Some).collect(),
-                Err(e) => {
-                    use std::sync::Once;
-                    static ONCE: Once = Once::new();
-                    ONCE.call_once(|| eprintln!("[NN-ERROR] predict_batch failed: {}", e));
-                    vec![None; boards.len()]
-                }
-            }
+            let pending = self.launch_batch(boards, qsearch_flags, q_results);
+            self.finish_batch(pending)
         }
 
-        fn try_predict_batch(
+        /// Upload a batch and queue its forward pass without waiting for the GPU.
+        /// Read the results with `finish_batch`; several batches may be in flight.
+        pub fn launch_batch(
             &mut self,
             boards: &[Board],
             qsearch_flags: &[bool],
             q_results: &[f32],
-        ) -> candle_core::Result<Vec<(Vec<f32>, f32, f32)>> {
+        ) -> InFlight {
+            let len = boards.len();
+            if self.model.is_none() || len == 0 {
+                return InFlight { inner: None, len };
+            }
+            match self.try_launch(boards, qsearch_flags, q_results) {
+                Ok(inner) => InFlight {
+                    inner: Some(inner),
+                    len,
+                },
+                Err(e) => {
+                    report_error(&e);
+                    InFlight { inner: None, len }
+                }
+            }
+        }
+
+        /// Whether the GPU has finished a launched batch (always true on the CPU).
+        pub fn is_finished(&self, pending: &InFlight) -> bool {
+            pending.inner.as_ref().is_none_or(|i| i.is_complete())
+        }
+
+        /// Wait for a launched batch and copy its results to the CPU.
+        pub fn finish_batch(&mut self, pending: InFlight) -> Vec<Prediction> {
+            let Some(inner) = pending.inner else {
+                return vec![None; pending.len];
+            };
+            match self.try_finish(inner) {
+                Ok(results) => results.into_iter().map(Some).collect(),
+                Err(e) => {
+                    report_error(&e);
+                    vec![None; pending.len]
+                }
+            }
+        }
+
+        fn try_launch(
+            &mut self,
+            boards: &[Board],
+            qsearch_flags: &[bool],
+            q_results: &[f32],
+        ) -> candle_core::Result<Launched> {
             let model = self.model.as_ref().expect("checked by caller");
             let b = boards.len();
             self.batch_sizes.record(b as f64);
 
-            // Phase 1: build inputs and copy them to the device
+            // Build inputs and copy them to the device
             let t0 = Instant::now();
             let mut planes = Vec::with_capacity(b * PLANES);
             for board in boards {
@@ -172,23 +237,41 @@ mod candle_impl {
             let scalars = Tensor::from_vec(scalars, (b, 2), &self.device)?;
             self.transfer_to_gpu_timing.record(t0.elapsed());
 
-            // Phase 2: forward pass (synchronized so the timing covers the kernels)
+            // Queue the forward pass (timed up to the last kernel launch, not its completion)
             let t1 = Instant::now();
             let out = model.forward(&planes, &scalars)?;
             let policy = out.log_policy.exp()?;
-            self.device.synchronize()?;
+            let launched = Launched {
+                policy,
+                v_logit: out.v_logit,
+                k: out.k,
+                #[cfg(feature = "cuda")]
+                done: match &self.device {
+                    Device::Cuda(dev) => Some(
+                        dev.cuda_stream()
+                            .record_event(None)
+                            .map_err(candle_core::Error::wrap)?,
+                    ),
+                    _ => None,
+                },
+            };
             self.forward_timing.record(t1.elapsed());
+            Ok(launched)
+        }
 
-            // Phase 3: copy results back to the CPU
+        fn try_finish(
+            &mut self,
+            launched: Launched,
+        ) -> candle_core::Result<Vec<(Vec<f32>, f32, f32)>> {
+            // Waits for the GPU, then copies the results back
             let t2 = Instant::now();
-            let policy: Vec<Vec<f32>> = policy.to_vec2()?;
-            let v_logit: Vec<f32> = out.v_logit.flatten_all()?.to_vec1()?;
+            let policy: Vec<Vec<f32>> = launched.policy.to_vec2()?;
+            let v_logit: Vec<f32> = launched.v_logit.flatten_all()?.to_vec1()?;
             self.transfer_from_gpu_timing.record(t2.elapsed());
-
             Ok(policy
                 .into_iter()
                 .zip(v_logit)
-                .map(|(p, v)| (p, v, out.k))
+                .map(|(p, v)| (p, v, launched.k))
                 .collect())
         }
 
@@ -258,6 +341,11 @@ mod stub {
 
     use crate::mcts::tactical_mcts::TimingAccumulator;
 
+    /// A queued batch; the stub has no network, so it only remembers the size.
+    pub struct InFlight {
+        len: usize,
+    }
+
     #[derive(Debug, Clone)]
     pub struct NeuralNetPolicy {
         _dummy: u8,
@@ -313,6 +401,20 @@ mod stub {
         ) -> Vec<Option<(Vec<f32>, f32, f32)>> {
             vec![None; boards.len()]
         }
+        pub fn launch_batch(
+            &mut self,
+            boards: &[Board],
+            _qsearch_flags: &[bool],
+            _q_results: &[f32],
+        ) -> InFlight {
+            InFlight { len: boards.len() }
+        }
+        pub fn is_finished(&self, _pending: &InFlight) -> bool {
+            true
+        }
+        pub fn finish_batch(&mut self, pending: InFlight) -> Vec<Option<(Vec<f32>, f32, f32)>> {
+            vec![None; pending.len]
+        }
         pub fn policy_to_move_priors(
             &self,
             _policy: &[f32],
@@ -332,7 +434,7 @@ mod stub {
 }
 
 #[cfg(feature = "neural")]
-pub use self::candle_impl::NeuralNetPolicy;
+pub use self::candle_impl::{InFlight, NeuralNetPolicy};
 
 #[cfg(not(feature = "neural"))]
-pub use self::stub::NeuralNetPolicy;
+pub use self::stub::{InFlight, NeuralNetPolicy};

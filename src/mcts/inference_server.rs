@@ -6,7 +6,7 @@
 use crate::board::Board;
 use crate::mcts::tactical_mcts::TimingAccumulator;
 use crate::neural_net::NeuralNetPolicy;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use rand::Rng;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -27,10 +27,15 @@ pub struct WorkerStats {
     pub batches: u64,
     /// Number of positions evaluated.
     pub positions: u64,
-    /// Time from a batch's first request until the batch was closed.
+    /// For batches collected while the GPU was idle: time from the batch's first
+    /// request until it was closed. Batches collected while the previous one ran
+    /// on the GPU are not counted here.
     pub collect: TimingAccumulator,
-    /// Time spent in `predict_batch` (input copies, forward pass, readback).
+    /// Time from launching a batch to having its results on the CPU.
     pub process: TimingAccumulator,
+    /// Time from one batch's results reaching the CPU until the next launch,
+    /// during which this worker has nothing queued on the GPU.
+    pub gpu_idle: TimingAccumulator,
 }
 
 /// The Shared Inference Server
@@ -52,6 +57,16 @@ impl InferenceServer {
     /// batch. Give each network its own CUDA stream
     /// (`Device::new_cuda_with_stream`) so their GPU work can overlap.
     pub fn with_workers(nns: Vec<NeuralNetPolicy>, batch_size: usize) -> Self {
+        Self::with_workers_and_window(nns, batch_size, DEFAULT_IDLE_WINDOW)
+    }
+
+    /// As `with_workers`, with the time a worker whose GPU is idle waits for more
+    /// requests after the first one of a batch.
+    pub fn with_workers_and_window(
+        nns: Vec<NeuralNetPolicy>,
+        batch_size: usize,
+        idle_window: Duration,
+    ) -> Self {
         assert!(
             !nns.is_empty(),
             "an inference server needs at least one worker"
@@ -63,7 +78,9 @@ impl InferenceServer {
             let s = Arc::new(Mutex::new(WorkerStats::default()));
             stats.push(s.clone());
             let rx = request_receiver.clone();
-            workers.push(thread::spawn(move || run_worker(nn, rx, batch_size, s)));
+            workers.push(thread::spawn(move || {
+                run_worker(nn, rx, batch_size, idle_window, s)
+            }));
         }
         InferenceServer {
             request_sender,
@@ -75,13 +92,23 @@ impl InferenceServer {
     /// Load the model at `path` once per worker, each on its own CUDA stream,
     /// and start a server with `workers` workers.
     pub fn load(path: &str, workers: usize, batch_size: usize) -> Result<Self, String> {
+        Self::load_with_window(path, workers, batch_size, DEFAULT_IDLE_WINDOW)
+    }
+
+    /// As `load`, with the idle-GPU collection window of `with_workers_and_window`.
+    pub fn load_with_window(
+        path: &str,
+        workers: usize,
+        batch_size: usize,
+        idle_window: Duration,
+    ) -> Result<Self, String> {
         let nns = (0..workers.max(1))
             .map(|_| {
                 let mut nn = NeuralNetPolicy::new_on_own_stream();
                 nn.load(path).map(|_| nn)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(Self::with_workers(nns, batch_size))
+        Ok(Self::with_workers_and_window(nns, batch_size, idle_window))
     }
 
     /// Stop accepting requests, wait for every worker to finish, and return
@@ -186,58 +213,93 @@ impl InferenceServer {
     }
 }
 
-/// How long a worker waits for more requests after the first one of a batch.
-const COLLECT_WINDOW: Duration = Duration::from_micros(500);
+/// How long a worker whose GPU is idle waits for more requests after the first
+/// one of a batch.
+pub const DEFAULT_IDLE_WINDOW: Duration = Duration::from_micros(500);
 
 /// Collect requests into batches, run them through the network and send back
 /// the results, until every request sender has been dropped.
+///
+/// While one batch runs on the GPU the worker collects the next, and launches it
+/// as soon as the first batch's results are back. Only when nothing is in flight
+/// does it wait up to `idle_window` for a batch to fill.
 fn run_worker(
     mut nn: NeuralNetPolicy,
     request_receiver: Receiver<PredictRequest>,
     batch_size: usize,
+    idle_window: Duration,
     stats: Arc<Mutex<WorkerStats>>,
 ) {
-    let mut requests = Vec::with_capacity(batch_size);
+    let mut next: Vec<PredictRequest> = Vec::with_capacity(batch_size);
+    let mut closed = false;
+    let mut last_finish: Option<Instant> = None;
 
     loop {
-        // 1. Wait for the first request (blocking)
-        let first_req = match request_receiver.recv() {
-            Ok(req) => req,
-            Err(_) => break, // Channel closed, shut down worker
-        };
-        requests.push(first_req);
-
-        // 2. Collect more requests until the batch is full or the window closes.
-        // Spinning on try_recv picks requests up sooner than recv_deadline, whose
-        // wake-ups added ~70 us per batch and cost ~3% of self-play throughput.
-        let start_wait = Instant::now();
-        while requests.len() < batch_size && start_wait.elapsed() < COLLECT_WINDOW {
-            match request_receiver.try_recv() {
-                Ok(req) => requests.push(req),
-                Err(_) => thread::yield_now(),
+        // 1. Nothing collected while the GPU ran: wait for a first request, then
+        // spin for more. Spinning on try_recv picks requests up sooner than
+        // recv_deadline, whose wake-ups added ~70 us per batch.
+        let mut collect_time = None;
+        if next.is_empty() {
+            if closed {
+                break;
             }
+            match request_receiver.recv() {
+                Ok(req) => next.push(req),
+                Err(_) => break,
+            }
+            let start_wait = Instant::now();
+            while next.len() < batch_size && start_wait.elapsed() < idle_window {
+                match request_receiver.try_recv() {
+                    Ok(req) => next.push(req),
+                    Err(TryRecvError::Empty) => thread::yield_now(),
+                    Err(TryRecvError::Disconnected) => {
+                        closed = true;
+                        break;
+                    }
+                }
+            }
+            collect_time = Some(start_wait.elapsed());
         }
-        let collect_time = start_wait.elapsed();
 
-        // 3. Process Batch
+        // 2. Launch the batch without waiting for the GPU
+        let gpu_idle = last_finish.map(|t| t.elapsed());
+        let requests = std::mem::replace(&mut next, Vec::with_capacity(batch_size));
         let t_process = Instant::now();
         let boards: Vec<Board> = requests.iter().map(|r| r.board.clone()).collect();
         let qsearch_flags: Vec<bool> = requests.iter().map(|r| r.qsearch_completed).collect();
         let q_results: Vec<f32> = requests.iter().map(|r| r.q_result).collect();
-        let results = nn.predict_batch(&boards, &qsearch_flags, &q_results);
-        let process_time = t_process.elapsed();
+        let pending = nn.launch_batch(&boards, &qsearch_flags, &q_results);
 
-        // 4. Record stats before answering, so a caller that has its answer sees them
+        // 3. Collect the next batch while this one runs
+        while !closed && next.len() < batch_size && !nn.is_finished(&pending) {
+            match request_receiver.try_recv() {
+                Ok(req) => next.push(req),
+                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Disconnected) => closed = true,
+            }
+        }
+
+        // 4. Read the results back
+        let results = nn.finish_batch(pending);
+        let process_time = t_process.elapsed();
+        last_finish = Some(Instant::now());
+
+        // 5. Record stats before answering, so a caller that has its answer sees them
         {
             let mut s = stats.lock().expect("stats lock");
             s.batches += 1;
             s.positions += requests.len() as u64;
-            s.collect.record(collect_time);
+            if let Some(t) = collect_time {
+                s.collect.record(t);
+            }
+            if let Some(t) = gpu_idle {
+                s.gpu_idle.record(t);
+            }
             s.process.record(process_time);
         }
 
-        // 5. Dispatch Results
-        for (req, res) in requests.drain(..).zip(results) {
+        // 6. Dispatch results
+        for (req, res) in requests.into_iter().zip(results) {
             let _ = req.response_sender.send(res);
         }
     }
@@ -245,10 +307,12 @@ fn run_worker(
     let s = stats.lock().expect("stats lock");
     if s.batches > 0 {
         println!(
-            "Server: {} batches, collect mean {:.1} us, process mean {:.1} us",
+            "Server: {} batches, collect mean {:.1} us, process mean {:.1} us, gpu idle mean {:.1} us, idle-window batches {}",
             s.batches,
             s.collect.mean_us(),
-            s.process.mean_us()
+            s.process.mean_us(),
+            s.gpu_idle.mean_us(),
+            s.collect.count
         );
     }
     println!("🛑 Inference Server Worker shutting down.");
