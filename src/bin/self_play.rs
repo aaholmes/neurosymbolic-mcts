@@ -133,17 +133,14 @@ fn main() {
     println!("   Inference Batch Size: {}", inference_batch_size);
     println!("   Explore Base: {}", explore_base);
 
-    // Set thread count if specified (overrides RAYON_NUM_THREADS env var)
-    if let Some(threads) = num_threads {
-        println!("   Game Threads: {}", threads);
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build_global()
-            .ok(); // Fails silently if already initialized
-    } else {
+    // Game threads (named kf-game-N); with KF_INFER_CPUS they keep off those CPUs
+    let infer_cpus = kingfisher::mcts::inference_server::inference_cpus_from_env();
+    kingfisher::threads::build_game_pool(num_threads, infer_cpus.as_deref());
+    println!("   Game Threads: {}", rayon::current_num_threads());
+    if let Some(cpus) = &infer_cpus {
         println!(
-            "   Game Threads: {} (from RAYON_NUM_THREADS or default)",
-            rayon::current_num_threads()
+            "   Inference CPUs: {:?} (game threads use the others)",
+            cpus
         );
     }
 

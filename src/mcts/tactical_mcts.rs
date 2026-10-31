@@ -921,7 +921,11 @@ fn finish_leaf_evaluation(
     let mut node_ref = node.borrow_mut();
     let mut k_val: f32 = CLASSICAL_K;
     let mut v_logit: f64 = f64::NEG_INFINITY; // sentinel: no NN result
-    if let Ok(Some((policy, nn_v_logit, k))) = pending.receiver.recv() {
+    let reply = {
+        let _wait = crate::threads::span(c"kf.game.wait");
+        pending.receiver.recv()
+    };
+    if let Ok(Some((policy, nn_v_logit, k))) = reply {
         v_logit = nn_v_logit as f64;
         k_val = k;
         if policy.len() == pending.moves.len() {

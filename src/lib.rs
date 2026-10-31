@@ -64,6 +64,7 @@ pub mod nnue;
 pub mod piece_types;
 pub mod search;
 pub mod tensor;
+pub mod threads;
 pub mod training;
 pub mod training_data;
 pub mod transposition;

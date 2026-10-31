@@ -448,4 +448,39 @@ mod with_model {
             }
         }
     }
+
+    #[test]
+    fn worker_records_phase_times_for_every_batch() {
+        let server = InferenceServer::new(tiny_policy(), 16);
+        for _ in 0..3 {
+            server
+                .predict_async(Board::new(), true, 0.0)
+                .recv()
+                .unwrap();
+        }
+        let s = server.shutdown().remove(0);
+        assert_eq!(s.batches, 3);
+        for (name, p) in s.nn_phases.all() {
+            assert_eq!(p.wall.count, 3, "{name}");
+        }
+        assert_eq!(s.dispatch.wall.count, 3);
+        assert!(s.dispatch.cpu <= s.dispatch.wall.total + std::time::Duration::from_micros(200));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn worker_pins_itself_to_the_requested_cpus() {
+        let cpu = kingfisher::threads::current_thread_cpus().unwrap()[0];
+        let server = server_with(kingfisher::mcts::inference_server::ServerOptions {
+            inference_cpus: Some(vec![cpu]),
+            ..Default::default()
+        });
+        assert!(server
+            .predict_async(Board::new(), true, 0.0)
+            .recv()
+            .unwrap()
+            .is_some());
+        let s = server.shutdown().remove(0);
+        assert_eq!(s.cpus, vec![cpu]);
+    }
 }

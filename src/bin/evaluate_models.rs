@@ -996,12 +996,9 @@ fn main() {
         }))
     };
 
-    if let Some(threads) = num_threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build_global()
-            .ok();
-    }
+    // Game threads (named kf-game-N); with KF_INFER_CPUS they keep off those CPUs
+    let infer_cpus = kingfisher::mcts::inference_server::inference_cpus_from_env();
+    kingfisher::threads::build_game_pool(num_threads, infer_cpus.as_deref());
 
     eprintln!("Evaluating: {} vs {}", candidate_path, current_path);
 

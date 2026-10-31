@@ -326,7 +326,11 @@ fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &TacticalMctsCon
                 true,
                 0.0,
             );
-            if let Ok(Some((policy, _v_logit, k))) = receiver.recv() {
+            let reply = {
+                let _wait = crate::threads::span(c"kf.game.wait");
+                receiver.recv()
+            };
+            if let Ok(Some((policy, _v_logit, k))) = reply {
                 let stored: Vec<(Move, f32)> =
                     moves_to_prioritize.iter().copied().zip(policy).collect();
                 let priors = priors_for_moves(&stored, &moves_to_prioritize);

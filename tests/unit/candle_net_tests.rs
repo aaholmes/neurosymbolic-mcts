@@ -449,3 +449,26 @@ fn trained_net_in_half_precision_keeps_priors_and_values_close() {
         assert!(same_top >= 60, "{p:?} top move agrees in {same_top}/64");
     }
 }
+
+/// Each batch records wall and own-CPU time for every inference phase, and a
+/// thread cannot use more CPU time than wall time.
+#[test]
+fn predict_batch_records_wall_and_cpu_time_per_phase() {
+    let mut nn = NeuralNetPolicy::with_device(Device::Cpu);
+    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+        .unwrap();
+    let boards = vec![board_from_fen(positions::STARTING); 3];
+    for _ in 0..2 {
+        nn.predict_batch(&boards, &[true; 3], &[0.0; 3]);
+    }
+    let slack = std::time::Duration::from_micros(200);
+    for (name, p) in nn.phases.all() {
+        assert_eq!(p.wall.count, 2, "{name}");
+        assert!(
+            p.cpu <= p.wall.total + slack,
+            "{name}: cpu {:?} > wall {:?}",
+            p.cpu,
+            p.wall.total
+        );
+    }
+}

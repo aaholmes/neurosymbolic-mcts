@@ -43,6 +43,7 @@ mod tactical_detection_tests;
 mod tactical_mcts_tests;
 mod tensor_extended_tests;
 mod tensor_tests;
+mod threads_tests;
 mod training_diversity_tests;
 mod training_pipeline_tests;
 mod training_tests;

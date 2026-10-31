@@ -40,10 +40,16 @@ pub struct WorkerStats {
     /// Time from one batch's results reaching the CPU until the next launch,
     /// during which this worker has nothing queued on the GPU.
     pub gpu_idle: TimingAccumulator,
+    /// Wall and own-CPU time of each step inside the network wrapper.
+    pub nn_phases: crate::neural_net::InferencePhases,
+    /// Sending the results back to the requesting threads.
+    pub dispatch: crate::threads::PhaseTiming,
+    /// Logical CPUs the worker thread may run on (empty where unknown).
+    pub cpus: Vec<usize>,
 }
 
 /// How inference workers batch and read back requests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerOptions {
     /// How long a worker whose GPU is idle waits for more requests after the
     /// first one of a batch.
@@ -54,6 +60,8 @@ pub struct ServerOptions {
     /// Read back the full 4672-slot policy and compute priors for the requested
     /// moves on the CPU, instead of gathering just those logits on the GPU.
     pub full_policy: bool,
+    /// Logical CPUs to pin each worker thread to (None: leave it unpinned).
+    pub inference_cpus: Option<Vec<usize>>,
 }
 
 impl Default for ServerOptions {
@@ -62,12 +70,14 @@ impl Default for ServerOptions {
             idle_window: DEFAULT_IDLE_WINDOW,
             pipeline: true,
             full_policy: false,
+            inference_cpus: None,
         }
     }
 }
 
 impl ServerOptions {
-    /// Defaults, overridden by KF_PIPELINE=0|1 and KF_FULL_POLICY=0|1.
+    /// Defaults, overridden by KF_PIPELINE=0|1, KF_FULL_POLICY=0|1 and
+    /// KF_INFER_CPUS=<cpu list> (e.g. "0,16").
     pub fn from_env() -> Self {
         let flag = |name: &str, default: bool| match std::env::var(name).as_deref() {
             Ok("1") => true,
@@ -79,9 +89,17 @@ impl ServerOptions {
         Self {
             pipeline: flag("KF_PIPELINE", d.pipeline),
             full_policy: flag("KF_FULL_POLICY", d.full_policy),
+            inference_cpus: inference_cpus_from_env(),
             ..d
         }
     }
+}
+
+/// The CPUs named by KF_INFER_CPUS, if set. Panics on a malformed list.
+pub fn inference_cpus_from_env() -> Option<Vec<usize>> {
+    std::env::var("KF_INFER_CPUS").ok().map(|s| {
+        crate::threads::parse_cpu_list(&s).unwrap_or_else(|e| panic!("KF_INFER_CPUS: {e}"))
+    })
 }
 
 /// The Shared Inference Server
@@ -136,13 +154,17 @@ impl InferenceServer {
         let (request_sender, request_receiver) = unbounded::<PredictRequest>();
         let mut stats = Vec::with_capacity(nns.len());
         let mut workers = Vec::with_capacity(nns.len());
-        for nn in nns {
+        for (i, nn) in nns.into_iter().enumerate() {
             let s = Arc::new(Mutex::new(WorkerStats::default()));
             stats.push(s.clone());
             let rx = request_receiver.clone();
-            workers.push(thread::spawn(move || {
-                run_worker(nn, rx, batch_size, options, s)
-            }));
+            let options = options.clone();
+            workers.push(
+                thread::Builder::new()
+                    .name(format!("kf-infer-{i}"))
+                    .spawn(move || run_worker(nn, rx, batch_size, options, s))
+                    .expect("spawn inference worker"),
+            );
         }
         InferenceServer {
             request_sender,
@@ -323,6 +345,17 @@ fn run_worker(
     stats: Arc<Mutex<WorkerStats>>,
 ) {
     let idle_window = options.idle_window;
+    if let Some(cpus) = &options.inference_cpus {
+        #[cfg(target_os = "linux")]
+        if let Err(e) = crate::threads::pin_current_thread(cpus) {
+            eprintln!("[inference] could not pin to CPUs {cpus:?}: {e}");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        stats.lock().expect("stats lock").cpus =
+            crate::threads::current_thread_cpus().unwrap_or_default();
+    }
     let mut next: Vec<PredictRequest> = Vec::with_capacity(batch_size);
     let mut closed = false;
     let mut last_finish: Option<Instant> = None;
@@ -332,6 +365,7 @@ fn run_worker(
         // spin for more. Spinning on try_recv picks requests up sooner than
         // recv_deadline, whose wake-ups added ~70 us per batch.
         let mut collect_time = None;
+        let collect_span = crate::threads::span(c"kf.infer.collect");
         if next.is_empty() {
             if closed {
                 break;
@@ -353,6 +387,8 @@ fn run_worker(
             }
             collect_time = Some(start_wait.elapsed());
         }
+
+        drop(collect_span);
 
         // 2. Launch the batch without waiting for the GPU
         let gpu_idle = last_finish.map(|t| t.elapsed());
@@ -406,12 +442,15 @@ fn run_worker(
                 s.gpu_idle.record(t);
             }
             s.process.record(process_time);
+            s.nn_phases = nn.phases.clone();
         }
 
         // 6. Dispatch results
+        let clock = crate::threads::PhaseClock::start(c"kf.infer.dispatch");
         for (req, res) in requests.into_iter().zip(results) {
             let _ = req.response_sender.send(res);
         }
+        clock.stop(&mut stats.lock().expect("stats lock").dispatch);
     }
     nn.print_inference_timing();
     let s = stats.lock().expect("stats lock");
@@ -424,6 +463,23 @@ fn run_worker(
             s.gpu_idle.mean_us(),
             s.collect.count
         );
+        // Mean wall time per batch for each step, and how much of it the thread
+        // spent off its core (waiting to run, or blocked)
+        let phases = s.nn_phases.all();
+        let rows = phases.iter().copied().chain([("dispatch", &s.dispatch)]);
+        let line: Vec<String> = rows
+            .map(|(name, p)| {
+                let n = p.wall.count.max(1) as f64;
+                let wall = p.wall.total.as_secs_f64() * 1e6 / n;
+                let off = (p.wall.total.saturating_sub(p.cpu)).as_secs_f64() * 1e6 / n;
+                format!("{name} {wall:.1}/{off:.1}")
+            })
+            .collect();
+        println!(
+            "Server phases (mean us per batch, wall/off-core): {}",
+            line.join(", ")
+        );
+        println!("Server CPUs: {:?}", s.cpus);
     }
     println!("🛑 Inference Server Worker shutting down.");
 }

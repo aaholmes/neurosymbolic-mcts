@@ -37,6 +37,8 @@ path = "src/bin/self_play.rs"
 
 [dependencies]
 rand = "0.8.5" # Added for MCTS random playouts
+libc = "0.2" # thread affinity and per-thread CPU time
+nvtx = { version = "2.0.0", optional = true, default-features = false, features = ["std"] }  # named ranges for Nsight Systems
 rand_distr = "0.4" # Dirichlet noise for self-play exploration
 lazy_static = "1.5.0"
 shakmaty = "0.25" # Dependency for shakmaty-syzygy
@@ -57,7 +59,8 @@ noru = "2.2"   # NNUE inference (game-agnostic). Planned HalfKP eval for Q-searc
 default = []
 neural = ["dep:candle-core", "dep:candle-nn"]  # candle inference on CPU
 cuda = ["neural", "candle-core/cuda", "candle-nn/cuda", "dep:half"]  # needs nvcc >= 12.8 for sm_120 GPUs
-cudnn = ["cuda", "candle-core/cudnn", "candle-nn/cudnn"]  # cuDNN convolutions (libcudnn must be on the library path)
+cudnn = ["cuda", "candle-core/cudnn", "candle-nn/cudnn"]
+nvtx = ["dep:nvtx"]  # label inference steps and game waits on Nsight Systems timelines  # cuDNN convolutions (libcudnn must be on the library path)
 slow-tests = []
 
 # Clippy lints deferred as stylistic/structural rather than fixed. Applied

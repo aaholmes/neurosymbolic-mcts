@@ -6,6 +6,35 @@
 //! - candle (feature "neural"; "cuda" or "cudnn" for the GPU)
 //! - stub (default), which never has a model
 
+use crate::threads::PhaseTiming;
+
+/// Wall and own-CPU time of each step a batch goes through on the inference thread.
+#[derive(Debug, Clone, Default)]
+pub struct InferencePhases {
+    /// Building the input planes and scalars on the CPU.
+    pub build: PhaseTiming,
+    /// Copying them to the device.
+    pub upload: PhaseTiming,
+    /// Queueing the forward pass.
+    pub launch: PhaseTiming,
+    /// Waiting for the device to finish the batch.
+    pub wait: PhaseTiming,
+    /// Copying the results back and converting them.
+    pub readback: PhaseTiming,
+}
+
+impl InferencePhases {
+    pub fn all(&self) -> [(&'static str, &PhaseTiming); 5] {
+        [
+            ("build", &self.build),
+            ("upload", &self.upload),
+            ("launch", &self.launch),
+            ("wait", &self.wait),
+            ("readback", &self.readback),
+        ]
+    }
+}
+
 // ==========================================
 // 1. candle implementation (pure Rust; CPU, or CUDA with the "cuda" feature)
 // ==========================================
@@ -18,6 +47,7 @@ mod candle_impl {
     use crate::nn::weights::load_state_dict;
     use crate::nn::{PolicyValueNet, Precision};
     use crate::tensor::{board_to_planes, move_to_index, policy_to_move_priors};
+    use crate::threads::PhaseClock;
     use candle_core::{Device, Tensor};
     use std::path::Path;
     use std::time::Instant;
@@ -96,6 +126,8 @@ mod candle_impl {
         pub transfer_from_gpu_timing: TimingAccumulator,
         /// Number of positions in each forward pass.
         pub batch_sizes: StatsAccumulator,
+        /// Wall and CPU time per step of each batch.
+        pub phases: super::InferencePhases,
     }
 
     impl Default for NeuralNetPolicy {
@@ -141,6 +173,7 @@ mod candle_impl {
                 forward_timing: TimingAccumulator::default(),
                 transfer_from_gpu_timing: TimingAccumulator::default(),
                 batch_sizes: StatsAccumulator::default(),
+                phases: super::InferencePhases::default(),
             }
         }
 
@@ -297,6 +330,7 @@ mod candle_impl {
 
             // Queue the forward pass (timed up to the last kernel launch, not its completion)
             let t1 = Instant::now();
+            let clock = PhaseClock::start(c"kf.infer.launch");
             let out = model.forward(&planes, &scalars)?;
             let launched = Launched {
                 policy: Policy::Full(out.log_policy.exp()?),
@@ -305,6 +339,7 @@ mod candle_impl {
                 #[cfg(feature = "cuda")]
                 done: self.record_done()?,
             };
+            clock.stop(&mut self.phases.launch);
             self.forward_timing.record(t1.elapsed());
             Ok(launched)
         }
@@ -320,6 +355,7 @@ mod candle_impl {
             let model = self.model.as_ref().expect("checked by caller");
 
             let t1 = Instant::now();
+            let clock = PhaseClock::start(c"kf.infer.launch");
             let (logits, v_logit) = model.forward_logits(&planes, &scalars)?;
             let mut index: Vec<u32> = Vec::new();
             let mut lens = Vec::with_capacity(boards.len());
@@ -355,6 +391,7 @@ mod candle_impl {
                 #[cfg(feature = "cuda")]
                 done: self.record_done()?,
             };
+            clock.stop(&mut self.phases.launch);
             self.forward_timing.record(t1.elapsed());
             Ok(launched)
         }
@@ -384,6 +421,7 @@ mod candle_impl {
             let b = boards.len();
             self.batch_sizes.record(b as f64);
             let t0 = Instant::now();
+            let clock = PhaseClock::start(c"kf.infer.build");
             let mut planes = Vec::with_capacity(b * PLANES);
             for board in boards {
                 planes.extend(board_to_planes(board));
@@ -391,8 +429,11 @@ mod candle_impl {
             let scalars: Vec<f32> = (0..b)
                 .flat_map(|i| [q_results[i], if qsearch_flags[i] { 1.0 } else { 0.0 }])
                 .collect();
+            clock.stop(&mut self.phases.build);
+            let clock = PhaseClock::start(c"kf.infer.upload");
             let planes = Tensor::from_vec(planes, (b, 17, 8, 8), &self.device)?;
             let scalars = Tensor::from_vec(scalars, (b, 2), &self.device)?;
+            clock.stop(&mut self.phases.upload);
             self.transfer_to_gpu_timing.record(t0.elapsed());
             Ok((planes, scalars))
         }
@@ -403,6 +444,10 @@ mod candle_impl {
         ) -> candle_core::Result<Vec<(Vec<f32>, f32, f32)>> {
             // Waits for the GPU, then copies the results back
             let t2 = Instant::now();
+            let clock = PhaseClock::start(c"kf.infer.wait");
+            self.device.synchronize()?;
+            clock.stop(&mut self.phases.wait);
+            let clock = PhaseClock::start(c"kf.infer.readback");
             let policy: Vec<Vec<f32>> = match launched.policy {
                 Policy::Full(p) => p.to_vec2()?,
                 Policy::Gathered { logits, lens } => {
@@ -419,6 +464,7 @@ mod candle_impl {
                 }
             };
             let v_logit: Vec<f32> = launched.v_logit.flatten_all()?.to_vec1()?;
+            clock.stop(&mut self.phases.readback);
             self.transfer_from_gpu_timing.record(t2.elapsed());
             Ok(policy
                 .into_iter()
@@ -504,6 +550,7 @@ mod stub {
         pub transfer_to_gpu_timing: TimingAccumulator,
         pub forward_timing: TimingAccumulator,
         pub transfer_from_gpu_timing: TimingAccumulator,
+        pub phases: super::InferencePhases,
     }
 
     impl Default for NeuralNetPolicy {
@@ -519,6 +566,7 @@ mod stub {
                 transfer_to_gpu_timing: TimingAccumulator::default(),
                 forward_timing: TimingAccumulator::default(),
                 transfer_from_gpu_timing: TimingAccumulator::default(),
+                phases: super::InferencePhases::default(),
             }
         }
         pub fn new_on_own_stream() -> Self {
