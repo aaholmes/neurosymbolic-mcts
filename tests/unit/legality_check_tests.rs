@@ -72,7 +72,7 @@ fn test_is_legal_after_move_en_passant_discovered_check() {
             "is_legal_after_move mismatch for move {} in EP discovered check position",
             mv.print_algebraic()
         );
-        if mv.to == 42 {
+        if mv.to() == 42 {
             // c6
             found_ep = true;
             // This particular EP should be illegal due to discovered check

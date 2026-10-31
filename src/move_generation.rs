@@ -381,7 +381,7 @@ impl MoveGen {
         // Sort captures by MVV-LVA
         let mut captures_with_eval: Vec<(Move, i32)> = captures
             .into_iter()
-            .map(|m| (m, self.mvv_lva(board, m.from, m.to)))
+            .map(|m| (m, self.mvv_lva(board, m.from(), m.to())))
             .collect();
         captures_with_eval.sort_by_key(|b| std::cmp::Reverse(b.1));
         let sorted_captures = captures_with_eval.into_iter().map(|(m, _)| m).collect();
@@ -391,9 +391,10 @@ impl MoveGen {
             .into_iter()
             .map(|m| {
                 // Get history score (if history table provided)
-                let history_score = history.map_or(0, |h| h.get_score_from_squares(m.from, m.to));
+                let history_score =
+                    history.map_or(0, |h| h.get_score_from_squares(m.from(), m.to()));
                 // Get evaluation score
-                let eval_score = pesto.move_eval(board, self, m.from, m.to);
+                let eval_score = pesto.move_eval(board, self, m.from(), m.to());
                 (m, history_score, eval_score)
             })
             .collect();
@@ -452,7 +453,7 @@ impl MoveGen {
         captures.append(&mut promotions); // Combine promotions with captures
 
         // Sort captures by MVV-LVA (descending)
-        captures.sort_unstable_by_key(|m| -self.mvv_lva(board, m.from, m.to));
+        captures.sort_unstable_by_key(|m| -self.mvv_lva(board, m.from(), m.to()));
 
         captures
     }

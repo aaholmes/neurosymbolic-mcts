@@ -50,17 +50,17 @@ mod mcts_tests {
 
     impl Hash for HashableMove {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.0.from.hash(state);
-            self.0.to.hash(state);
-            self.0.promotion.hash(state);
+            self.0.from().hash(state);
+            self.0.to().hash(state);
+            self.0.promotion().hash(state);
         }
     }
 
     impl PartialEq for HashableMove {
         fn eq(&self, other: &Self) -> bool {
-            self.0.from == other.0.from
-                && self.0.to == other.0.to
-                && self.0.promotion == other.0.promotion
+            self.0.from() == other.0.from()
+                && self.0.to() == other.0.to()
+                && self.0.promotion() == other.0.promotion()
         }
     }
 
@@ -158,8 +158,8 @@ mod mcts_tests {
             "MCTS should return a move from the initial position"
         );
         let found_move = best_move_opt.unwrap();
-        assert!(found_move.from < 64);
-        assert!(found_move.to < 64);
+        assert!(found_move.from() < 64);
+        assert!(found_move.to() < 64);
     }
 
     // Policy-related code removed since we're using Pesto MCTS

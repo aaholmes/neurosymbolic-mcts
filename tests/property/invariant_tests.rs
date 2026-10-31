@@ -41,7 +41,7 @@ proptest! {
             };
 
             for opp_mv in opp_captures.iter().chain(opp_quiet.iter()) {
-                prop_assert!(opp_mv.to != our_king_sq,
+                prop_assert!(opp_mv.to() != our_king_sq,
                     "Legal move resulted in king capture being possible");
             }
         }

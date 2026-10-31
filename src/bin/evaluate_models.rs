@@ -1127,7 +1127,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for _ in 0..200 {
             let mv = sample_proportional(&policy, &mut rng).unwrap();
-            seen.insert((mv.from, mv.to));
+            seen.insert((mv.from(), mv.to()));
         }
         assert_eq!(seen.len(), 3, "All moves should be sampled proportionally");
     }
@@ -1140,8 +1140,8 @@ mod tests {
             (make_move(2, 10), 50),
         ];
         let mv = select_greedy(&policy).unwrap();
-        assert_eq!(mv.from, 0);
-        assert_eq!(mv.to, 8);
+        assert_eq!(mv.from(), 0);
+        assert_eq!(mv.to(), 8);
     }
 
     #[test]

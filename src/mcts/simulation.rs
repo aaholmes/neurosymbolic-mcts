@@ -36,7 +36,7 @@ pub fn simulate_random_playout(state: &Board, move_gen: &MoveGen) -> f64 {
         let mut legal_moves = Vec::with_capacity(captures.len() + moves.len());
 
         for m in captures.iter().chain(moves.iter()) {
-            if current_state.get_piece(m.from).is_none() {
+            if current_state.get_piece(m.from()).is_none() {
                 continue;
             }
             if current_state.is_legal_after_move(*m, move_gen) {

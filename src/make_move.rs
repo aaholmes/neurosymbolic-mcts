@@ -26,7 +26,7 @@ impl Board {
         let mut hash = self.zobrist_hash;
 
         // Null move: remove en passant ability and return new board
-        if the_move.from == 0 && the_move.to == 0 {
+        if the_move.from() == 0 && the_move.to() == 0 {
             // XOR out old en passant if present
             if let Some(ep_sq) = new_board.en_passant {
                 hash ^= ZOBRIST_KEYS.en_passant_key((ep_sq % 8) as usize);
@@ -49,26 +49,26 @@ impl Board {
 
         new_board.halfmove_clock += 1;
 
-        let from_bit = sq_ind_to_bit(the_move.from);
-        let to_bit = sq_ind_to_bit(the_move.to);
+        let from_bit = sq_ind_to_bit(the_move.from());
+        let to_bit = sq_ind_to_bit(the_move.to());
 
-        let from_piece = self.get_piece(the_move.from);
+        let from_piece = self.get_piece(the_move.from());
         if from_piece.is_none() {
             panic!(
                 "No piece at from_sq_ind {} ({})",
-                the_move.from,
-                crate::board_utils::sq_ind_to_algebraic(the_move.from)
+                the_move.from(),
+                crate::board_utils::sq_ind_to_algebraic(the_move.from())
             );
         }
 
-        let to_piece = self.get_piece(the_move.to);
+        let to_piece = self.get_piece(the_move.to());
         if to_piece.is_some() {
             // Capture: Remove the captured piece before moving.
             let (cap_color, cap_piece) = to_piece.unwrap();
             new_board.pieces[cap_color][cap_piece] ^= to_bit;
             new_board.halfmove_clock = 0;
             // XOR out captured piece from hash
-            hash ^= ZOBRIST_KEYS.piece_key(cap_color, cap_piece, the_move.to);
+            hash ^= ZOBRIST_KEYS.piece_key(cap_color, cap_piece, the_move.to());
         }
 
         // Save old castling rights for diffing
@@ -77,14 +77,14 @@ impl Board {
         if from_piece.unwrap().1 == PAWN {
             // En passant capture
             if new_board.en_passant.is_some()
-                && the_move.to == new_board.en_passant.unwrap() as usize
+                && the_move.to() == new_board.en_passant.unwrap() as usize
             {
                 if new_board.w_to_move {
-                    let ep_captured_sq = the_move.to - 8;
+                    let ep_captured_sq = the_move.to() - 8;
                     new_board.pieces[BLACK][PAWN] ^= sq_ind_to_bit(ep_captured_sq);
                     hash ^= ZOBRIST_KEYS.piece_key(BLACK, PAWN, ep_captured_sq);
                 } else {
-                    let ep_captured_sq = the_move.to + 8;
+                    let ep_captured_sq = the_move.to() + 8;
                     new_board.pieces[WHITE][PAWN] ^= sq_ind_to_bit(ep_captured_sq);
                     hash ^= ZOBRIST_KEYS.piece_key(WHITE, PAWN, ep_captured_sq);
                 }
@@ -100,8 +100,8 @@ impl Board {
         new_board.en_passant = None;
         if from_piece.unwrap().1 == PAWN {
             new_board.halfmove_clock = 0;
-            if ((the_move.to as i8) - (the_move.from as i8)).abs() == 16 {
-                let ep_sq = ((the_move.from + the_move.to) / 2) as u8;
+            if ((the_move.to() as i8) - (the_move.from() as i8)).abs() == 16 {
+                let ep_sq = ((the_move.from() + the_move.to()) / 2) as u8;
                 new_board.en_passant = Some(ep_sq);
                 // XOR in new en passant key
                 hash ^= ZOBRIST_KEYS.en_passant_key((ep_sq % 8) as usize);
@@ -112,28 +112,28 @@ impl Board {
         let (color, piece) = from_piece.unwrap();
         new_board.pieces[color][piece] ^= from_bit;
         new_board.pieces[color][piece] ^= to_bit;
-        hash ^= ZOBRIST_KEYS.piece_key(color, piece, the_move.from);
-        hash ^= ZOBRIST_KEYS.piece_key(color, piece, the_move.to);
+        hash ^= ZOBRIST_KEYS.piece_key(color, piece, the_move.from());
+        hash ^= ZOBRIST_KEYS.piece_key(color, piece, the_move.to());
 
         // Handle promotions
-        if let Some(promotion) = the_move.promotion {
+        if let Some(promotion) = the_move.promotion() {
             new_board.pieces[color][piece] ^= to_bit;
             new_board.pieces[color][promotion] ^= to_bit;
             // XOR out pawn at destination, XOR in promoted piece
-            hash ^= ZOBRIST_KEYS.piece_key(color, piece, the_move.to);
-            hash ^= ZOBRIST_KEYS.piece_key(color, promotion, the_move.to);
+            hash ^= ZOBRIST_KEYS.piece_key(color, piece, the_move.to());
+            hash ^= ZOBRIST_KEYS.piece_key(color, promotion, the_move.to());
         }
 
         // Handle castling
         if let Some((color, KING)) = from_piece {
             if color == WHITE {
-                if the_move.from == 4 && the_move.to == 6 {
+                if the_move.from() == 4 && the_move.to() == 6 {
                     // White king-side castle
                     new_board.pieces[WHITE][ROOK] ^= sq_ind_to_bit(5);
                     new_board.pieces[WHITE][ROOK] ^= sq_ind_to_bit(7);
                     hash ^= ZOBRIST_KEYS.piece_key(WHITE, ROOK, 7);
                     hash ^= ZOBRIST_KEYS.piece_key(WHITE, ROOK, 5);
-                } else if the_move.from == 4 && the_move.to == 2 {
+                } else if the_move.from() == 4 && the_move.to() == 2 {
                     // White queen-side castle
                     new_board.pieces[WHITE][ROOK] ^= sq_ind_to_bit(3);
                     new_board.pieces[WHITE][ROOK] ^= sq_ind_to_bit(0);
@@ -143,13 +143,13 @@ impl Board {
                 new_board.castling_rights.white_kingside = false;
                 new_board.castling_rights.white_queenside = false;
             } else {
-                if the_move.from == 60 && the_move.to == 62 {
+                if the_move.from() == 60 && the_move.to() == 62 {
                     // Black king-side castle
                     new_board.pieces[BLACK][ROOK] ^= sq_ind_to_bit(61);
                     new_board.pieces[BLACK][ROOK] ^= sq_ind_to_bit(63);
                     hash ^= ZOBRIST_KEYS.piece_key(BLACK, ROOK, 63);
                     hash ^= ZOBRIST_KEYS.piece_key(BLACK, ROOK, 61);
-                } else if the_move.from == 60 && the_move.to == 58 {
+                } else if the_move.from() == 60 && the_move.to() == 58 {
                     // Black queen-side castle
                     new_board.pieces[BLACK][ROOK] ^= sq_ind_to_bit(59);
                     new_board.pieces[BLACK][ROOK] ^= sq_ind_to_bit(56);
@@ -161,21 +161,21 @@ impl Board {
             }
         } else if let Some((color, ROOK)) = from_piece {
             if color == WHITE {
-                if the_move.from == 0 {
+                if the_move.from() == 0 {
                     new_board.castling_rights.white_queenside = false;
-                } else if the_move.from == 7 {
+                } else if the_move.from() == 7 {
                     new_board.castling_rights.white_kingside = false;
                 }
-            } else if the_move.from == 56 {
+            } else if the_move.from() == 56 {
                 new_board.castling_rights.black_queenside = false;
-            } else if the_move.from == 63 {
+            } else if the_move.from() == 63 {
                 new_board.castling_rights.black_kingside = false;
             }
         }
 
         // Also handle rook captures removing opponent's castling rights
         if to_piece.is_some() {
-            match the_move.to {
+            match the_move.to() {
                 0 => new_board.castling_rights.white_queenside = false,
                 7 => new_board.castling_rights.white_kingside = false,
                 56 => new_board.castling_rights.black_queenside = false,
@@ -217,8 +217,8 @@ impl Board {
             new_board.zobrist_hash,
             new_board.compute_zobrist_hash(),
             "Incremental hash mismatch for move {}{}",
-            crate::board_utils::sq_ind_to_algebraic(the_move.from),
-            crate::board_utils::sq_ind_to_algebraic(the_move.to)
+            crate::board_utils::sq_ind_to_algebraic(the_move.from()),
+            crate::board_utils::sq_ind_to_algebraic(the_move.to())
         );
 
         new_board

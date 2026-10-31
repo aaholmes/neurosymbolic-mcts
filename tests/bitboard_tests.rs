@@ -60,7 +60,7 @@ fn test_make_move() {
     let e4_move = moves
         .1
         .iter()
-        .find(|&m| m.from == 12 && m.to == 28)
+        .find(|&m| m.from() == 12 && m.to() == 28)
         .unwrap();
 
     board.make_move(*e4_move);

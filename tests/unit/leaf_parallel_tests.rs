@@ -84,7 +84,12 @@ fn four_leaves_still_find_mate_in_one() {
         Board::new_from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4");
     let (best, _, _) = tactical_mcts_search(board, &mg, config(200, 4));
     let mv = best.expect("a move");
-    assert_eq!((mv.from, mv.to), (39, 53), "expected Qh5xf7#, got {:?}", mv);
+    assert_eq!(
+        (mv.from(), mv.to()),
+        (39, 53),
+        "expected Qh5xf7#, got {:?}",
+        mv
+    );
 }
 
 #[test]

@@ -41,7 +41,7 @@ fn test_capture_ordering() {
 
     let capture_vals: Vec<i32> = captures
         .iter()
-        .map(|m| move_gen.mvv_lva(&board, m.from, m.to))
+        .map(|m| move_gen.mvv_lva(&board, m.from(), m.to()))
         .collect();
     println!("{} Captures:", captures.len());
     for (i, m) in captures.iter().enumerate() {
@@ -78,7 +78,7 @@ fn test_non_capture_ordering_white() {
             "{}. {} ({})",
             i + 1,
             m,
-            move_gen.mvv_lva(&board, m.from, m.to)
+            move_gen.mvv_lva(&board, m.from(), m.to())
         );
     }
     println!("Non-captures:");
@@ -87,7 +87,7 @@ fn test_non_capture_ordering_white() {
             "{}. {} ({})",
             i + 1,
             m,
-            pesto.move_eval(&board, &move_gen, m.from, m.to)
+            pesto.move_eval(&board, &move_gen, m.from(), m.to())
         );
     }
 
@@ -97,18 +97,28 @@ fn test_non_capture_ordering_white() {
             pesto.move_eval(
                 &board,
                 &move_gen,
-                non_captures[i - 1].from,
-                non_captures[i - 1].to
-            ) >= pesto.move_eval(&board, &move_gen, non_captures[i].from, non_captures[i].to),
+                non_captures[i - 1].from(),
+                non_captures[i - 1].to()
+            ) >= pesto.move_eval(
+                &board,
+                &move_gen,
+                non_captures[i].from(),
+                non_captures[i].to()
+            ),
             "Non-captures not properly ordered at index {}. {} vs {}",
             i,
             pesto.move_eval(
                 &board,
                 &move_gen,
-                non_captures[i - 1].from,
-                non_captures[i - 1].to
+                non_captures[i - 1].from(),
+                non_captures[i - 1].to()
             ),
-            pesto.move_eval(&board, &move_gen, non_captures[i].from, non_captures[i].to)
+            pesto.move_eval(
+                &board,
+                &move_gen,
+                non_captures[i].from(),
+                non_captures[i].to()
+            )
         );
     }
 }
@@ -133,7 +143,7 @@ fn test_non_capture_ordering_black() {
             "{}. {} ({})",
             i + 1,
             m,
-            move_gen.mvv_lva(&board, m.from, m.to)
+            move_gen.mvv_lva(&board, m.from(), m.to())
         );
     }
     println!("Non-captures:");
@@ -142,7 +152,7 @@ fn test_non_capture_ordering_black() {
             "{}. {} ({})",
             i + 1,
             m,
-            pesto.move_eval(&board, &move_gen, m.from, m.to)
+            pesto.move_eval(&board, &move_gen, m.from(), m.to())
         );
     }
 
@@ -152,18 +162,28 @@ fn test_non_capture_ordering_black() {
             pesto.move_eval(
                 &board,
                 &move_gen,
-                non_captures[i - 1].from,
-                non_captures[i - 1].to
-            ) >= pesto.move_eval(&board, &move_gen, non_captures[i].from, non_captures[i].to),
+                non_captures[i - 1].from(),
+                non_captures[i - 1].to()
+            ) >= pesto.move_eval(
+                &board,
+                &move_gen,
+                non_captures[i].from(),
+                non_captures[i].to()
+            ),
             "Non-captures not properly ordered at index {}. {} vs {}",
             i,
             pesto.move_eval(
                 &board,
                 &move_gen,
-                non_captures[i - 1].from,
-                non_captures[i - 1].to
+                non_captures[i - 1].from(),
+                non_captures[i - 1].to()
             ),
-            pesto.move_eval(&board, &move_gen, non_captures[i].from, non_captures[i].to)
+            pesto.move_eval(
+                &board,
+                &move_gen,
+                non_captures[i].from(),
+                non_captures[i].to()
+            )
         );
     }
 }
@@ -198,7 +218,7 @@ fn test_pawn_fork_ordering() {
             "{}. {} ({})",
             i + 1,
             m,
-            move_gen.mvv_lva(&board, m.from, m.to)
+            move_gen.mvv_lva(&board, m.from(), m.to())
         );
     }
     println!("Non-captures:");
@@ -207,10 +227,17 @@ fn test_pawn_fork_ordering() {
             "{}. {} ({})",
             i + 1,
             m,
-            pesto.move_eval(&board, &move_gen, m.from, m.to)
+            pesto.move_eval(&board, &move_gen, m.from(), m.to())
         );
     }
-    assert!(pesto.move_eval(&board, &move_gen, non_captures[0].from, non_captures[0].to) == 600);
+    assert!(
+        pesto.move_eval(
+            &board,
+            &move_gen,
+            non_captures[0].from(),
+            non_captures[0].to()
+        ) == 600
+    );
 }
 
 #[test]
@@ -247,8 +274,8 @@ fn test_mvv_lva_ordering() {
 
     // Check if captures are ordered by MVV-LVA
     for i in 0..(captures.len() - 1) {
-        let current_score = move_gen.mvv_lva(&board, captures[i].from, captures[i].to);
-        let next_score = move_gen.mvv_lva(&board, captures[i + 1].from, captures[i + 1].to);
+        let current_score = move_gen.mvv_lva(&board, captures[i].from(), captures[i].to());
+        let next_score = move_gen.mvv_lva(&board, captures[i + 1].from(), captures[i + 1].to());
         assert!(
             current_score >= next_score,
             "Captures should be ordered by descending MVV-LVA scores"
@@ -270,13 +297,17 @@ fn test_pesto_move_eval_consistency() {
 
     // Check if non-captures are ordered by descending PestoEval scores
     for i in 0..(non_captures.len() - 1) {
-        let current_score =
-            pesto.move_eval(&board, &move_gen, non_captures[i].from, non_captures[i].to);
+        let current_score = pesto.move_eval(
+            &board,
+            &move_gen,
+            non_captures[i].from(),
+            non_captures[i].to(),
+        );
         let next_score = pesto.move_eval(
             &board,
             &move_gen,
-            non_captures[i + 1].from,
-            non_captures[i + 1].to,
+            non_captures[i + 1].from(),
+            non_captures[i + 1].to(),
         );
         assert!(
             current_score >= next_score,
@@ -300,13 +331,13 @@ fn test_promotion_handling() {
     // Count promotions and make sure they're properly ordered
     let mut promotion_count = 0;
     for m in &captures {
-        if m.promotion.is_some() {
+        if m.promotion().is_some() {
             promotion_count += 1;
 
             // Promotions to queen should come before other promotion types
             if promotion_count == 1 {
                 assert_eq!(
-                    m.promotion,
+                    m.promotion(),
                     Some(QUEEN),
                     "First promotion should be to queen"
                 );

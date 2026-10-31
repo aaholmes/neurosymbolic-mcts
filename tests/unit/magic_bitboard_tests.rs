@@ -303,14 +303,14 @@ fn test_append_promotions_white() {
     let mut promotions = Vec::new();
     append_promotions(&mut promotions, 48, &56, true);
     assert_eq!(promotions.len(), 4, "Should append 4 promotion moves");
-    assert!(promotions.iter().any(|m| m.promotion == Some(QUEEN)));
-    assert!(promotions.iter().any(|m| m.promotion == Some(ROOK)));
-    assert!(promotions.iter().any(|m| m.promotion == Some(KNIGHT)));
-    assert!(promotions.iter().any(|m| m.promotion == Some(BISHOP)));
+    assert!(promotions.iter().any(|m| m.promotion() == Some(QUEEN)));
+    assert!(promotions.iter().any(|m| m.promotion() == Some(ROOK)));
+    assert!(promotions.iter().any(|m| m.promotion() == Some(KNIGHT)));
+    assert!(promotions.iter().any(|m| m.promotion() == Some(BISHOP)));
     // All should be from same square to same square
     for m in &promotions {
-        assert_eq!(m.from, 48);
-        assert_eq!(m.to, 56);
+        assert_eq!(m.from(), 48);
+        assert_eq!(m.to(), 56);
     }
 }
 
@@ -319,10 +319,10 @@ fn test_append_promotions_black() {
     let mut promotions = Vec::new();
     append_promotions(&mut promotions, 15, &7, false);
     assert_eq!(promotions.len(), 4, "Should append 4 promotion moves");
-    assert!(promotions.iter().any(|m| m.promotion == Some(QUEEN)));
-    assert!(promotions.iter().any(|m| m.promotion == Some(ROOK)));
-    assert!(promotions.iter().any(|m| m.promotion == Some(KNIGHT)));
-    assert!(promotions.iter().any(|m| m.promotion == Some(BISHOP)));
+    assert!(promotions.iter().any(|m| m.promotion() == Some(QUEEN)));
+    assert!(promotions.iter().any(|m| m.promotion() == Some(ROOK)));
+    assert!(promotions.iter().any(|m| m.promotion() == Some(KNIGHT)));
+    assert!(promotions.iter().any(|m| m.promotion() == Some(BISHOP)));
 }
 
 // === Systematic Coverage: All 64 squares for King ===

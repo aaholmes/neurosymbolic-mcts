@@ -60,7 +60,7 @@ struct QSearchResponse {
 // ── Tactical quiet detection (mirrors quiescence.rs logic) ─────────────────
 
 fn compute_fork_targets(board: &Board, mv: Move, move_gen: &MoveGen) -> u64 {
-    let piece_type = match board.get_piece(mv.from) {
+    let piece_type = match board.get_piece(mv.from()) {
         Some((_, pt)) => pt,
         None => return 0,
     };
@@ -69,9 +69,9 @@ fn compute_fork_targets(board: &Board, mv: Move, move_gen: &MoveGen) -> u64 {
     match piece_type {
         PAWN => {
             let attack_bb = if board.w_to_move {
-                move_gen.wp_capture_bitboard[mv.to]
+                move_gen.wp_capture_bitboard[mv.to()]
             } else {
-                move_gen.bp_capture_bitboard[mv.to]
+                move_gen.bp_capture_bitboard[mv.to()]
             };
             let enemy_valuable = board.get_piece_bitboard(enemy_color, KNIGHT)
                 | board.get_piece_bitboard(enemy_color, BISHOP)
@@ -86,7 +86,7 @@ fn compute_fork_targets(board: &Board, mv: Move, move_gen: &MoveGen) -> u64 {
             }
         }
         KNIGHT => {
-            let attack_bb = move_gen.n_move_bitboard[mv.to];
+            let attack_bb = move_gen.n_move_bitboard[mv.to()];
             let enemy_high_value = board.get_piece_bitboard(enemy_color, ROOK)
                 | board.get_piece_bitboard(enemy_color, QUEEN)
                 | board.get_piece_bitboard(enemy_color, KING);
@@ -352,7 +352,7 @@ fn build_ext_qsearch_tree(
                 // Check if this was a capture (piece exists on target square in current board)
                 if let Some(uci) = &node.move_uci {
                     if let Some(mv) = Move::from_uci(uci) {
-                        if board.current_state().get_piece(mv.to).is_some() {
+                        if board.current_state().get_piece(mv.to()).is_some() {
                             capture_entries.push((score, i));
                         }
                     }
@@ -376,7 +376,7 @@ fn build_ext_qsearch_tree(
                     let best_victim_sq =
                         Move::from_uci(scored_opp[best_cap_idx].1.move_uci.as_ref().unwrap())
                             .unwrap()
-                            .to;
+                            .to();
                     let second_cap_mv =
                         Move::from_uci(scored_opp[second_cap_idx].1.move_uci.as_ref().unwrap())
                             .unwrap();
@@ -400,13 +400,13 @@ fn build_ext_qsearch_tree(
                     board.make_null_move();
                     board.make_move(second_cap_mv);
                     let recapture_threat = if board.current_state().is_legal(move_gen) {
-                        let recapture = Move::new(best_victim_sq, second_cap_mv.to, None);
+                        let recapture = Move::new(best_victim_sq, second_cap_mv.to(), None);
                         let recaptured_board = board.current_state().apply_move_to_board(recapture);
                         let recapture_eval = pesto.pst_eval_cp(&recaptured_board);
                         let recapture_score = -recapture_eval;
 
                         // Build a visible node for the recapture
-                        let dest = sq_to_algebraic(second_cap_mv.to);
+                        let dest = sq_to_algebraic(second_cap_mv.to());
                         let recapture_san = format!("{}x{}", saved_piece_name, dest);
                         let recapture_fen = recaptured_board.to_fen().unwrap_or_default();
                         recapture_node = Some(QSearchTreeNode {
@@ -502,12 +502,12 @@ fn build_ext_qsearch_tree(
         let (caps, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
         let mut any_legal = false;
         for mv in caps.iter().chain(quiets.iter()) {
-            let is_cap = board.current_state().get_piece(mv.to).is_some()
+            let is_cap = board.current_state().get_piece(mv.to()).is_some()
                 || (board
                     .current_state()
-                    .get_piece(mv.from)
+                    .get_piece(mv.from())
                     .is_some_and(|(_, pt)| pt == PAWN)
-                    && mv.from % 8 != mv.to % 8);
+                    && mv.from() % 8 != mv.to() % 8);
             board.make_move(*mv);
             if !board.current_state().is_legal(move_gen) {
                 board.undo_move();
@@ -723,35 +723,35 @@ fn sq_to_algebraic(sq: usize) -> String {
 }
 
 fn move_to_san(board: &Board, mv: &Move, move_gen: &MoveGen) -> String {
-    let (_, piece_type) = match board.get_piece(mv.from) {
+    let (_, piece_type) = match board.get_piece(mv.from()) {
         Some(p) => p,
         None => return mv.to_uci(),
     };
 
     let is_capture =
-        board.get_piece(mv.to).is_some() || (piece_type == 0 && mv.from % 8 != mv.to % 8);
+        board.get_piece(mv.to()).is_some() || (piece_type == 0 && mv.from() % 8 != mv.to() % 8);
 
-    let dest = sq_to_algebraic(mv.to);
+    let dest = sq_to_algebraic(mv.to());
 
     let mut san = if piece_type == 0 {
         if is_capture {
-            let from_file = (b'a' + (mv.from % 8) as u8) as char;
+            let from_file = (b'a' + (mv.from() % 8) as u8) as char;
             format!("{}x{}", from_file, dest)
         } else {
             dest.clone()
         }
     } else if piece_type == KING {
         // Castling detection
-        if mv.from == 4 && mv.to == 6 {
+        if mv.from() == 4 && mv.to() == 6 {
             return "O-O".to_string();
         }
-        if mv.from == 4 && mv.to == 2 {
+        if mv.from() == 4 && mv.to() == 2 {
             return "O-O-O".to_string();
         }
-        if mv.from == 60 && mv.to == 62 {
+        if mv.from() == 60 && mv.to() == 62 {
             return "O-O".to_string();
         }
-        if mv.from == 60 && mv.to == 58 {
+        if mv.from() == 60 && mv.to() == 58 {
             return "O-O-O".to_string();
         }
         let pc = piece_char(piece_type);
@@ -769,7 +769,7 @@ fn move_to_san(board: &Board, mv: &Move, move_gen: &MoveGen) -> String {
         }
     };
 
-    if let Some(promo) = mv.promotion {
+    if let Some(promo) = mv.promotion() {
         san.push('=');
         san.push_str(match promo {
             1 => "N",
@@ -832,7 +832,7 @@ fn get_legal_moves(board: &Board, move_gen: &MoveGen) -> Vec<LegalMoveInfo> {
     for mv in captures.iter().chain(quiets.iter()) {
         board_stack.make_move(*mv);
         if board_stack.current_state().is_legal(move_gen) {
-            let promo = mv.promotion.map(|p| match p {
+            let promo = mv.promotion().map(|p| match p {
                 1 => "n".to_string(),
                 2 => "b".to_string(),
                 3 => "r".to_string(),
@@ -841,12 +841,12 @@ fn get_legal_moves(board: &Board, move_gen: &MoveGen) -> Vec<LegalMoveInfo> {
             });
             legal.push(LegalMoveInfo {
                 uci: mv.to_uci(),
-                from: mv.from,
-                to: mv.to,
+                from: mv.from(),
+                to: mv.to(),
                 promotion: promo,
-                is_capture: board.get_piece(mv.to).is_some()
-                    || (board.get_piece(mv.from).is_some_and(|(_, pt)| pt == 0)
-                        && mv.from % 8 != mv.to % 8),
+                is_capture: board.get_piece(mv.to()).is_some()
+                    || (board.get_piece(mv.from()).is_some_and(|(_, pt)| pt == 0)
+                        && mv.from() % 8 != mv.to() % 8),
             });
         }
         board_stack.undo_move();

@@ -96,8 +96,8 @@ pub fn board_to_planes(board: &Board) -> Vec<f32> {
 ///
 /// Formula: Index = (SourceSquare * 73) + PlaneIndex
 pub fn move_to_index(mv: Move) -> usize {
-    let src = mv.from;
-    let dst = mv.to;
+    let src = mv.from();
+    let dst = mv.to();
 
     let src_rank = (src / 8) as i32;
     let src_file = (src % 8) as i32;
@@ -107,9 +107,9 @@ pub fn move_to_index(mv: Move) -> usize {
     let dx = dst_file - src_file;
     let dy = dst_rank - src_rank;
 
-    let plane = if mv.is_promotion() && mv.promotion.unwrap() != QUEEN {
+    let plane = if mv.is_promotion() && mv.promotion().unwrap() != QUEEN {
         // Case A: Underpromotion (Promoting to N, B, R)
-        let promo_piece = mv.promotion.unwrap();
+        let promo_piece = mv.promotion().unwrap();
 
         let direction_offset = match dx {
             0 => 0,  // Straight

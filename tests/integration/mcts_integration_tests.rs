@@ -29,9 +29,9 @@ fn test_mcts_finds_mate_in_1() {
     let (best_move, stats, _) = tactical_mcts_search(board, &move_gen, config);
 
     // Should find Re8# instantly via Safety Gate
-    assert_eq!(best_move.unwrap().to, 60, "Should find Re8#"); // e8 = square 60
-                                                               // search_time depends on machine, but safety gate is fast.
-                                                               // However, stats.search_time might be small.
+    assert_eq!(best_move.unwrap().to(), 60, "Should find Re8#"); // e8 = square 60
+                                                                 // search_time depends on machine, but safety gate is fast.
+                                                                 // However, stats.search_time might be small.
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn test_mcts_finds_mate_for_black() {
     let (best_move, _, _) = tactical_mcts_search(board, &move_gen, config);
 
     // Should find Re1#
-    assert_eq!(best_move.unwrap().to, 4, "Should find Re1#"); // e1 = square 4
+    assert_eq!(best_move.unwrap().to(), 4, "Should find Re1#"); // e1 = square 4
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn test_mcts_finds_koth_win() {
     let (best_move, _, _) = tactical_mcts_search(board, &move_gen, config);
 
     // Should find Kd5 or Ke5 (moves to center)
-    let to_sq = best_move.unwrap().to;
+    let to_sq = best_move.unwrap().to();
     let center_squares = [27, 28, 35, 36]; // d4, e4, d5, e5
     assert!(
         center_squares.contains(&to_sq),
@@ -100,8 +100,8 @@ fn test_mcts_prefers_winning_capture() {
 
     // Nxd5 should be strongly preferred
     let best = best_move.unwrap();
-    assert_eq!(best.from, 28, "Should move knight from e4");
-    assert_eq!(best.to, 35, "Should capture queen on d5");
+    assert_eq!(best.from(), 28, "Should move knight from e4");
+    assert_eq!(best.to(), 35, "Should capture queen on d5");
 }
 
 #[test]

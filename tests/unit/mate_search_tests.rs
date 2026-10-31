@@ -29,7 +29,7 @@ fn test_mate_in_1_back_rank() {
     let (score, best_move, nodes) = run_mate_search("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 2);
 
     assert!(score >= 1_000_000, "Should find mate, got score {}", score);
-    assert_eq!(best_move.to, 60, "Should find Re8# (to e8 = square 60)");
+    assert_eq!(best_move.to(), 60, "Should find Re8# (to e8 = square 60)");
     assert!(nodes > 0, "Should search some nodes");
 }
 
@@ -79,7 +79,7 @@ fn test_mate_in_2_scholars_mate() {
 
     assert!(score >= 1_000_000, "Should find mate");
     // Qxf7# is h5 (39) to f7 (53)
-    assert_eq!(best_move.to, 53, "Should find Qxf7#");
+    assert_eq!(best_move.to(), 53, "Should find Qxf7#");
 }
 
 #[test]
@@ -89,8 +89,8 @@ fn test_mate_for_black() {
 
     assert!(score >= 1_000_000, "Should find mate for black");
     // Re1# is e8 (60) to e1 (4)
-    assert_eq!(best_move.from, 60, "Should move from e8");
-    assert_eq!(best_move.to, 4, "Should move to e1");
+    assert_eq!(best_move.from(), 60, "Should move from e8");
+    assert_eq!(best_move.to(), 4, "Should move to e1");
 }
 
 #[test]
@@ -191,8 +191,8 @@ fn test_quiet_king_move_mate_in_2() {
         score
     );
     // Kg6: from f6=45, to g6=46
-    assert_eq!(best_move.from, 45, "Should play Kg6 from f6");
-    assert_eq!(best_move.to, 46, "Should play Kg6 to g6");
+    assert_eq!(best_move.from(), 45, "Should play Kg6 from f6");
+    assert_eq!(best_move.to(), 46, "Should play Kg6 to g6");
 }
 
 #[test]
@@ -226,8 +226,8 @@ fn test_exhaustive_no_regression_back_rank() {
         score_co >= 1_000_000,
         "Checks-only should find back-rank mate"
     );
-    assert_eq!(mv_exh.to, 60, "Both should find Re8#");
-    assert_eq!(mv_co.to, 60, "Both should find Re8#");
+    assert_eq!(mv_exh.to(), 60, "Both should find Re8#");
+    assert_eq!(mv_co.to(), 60, "Both should find Re8#");
 }
 
 #[test]
@@ -240,8 +240,8 @@ fn test_exhaustive_no_regression_scholars_mate() {
 
     assert!(score_exh >= 1_000_000, "Exhaustive should find Qxf7#");
     assert!(score_co >= 1_000_000, "Checks-only should find Qxf7#");
-    assert_eq!(mv_exh.to, 53);
-    assert_eq!(mv_co.to, 53);
+    assert_eq!(mv_exh.to(), 53);
+    assert_eq!(mv_co.to(), 53);
 }
 
 #[test]
@@ -276,7 +276,7 @@ fn test_checks_only_mate_in_3_still_works() {
         score >= 1_000_000,
         "Should find Re1# even with exhaustive_depth=2"
     );
-    assert_eq!(best_move.to, 4, "Should find Re1#");
+    assert_eq!(best_move.to(), 4, "Should find Re1#");
 }
 
 #[test]
@@ -339,7 +339,7 @@ fn test_quiet_rook_lift_mate_in_2() {
         "Checks-only should miss quiet king move"
     );
     // First move should be a quiet king approach (from f6=45)
-    assert_eq!(best_move.from, 45, "Should play from f6");
+    assert_eq!(best_move.from(), 45, "Should play from f6");
 }
 
 #[test]
@@ -396,7 +396,7 @@ fn test_gives_check_agrees_with_is_check() {
         let (captures, moves) = move_gen.gen_pseudo_legal_moves(&board);
 
         for m in captures.iter().chain(moves.iter()) {
-            if board.get_piece(m.from).is_none() {
+            if board.get_piece(m.from()).is_none() {
                 continue;
             }
 
@@ -540,7 +540,7 @@ fn test_equivalence_across_positions() {
             );
             assert_ne!(best_move, Move::null(), "Expected move for FEN: {}", fen);
             if let Some(to) = expected_to {
-                assert_eq!(best_move.to, *to, "Wrong target square for FEN: {}", fen);
+                assert_eq!(best_move.to(), *to, "Wrong target square for FEN: {}", fen);
             }
         } else {
             assert!(
@@ -581,7 +581,7 @@ fn test_double_check_slider_slider_checkmate() {
         "Double slider check should be checkmate, got {}",
         score
     );
-    assert_eq!(best_move.to, 56, "Should play Ra8# (a1=0 to a8=56)");
+    assert_eq!(best_move.to(), 56, "Should play Ra8# (a1=0 to a8=56)");
 }
 
 #[test]
@@ -634,7 +634,7 @@ fn test_double_check_slider_knight_checkmate() {
         "Ra8# should be checkmate, got {}",
         score
     );
-    assert_eq!(best_move.to, 56, "Should play Ra8#");
+    assert_eq!(best_move.to(), 56, "Should play Ra8#");
 }
 
 #[test]
@@ -704,5 +704,5 @@ fn test_single_check_all_pieces_fail_is_checkmate() {
     let fen = "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1";
     let (score, best_move, _) = run_mate_search(fen, 2);
     assert!(score >= 1_000_000, "Back-rank mate should be found");
-    assert_eq!(best_move.to, 60, "Re8#");
+    assert_eq!(best_move.to(), 60, "Re8#");
 }

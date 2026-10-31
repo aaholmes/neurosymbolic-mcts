@@ -175,15 +175,15 @@ fn identify_tactical_moves_internal(board: &Board, move_gen: &MoveGen) -> Vec<Ta
 /// Calculate MVV-LVA (Most Valuable Victim - Least Valuable Attacker) score
 /// For promotions, adds the promoted piece value as a bonus.
 pub fn calculate_mvv_lva(mv: Move, board: &Board) -> f64 {
-    let victim_value = get_piece_value_at_square(board, mv.to);
-    let attacker_value = get_piece_value_at_square(board, mv.from);
+    let victim_value = get_piece_value_at_square(board, mv.to());
+    let attacker_value = get_piece_value_at_square(board, mv.from());
 
     // MVV-LVA: prioritize valuable victims, deprioritize valuable attackers
     // Use 10x multiplier for victim to ensure victim value dominates
     let mut score = (victim_value * 10.0) - attacker_value;
 
     // Promotion bonus: add the value of the promoted piece
-    if let Some(promo_piece) = mv.promotion {
+    if let Some(promo_piece) = mv.promotion() {
         score += get_piece_type_value(promo_piece);
     }
 
@@ -308,7 +308,7 @@ mod tests {
         // Bxd5 should be present even though it may be a "losing" capture
         let has_bxd5 = tactical_moves.iter().any(|t| {
             let mv = t.get_move();
-            mv.from == 21 && mv.to == 35 // f3=21, d5=35
+            mv.from() == 21 && mv.to() == 35 // f3=21, d5=35
         });
         assert!(has_bxd5, "Bxd5 should be included (no SEE filtering)");
     }

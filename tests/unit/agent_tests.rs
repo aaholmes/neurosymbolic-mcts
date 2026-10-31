@@ -19,7 +19,7 @@ fn test_simple_agent_finds_mate_in_1() {
     let mut board = BoardStack::new_from_fen("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1");
 
     let mv = agent.get_move(&mut board);
-    assert_eq!(mv.to, 60, "SimpleAgent should find Re8# (back rank mate)");
+    assert_eq!(mv.to(), 60, "SimpleAgent should find Re8# (back rank mate)");
 }
 
 #[test]
@@ -58,7 +58,8 @@ fn test_humanlike_agent_finds_mate_in_1() {
 
     let mv = agent.get_move(&mut board);
     assert_eq!(
-        mv.to, 60,
+        mv.to(),
+        60,
         "HumanlikeAgent should find Re8# (back rank mate)"
     );
 }

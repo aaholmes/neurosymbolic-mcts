@@ -160,11 +160,7 @@ fn test_zobrist_multiple_moves() {
     ];
 
     for (from, to) in moves_to_make {
-        let mv = kingfisher::move_types::Move {
-            from,
-            to,
-            promotion: None,
-        };
+        let mv = kingfisher::move_types::Move::new(from, to, None);
 
         board_stack.make_move(mv);
         let hash = get_hash(board_stack.current_state());

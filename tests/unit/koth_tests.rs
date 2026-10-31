@@ -159,11 +159,11 @@ fn test_koth_best_move_king_one_away() {
     assert!(best.is_some(), "Should find a KOTH-winning move");
     let mv = best.unwrap();
     // The move should land the king on a center square (d4, e4, d5, or e5)
-    let to_bit = 1u64 << mv.to;
+    let to_bit = 1u64 << mv.to();
     assert!(
         to_bit & KOTH_CENTER != 0,
         "Best move should put king on center square, got to={}",
-        mv.to
+        mv.to()
     );
 }
 
@@ -205,8 +205,8 @@ fn test_koth_in_2_detected_at_root() {
     assert!(best.is_some(), "Should find KOTH-winning first move");
     // d3 = square 19 (LERF: a1=0, d3=19)
     let mv = best.unwrap();
-    assert_eq!(mv.from, 12, "Move should be from e2 (sq 12)");
-    assert_eq!(mv.to, 19, "Move should be to d3 (sq 19)");
+    assert_eq!(mv.from(), 12, "Move should be from e2 (sq 12)");
+    assert_eq!(mv.to(), 19, "Move should be to d3 (sq 19)");
 
     // MCTS root-level gate should catch this with 0 iterations
     let config = TacticalMctsConfig {
@@ -222,7 +222,7 @@ fn test_koth_in_2_detected_at_root() {
         "Root-level KOTH gate should abort search with 0 iterations"
     );
     let mv = best_move.unwrap();
-    assert_eq!(mv.to, 19, "MCTS should play Kd3 (sq 19) for KOTH-in-2");
+    assert_eq!(mv.to(), 19, "MCTS should play Kd3 (sq 19) for KOTH-in-2");
 }
 
 #[test]

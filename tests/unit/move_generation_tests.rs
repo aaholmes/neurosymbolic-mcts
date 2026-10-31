@@ -68,7 +68,7 @@ fn test_promotion_moves() {
     // a7-a8 should generate 4 promotion moves
     let promotions: Vec<_> = moves
         .iter()
-        .filter(|m| m.from == 48 && m.to == 56)
+        .filter(|m| m.from() == 48 && m.to() == 56)
         .collect();
 
     assert_eq!(

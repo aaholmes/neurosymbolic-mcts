@@ -155,7 +155,10 @@ fn test_complex_tactical_position() {
     // Each tactical move should have a valid underlying move
     for t in &tactical_moves {
         let mv = t.get_move();
-        assert!(mv.from < 64 && mv.to < 64, "Move squares should be valid");
+        assert!(
+            mv.from() < 64 && mv.to() < 64,
+            "Move squares should be valid"
+        );
     }
 }
 
@@ -179,7 +182,7 @@ fn test_promotion_detected_as_tactical() {
     // Queen promotion should have the highest score
     let queen_promo = tactical_moves
         .iter()
-        .find(|t| t.get_move().promotion == Some(QUEEN));
+        .find(|t| t.get_move().promotion() == Some(QUEEN));
     assert!(
         queen_promo.is_some(),
         "Queen promotion should be among tactical moves"
@@ -206,7 +209,7 @@ fn test_capture_promotion_score() {
     // bxa8=Q should have very high score: victim=5(rook)*10 - 1(pawn) + 9(queen) = 58.0
     let capture_promo = tactical_moves.iter().find(|t| {
         let mv = t.get_move();
-        mv.promotion == Some(QUEEN) && mv.to == 56 // a8
+        mv.promotion() == Some(QUEEN) && mv.to() == 56 // a8
     });
     assert!(
         capture_promo.is_some(),

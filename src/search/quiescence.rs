@@ -293,7 +293,7 @@ fn is_tactical_quiet(board: &Board, mv: Move, move_gen: &MoveGen) -> bool {
 /// Pawn fork: pawn attacks at dest hit 2+ enemy pieces in {N, B, R, Q, K}.
 /// Knight fork: knight attacks at dest hit 2+ enemy pieces in {R, Q, K}.
 fn compute_fork_targets(board: &Board, mv: Move, move_gen: &MoveGen) -> u64 {
-    let piece_type = match board.get_piece(mv.from) {
+    let piece_type = match board.get_piece(mv.from()) {
         Some((_, pt)) => pt,
         None => return 0,
     };
@@ -302,9 +302,9 @@ fn compute_fork_targets(board: &Board, mv: Move, move_gen: &MoveGen) -> u64 {
     match piece_type {
         PAWN => {
             let attack_bb = if board.w_to_move {
-                move_gen.wp_capture_bitboard[mv.to]
+                move_gen.wp_capture_bitboard[mv.to()]
             } else {
-                move_gen.bp_capture_bitboard[mv.to]
+                move_gen.bp_capture_bitboard[mv.to()]
             };
             let enemy_valuable = board.pieces[enemy_color][KNIGHT]
                 | board.pieces[enemy_color][BISHOP]
@@ -319,7 +319,7 @@ fn compute_fork_targets(board: &Board, mv: Move, move_gen: &MoveGen) -> u64 {
             }
         }
         KNIGHT => {
-            let attack_bb = move_gen.n_move_bitboard[mv.to];
+            let attack_bb = move_gen.n_move_bitboard[mv.to()];
             let enemy_high_value = board.pieces[enemy_color][ROOK]
                 | board.pieces[enemy_color][QUEEN]
                 | board.pieces[enemy_color][KING];
@@ -494,7 +494,7 @@ pub fn ext_pesto_qsearch_counted(
                 all_scores.push(score);
                 // A move is a capture if there's a piece on the target square
                 // (in the current board state, before null-move)
-                if board.current_state().get_piece(mv.to).is_some() {
+                if board.current_state().get_piece(mv.to()).is_some() {
                     capture_scores.push((score, mv));
                 }
             }
@@ -511,7 +511,7 @@ pub fn ext_pesto_qsearch_counted(
                     // 1. Saved piece moves to "mystery square" (deny first capture)
                     // 2. Opponent captures the other piece (second capture)
                     // 3. Saved piece recaptures the attacker from mystery square
-                    let best_victim_sq = capture_scores[0].1.to;
+                    let best_victim_sq = capture_scores[0].1.to();
                     let second_cap = capture_scores[1].1;
                     let second_cap_score = capture_scores[1].0;
 
@@ -519,7 +519,7 @@ pub fn ext_pesto_qsearch_counted(
                     board.make_move(second_cap);
                     let recapture_threat = if board.current_state().is_legal(move_gen) {
                         // Mystery recapture: saved piece teleports to attacker's landing
-                        let recapture = Move::new(best_victim_sq, second_cap.to, None);
+                        let recapture = Move::new(best_victim_sq, second_cap.to(), None);
                         let recaptured_board = board.current_state().apply_move_to_board(recapture);
                         let recapture_eval = pesto.pst_eval_cp(&recaptured_board);
                         // recaptured_board has opponent to move (passer just recaptured).
@@ -900,7 +900,7 @@ pub fn cap1_pesto_qsearch(
                 board.undo_move();
                 continue;
             }
-            best_capture_to = Some(capture.to);
+            best_capture_to = Some(capture.to());
             let (score, child_completed, child_nodes, child_depth) = cap1_pesto_qsearch(
                 board,
                 move_gen,
@@ -940,12 +940,12 @@ pub fn cap1_pesto_qsearch(
             for mv in cap_moves.iter().chain(quiet_moves.iter()) {
                 // Skip if this is the same as the capture we already explored
                 if let Some(best_to) = best_capture_to {
-                    if mv.from
+                    if mv.from()
                         == captures
                             .iter()
-                            .find(|c| c.to == best_to)
-                            .map_or(usize::MAX, |c| c.from)
-                        && mv.to == best_to
+                            .find(|c| c.to() == best_to)
+                            .map_or(usize::MAX, |c| c.from())
+                        && mv.to() == best_to
                     {
                         continue;
                     }
@@ -1056,7 +1056,13 @@ pub fn quiescence_search(
     }
 
     for capture in captures {
-        if see(board.current_state(), move_gen, capture.to, capture.from) < 0 {
+        if see(
+            board.current_state(),
+            move_gen,
+            capture.to(),
+            capture.from(),
+        ) < 0
+        {
             continue;
         }
 

@@ -83,7 +83,7 @@ fn analyze_see_impact(positions: &[(&str, &str, &str)], move_gen: &MoveGen) {
             let mut neutral_captures = 0;
 
             for &capture in &legal_captures {
-                let see_value = see(&board, move_gen, capture.to, capture.from);
+                let see_value = see(&board, move_gen, capture.to(), capture.from());
 
                 if see_value > 0 {
                     good_captures += 1;
@@ -95,13 +95,13 @@ fn analyze_see_impact(positions: &[(&str, &str, &str)], move_gen: &MoveGen) {
 
                 let from_sq = format!(
                     "{}{}",
-                    (b'a' + (capture.from % 8) as u8) as char,
-                    (b'1' + (capture.from / 8) as u8) as char
+                    (b'a' + (capture.from() % 8) as u8) as char,
+                    (b'1' + (capture.from() / 8) as u8) as char
                 );
                 let to_sq = format!(
                     "{}{}",
-                    (b'a' + (capture.to % 8) as u8) as char,
-                    (b'1' + (capture.to / 8) as u8) as char
+                    (b'a' + (capture.to() % 8) as u8) as char,
+                    (b'1' + (capture.to() / 8) as u8) as char
                 );
 
                 let evaluation = if see_value > 0 {
@@ -230,17 +230,17 @@ fn demonstrate_exchange_evaluations(move_gen: &MoveGen) {
         // Check if the example move is legal
         let new_board = board.apply_move_to_board(example_move);
         if new_board.is_legal(move_gen) {
-            let see_value = see(&board, move_gen, example_move.to, example_move.from);
+            let see_value = see(&board, move_gen, example_move.to(), example_move.from());
 
             let from_sq = format!(
                 "{}{}",
-                (b'a' + (example_move.from % 8) as u8) as char,
-                (b'1' + (example_move.from / 8) as u8) as char
+                (b'a' + (example_move.from() % 8) as u8) as char,
+                (b'1' + (example_move.from() / 8) as u8) as char
             );
             let to_sq = format!(
                 "{}{}",
-                (b'a' + (example_move.to % 8) as u8) as char,
-                (b'1' + (example_move.to / 8) as u8) as char
+                (b'a' + (example_move.to() % 8) as u8) as char,
+                (b'1' + (example_move.to() / 8) as u8) as char
             );
 
             let evaluation = if see_value > 0 {

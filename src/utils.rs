@@ -47,12 +47,12 @@ pub fn print_bits(bits: u64) {
 ///
 /// A String representing the move in algebraic notation
 pub fn print_move(the_move: &Move) -> String {
-    let from = sq_ind_to_algebraic(the_move.from);
-    let to = sq_ind_to_algebraic(the_move.to);
+    let from = sq_ind_to_algebraic(the_move.from());
+    let to = sq_ind_to_algebraic(the_move.to());
     let mut promotion = String::from("");
-    if the_move.promotion.is_some() {
+    if the_move.promotion().is_some() {
         promotion = String::from("=");
-        match the_move.promotion.unwrap() {
+        match the_move.promotion().unwrap() {
             n if n == KNIGHT => promotion.push('N'),
             n if n == BISHOP => promotion.push('B'),
             n if n == ROOK => promotion.push('R'),

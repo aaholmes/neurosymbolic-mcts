@@ -206,8 +206,8 @@ fn test_quiescence_tactical_with_winning_capture() {
 
     // Should find Qxg4 as a winning capture
     // There should be at least one capture move evaluated
-    let _has_qxg4 = tree.siblings.iter().any(|(mv, _)| mv.to == 30); // g4 = square 30
-                                                                     // Qxg4 may or may not be found depending on SEE
+    let _has_qxg4 = tree.siblings.iter().any(|(mv, _)| mv.to() == 30); // g4 = square 30
+                                                                       // Qxg4 may or may not be found depending on SEE
 }
 
 #[test]

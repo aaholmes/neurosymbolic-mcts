@@ -6,7 +6,6 @@
 use crate::board_utils::sq_ind_to_algebraic;
 use crate::piece_types::{BISHOP, KING, KNIGHT, PAWN, QUEEN, ROOK};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 
 // Constants for castling squares
 const C1: usize = 2; // White queenside castle destination
@@ -16,29 +15,22 @@ const C8: usize = 58; // Black queenside castle destination
 const E8: usize = 60; // King starting square (black)
 const G8: usize = 62; // Black kingside castle destination
 
-/// Represents a chess move.
+/// Represents a chess move: a source square, a destination square and any
+/// promotion, packed into 16 bits as `from << 10 | to << 4 | promotion`, where
+/// the promotion is 0 for none or the piece type (knight 1 to queen 4).
 ///
-/// This struct contains information about the source square, destination square,
-/// and any promotion that occurs as a result of the move.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Move {
-    /// The index of the square the piece is moving from (0-63).
-    pub from: usize,
-    /// The index of the square the piece is moving to (0-63).
-    pub to: usize,
-    /// The type of piece to promote to, if this move results in a promotion.
-    /// `None` if the move does not result in a promotion.
-    pub promotion: Option<usize>,
-}
+/// With `from` in the top bits, moves sort by source square, then destination,
+/// then promotion.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Move(u16);
 
-// Implement Hash to enable using Move as a HashMap key
-impl Hash for Move {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.from.hash(state);
-        self.to.hash(state);
-        if let Some(promotion) = self.promotion {
-            promotion.hash(state);
-        }
+impl fmt::Debug for Move {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Move")
+            .field("from", &self.from())
+            .field("to", &self.to())
+            .field("promotion", &self.promotion())
+            .finish()
     }
 }
 
@@ -73,11 +65,7 @@ fn piece_char(piece: usize) -> char {
 }
 
 /// A constant representing a null move, used in search algorithms
-pub const NULL_MOVE: Move = Move {
-    from: 0,
-    to: 0,
-    promotion: None,
-};
+pub const NULL_MOVE: Move = Move::new(0, 0, None);
 
 impl Move {
     /// Creates a new `Move` instance.
@@ -91,12 +79,36 @@ impl Move {
     /// # Returns
     ///
     /// A new `Move` instance with the specified parameters.
-    pub fn new(from: usize, to: usize, promotion: Option<usize>) -> Move {
-        // New move
-        Move {
-            from,
-            to,
-            promotion,
+    pub const fn new(from: usize, to: usize, promotion: Option<usize>) -> Move {
+        debug_assert!(from < 64 && to < 64);
+        let promo = match promotion {
+            Some(p) => {
+                debug_assert!(p >= 1 && p < 16);
+                p as u16
+            }
+            None => 0,
+        };
+        Move(((from as u16) << 10) | ((to as u16) << 4) | promo)
+    }
+
+    /// The index of the square the piece moves from (0-63).
+    #[inline]
+    pub const fn from(&self) -> usize {
+        (self.0 >> 10) as usize
+    }
+
+    /// The index of the square the piece moves to (0-63).
+    #[inline]
+    pub const fn to(&self) -> usize {
+        ((self.0 >> 4) & 63) as usize
+    }
+
+    /// The piece type promoted to, or `None` if the move is not a promotion.
+    #[inline]
+    pub const fn promotion(&self) -> Option<usize> {
+        match self.0 & 15 {
+            0 => None,
+            p => Some(p as usize),
         }
     }
 
@@ -151,11 +163,7 @@ impl Move {
             None
         };
 
-        Some(Move {
-            from,
-            to,
-            promotion,
-        })
+        Some(Move::new(from, to, promotion))
     }
 
     /// Creates a null move.
@@ -169,12 +177,7 @@ impl Move {
     /// A `Move` instance representing a null move, with `from` and `to` set to 0
     /// and `promotion` set to `None`.
     pub fn null() -> Move {
-        // Null move
-        Move {
-            from: 0,
-            to: 0,
-            promotion: None,
-        }
+        NULL_MOVE
     }
 
     /// Checks if the move is a promotion.
@@ -183,7 +186,7 @@ impl Move {
     ///
     /// True if the move has a promotion piece specified, false otherwise.
     pub fn is_promotion(&self) -> bool {
-        self.promotion.is_some()
+        self.promotion().is_some()
     }
 
     /// Checks if the move is an en passant capture.
@@ -199,8 +202,8 @@ impl Move {
     /// True if the move appears to be an en passant capture, false otherwise.
     pub fn is_en_passant(&self) -> bool {
         // Check if moving diagonally (file difference of 1)
-        let from_file = self.from % 8;
-        let to_file = self.to % 8;
+        let from_file = self.from() % 8;
+        let to_file = self.to() % 8;
         let file_diff = from_file.abs_diff(to_file);
 
         if file_diff != 1 {
@@ -208,8 +211,8 @@ impl Move {
         }
 
         // Check if it's a pawn move from rank 4 to 5 (white) or rank 3 to 2 (black)
-        let from_rank = self.from / 8;
-        let to_rank = self.to / 8;
+        let from_rank = self.from() / 8;
+        let to_rank = self.to() / 8;
 
         (from_rank == 4 && to_rank == 5) || (from_rank == 3 && to_rank == 2)
     }
@@ -220,8 +223,8 @@ impl Move {
     ///
     /// True if the move is kingside castling, false otherwise.
     pub fn is_kingside_castle(&self) -> bool {
-        (self.from == E1 && self.to == G1) || // White kingside (e1g1)
-        (self.from == E8 && self.to == G8) // Black kingside (e8g8)
+        (self.from() == E1 && self.to() == G1) || // White kingside (e1g1)
+        (self.from() == E8 && self.to() == G8) // Black kingside (e8g8)
     }
 
     /// Checks if the move is queenside castling.
@@ -230,8 +233,8 @@ impl Move {
     ///
     /// True if the move is queenside castling, false otherwise.
     pub fn is_queenside_castle(&self) -> bool {
-        (self.from == E1 && self.to == C1) || // White queenside (e1c1)
-        (self.from == E8 && self.to == C8) // Black queenside (e8c8)
+        (self.from() == E1 && self.to() == C1) || // White queenside (e1c1)
+        (self.from() == E8 && self.to() == C8) // Black queenside (e8c8)
     }
 
     /// Checks if the move is any type of castling.
@@ -245,11 +248,11 @@ impl Move {
 
     /// Convert move to UCI notation
     pub fn to_uci(&self) -> String {
-        let from = sq_ind_to_algebraic(self.from);
-        let to = sq_ind_to_algebraic(self.to);
+        let from = sq_ind_to_algebraic(self.from());
+        let to = sq_ind_to_algebraic(self.to());
         let mut result = format!("{}{}", from, to);
 
-        if let Some(promotion) = self.promotion {
+        if let Some(promotion) = self.promotion() {
             let promotion_char = match promotion {
                 n if n == KNIGHT => 'n',
                 n if n == BISHOP => 'b',
@@ -290,22 +293,22 @@ impl Move {
             };
         }
 
-        let (_, piece) = board.get_piece(self.from).unwrap_or((0, PAWN));
+        let (_, piece) = board.get_piece(self.from()).unwrap_or((0, PAWN));
         let is_capture =
-            board.get_piece(self.to).is_some() || (piece == PAWN && self.is_en_passant());
+            board.get_piece(self.to()).is_some() || (piece == PAWN && self.is_en_passant());
 
-        let to_str = sq_ind_to_algebraic(self.to);
+        let to_str = sq_ind_to_algebraic(self.to());
         let mut result = String::new();
 
         if piece == PAWN {
             if is_capture {
                 // e.g. exd5
-                let from_file = (b'a' + (self.from % 8) as u8) as char;
+                let from_file = (b'a' + (self.from() % 8) as u8) as char;
                 result.push(from_file);
                 result.push('x');
             }
             result.push_str(&to_str);
-            if let Some(promo) = self.promotion {
+            if let Some(promo) = self.promotion() {
                 result.push('=');
                 result.push(piece_char(promo));
             }
@@ -319,17 +322,17 @@ impl Move {
             let mut ambiguous_rank = false;
             let mut ambiguous_count = 0;
             for &mv in captures.iter().chain(non_captures.iter()) {
-                if mv.to == self.to && mv.from != self.from {
-                    if let Some((c, p)) = board.get_piece(mv.from) {
+                if mv.to() == self.to() && mv.from() != self.from() {
+                    if let Some((c, p)) = board.get_piece(mv.from()) {
                         if c == color && p == piece {
                             // Check legality
                             let after = board.apply_move_to_board(mv);
                             if after.is_legal(move_gen) {
                                 ambiguous_count += 1;
-                                if mv.from % 8 == self.from % 8 {
+                                if mv.from() % 8 == self.from() % 8 {
                                     ambiguous_file = true; // same file
                                 }
-                                if mv.from / 8 == self.from / 8 {
+                                if mv.from() / 8 == self.from() / 8 {
                                     ambiguous_rank = true; // same rank
                                 }
                             }
@@ -338,8 +341,8 @@ impl Move {
                 }
             }
             if ambiguous_count > 0 {
-                let from_file = (b'a' + (self.from % 8) as u8) as char;
-                let from_rank = (b'1' + (self.from / 8) as u8) as char;
+                let from_file = (b'a' + (self.from() % 8) as u8) as char;
+                let from_rank = (b'1' + (self.from() / 8) as u8) as char;
                 if !ambiguous_file {
                     result.push(from_file);
                 } else if !ambiguous_rank {
@@ -373,21 +376,21 @@ impl Move {
     /// Returns a new move with squares flipped vertically.
     pub fn flip_vertical(&self) -> Move {
         use crate::board_utils::flip_sq_ind_vertically;
-        Move {
-            from: flip_sq_ind_vertically(self.from),
-            to: flip_sq_ind_vertically(self.to),
-            promotion: self.promotion,
-        }
+        Move::new(
+            flip_sq_ind_vertically(self.from()),
+            flip_sq_ind_vertically(self.to()),
+            self.promotion(),
+        )
     }
 
     /// Change the way a move is printed so that it uses algebraic notation
     pub fn print_algebraic(&self) -> String {
-        let from = sq_ind_to_algebraic(self.from);
-        let to = sq_ind_to_algebraic(self.to);
+        let from = sq_ind_to_algebraic(self.from());
+        let to = sq_ind_to_algebraic(self.to());
         let mut promotion = String::from("");
-        if self.promotion.is_some() {
+        if self.promotion().is_some() {
             promotion = String::from("=");
-            match self.promotion.unwrap() {
+            match self.promotion().unwrap() {
                 n if n == KNIGHT => promotion.push('N'),
                 n if n == BISHOP => promotion.push('B'),
                 n if n == ROOK => promotion.push('R'),
@@ -411,38 +414,16 @@ mod tests {
 
     #[test]
     fn test_move_from_uci() {
-        assert_eq!(
-            Move::from_uci("e2e4"),
-            Some(Move {
-                from: 12,
-                to: 28,
-                promotion: None
-            })
-        );
+        assert_eq!(Move::from_uci("e2e4"), Some(Move::new(12, 28, None)));
         assert_eq!(
             Move::from_uci("a7a8q"),
-            Some(Move {
-                from: 48,
-                to: 56,
-                promotion: Some(QUEEN)
-            })
+            Some(Move::new(48, 56, Some(QUEEN)))
         );
         assert_eq!(
             Move::from_uci("h2h1n"),
-            Some(Move {
-                from: 15,
-                to: 7,
-                promotion: Some(KNIGHT)
-            })
+            Some(Move::new(15, 7, Some(KNIGHT)))
         );
-        assert_eq!(
-            Move::from_uci("e1g1"),
-            Some(Move {
-                from: 4,
-                to: 6,
-                promotion: None
-            })
-        ); // Castling
+        assert_eq!(Move::from_uci("e1g1"), Some(Move::new(4, 6, None))); // Castling
         assert_eq!(Move::from_uci("invalid"), None);
         assert_eq!(Move::from_uci("e2e9"), None); // Invalid square
         assert_eq!(Move::from_uci("e2e4q"), None); // Invalid promotion (not on last rank)

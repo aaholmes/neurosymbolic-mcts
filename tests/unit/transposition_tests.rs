@@ -8,11 +8,7 @@ use kingfisher::move_types::Move;
 use kingfisher::transposition::{Bound, TranspositionTable};
 
 fn create_move(from: usize, to: usize) -> Move {
-    Move {
-        from,
-        to,
-        promotion: None,
-    }
+    Move::new(from, to, None)
 }
 
 #[test]

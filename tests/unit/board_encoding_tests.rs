@@ -454,8 +454,8 @@ fn test_policy_move_flip_black() {
     let flipped = mv.flip_vertical();
 
     // flip_vertical: 52 → 8*(7-6)+4 = 12, 36 → 8*(7-4)+4 = 28
-    assert_eq!(flipped.from, 12);
-    assert_eq!(flipped.to, 28);
+    assert_eq!(flipped.from(), 12);
+    assert_eq!(flipped.to(), 28);
 
     // So the index should be the same as White's e2e4
     let idx_b = move_to_index(flipped);
@@ -476,8 +476,8 @@ fn test_policy_move_flip_capture() {
     let mv_b = Move::new(35, 28, None);
     let flipped = mv_b.flip_vertical();
     // 35 → 8*(7-4)+3 = 27, 28 → 8*(7-3)+4 = 36
-    assert_eq!(flipped.from, 27);
-    assert_eq!(flipped.to, 36);
+    assert_eq!(flipped.from(), 27);
+    assert_eq!(flipped.to(), 36);
 
     let idx_b = move_to_index(flipped);
     assert_eq!(idx_b, idx_w);

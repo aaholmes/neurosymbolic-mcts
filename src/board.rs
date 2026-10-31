@@ -426,7 +426,7 @@ impl Board {
 
     /// Checks if a move is pseudo-legal in the current position without generating
     /// all pseudo-legal moves. Verifies:
-    /// 1. There is a piece of the correct color at `mv.from`
+    /// 1. There is a piece of the correct color at `mv.from()`
     /// 2. The destination is reachable by that piece type
     /// 3. No own-piece at destination (for non-castling moves)
     ///
@@ -434,8 +434,8 @@ impl Board {
     pub fn is_pseudo_legal(&self, mv: Move, move_gen: &MoveGen) -> bool {
         let stm = if self.w_to_move { WHITE } else { BLACK };
         let opp = 1 - stm;
-        let from_bit = 1u64 << mv.from;
-        let to_bit = 1u64 << mv.to;
+        let from_bit = 1u64 << mv.from();
+        let to_bit = 1u64 << mv.to();
 
         // Check there's a piece of the correct color at from
         if self.pieces_occ[stm] & from_bit == 0 {
@@ -443,7 +443,7 @@ impl Board {
         }
 
         // Find piece type at from
-        let piece_type = match self.get_piece(mv.from) {
+        let piece_type = match self.get_piece(mv.from()) {
             Some((color, pt)) if color == stm => pt,
             _ => return false,
         };
@@ -457,22 +457,22 @@ impl Board {
 
         match piece_type {
             PAWN => {
-                let from_rank = mv.from / 8;
-                let to_rank = mv.to / 8;
-                let from_file = mv.from % 8;
-                let to_file = mv.to % 8;
+                let from_rank = mv.from() / 8;
+                let to_rank = mv.to() / 8;
+                let from_file = mv.from() % 8;
+                let to_file = mv.to() % 8;
 
                 if self.w_to_move {
                     // White pawn
                     if from_file == to_file {
                         // Push
-                        if mv.to == mv.from + 8 && all_occ & to_bit == 0 {
+                        if mv.to() == mv.from() + 8 && all_occ & to_bit == 0 {
                             return true;
                         }
                         // Double push
                         if from_rank == 1
-                            && mv.to == mv.from + 16
-                            && all_occ & (1u64 << (mv.from + 8)) == 0
+                            && mv.to() == mv.from() + 16
+                            && all_occ & (1u64 << (mv.from() + 8)) == 0
                             && all_occ & to_bit == 0
                         {
                             return true;
@@ -484,55 +484,55 @@ impl Board {
                         if self.pieces_occ[opp] & to_bit != 0 {
                             return true;
                         }
-                        if self.en_passant == Some(mv.to as u8) {
+                        if self.en_passant == Some(mv.to() as u8) {
                             return true;
                         }
                     }
                 } else {
                     // Black pawn
                     if from_file == to_file {
-                        if mv.from >= 8 && mv.to == mv.from - 8 && all_occ & to_bit == 0 {
+                        if mv.from() >= 8 && mv.to() == mv.from() - 8 && all_occ & to_bit == 0 {
                             return true;
                         }
                         if from_rank == 6
-                            && mv.from >= 16
-                            && mv.to == mv.from - 16
-                            && all_occ & (1u64 << (mv.from - 8)) == 0
+                            && mv.from() >= 16
+                            && mv.to() == mv.from() - 16
+                            && all_occ & (1u64 << (mv.from() - 8)) == 0
                             && all_occ & to_bit == 0
                         {
                             return true;
                         }
-                    } else if mv.from >= 8
+                    } else if mv.from() >= 8
                         && (to_file as i32 - from_file as i32).abs() == 1
                         && to_rank + 1 == from_rank
                     {
                         if self.pieces_occ[opp] & to_bit != 0 {
                             return true;
                         }
-                        if self.en_passant == Some(mv.to as u8) {
+                        if self.en_passant == Some(mv.to() as u8) {
                             return true;
                         }
                     }
                 }
                 false
             }
-            KNIGHT => move_gen.n_move_bitboard[mv.from] & to_bit != 0,
+            KNIGHT => move_gen.n_move_bitboard[mv.from()] & to_bit != 0,
             BISHOP => {
-                let attacks = move_gen.gen_bishop_attacks_occ(mv.from, all_occ);
+                let attacks = move_gen.gen_bishop_attacks_occ(mv.from(), all_occ);
                 attacks & to_bit != 0
             }
             ROOK => {
-                let attacks = move_gen.gen_rook_attacks_occ(mv.from, all_occ);
+                let attacks = move_gen.gen_rook_attacks_occ(mv.from(), all_occ);
                 attacks & to_bit != 0
             }
             QUEEN => {
-                let attacks = move_gen.gen_bishop_attacks_occ(mv.from, all_occ)
-                    | move_gen.gen_rook_attacks_occ(mv.from, all_occ);
+                let attacks = move_gen.gen_bishop_attacks_occ(mv.from(), all_occ)
+                    | move_gen.gen_rook_attacks_occ(mv.from(), all_occ);
                 attacks & to_bit != 0
             }
             KING => {
                 // Normal king move
-                if move_gen.k_move_bitboard[mv.from] & to_bit != 0 {
+                if move_gen.k_move_bitboard[mv.from()] & to_bit != 0 {
                     return true;
                 }
                 // Castling: already validated by is_castle()
@@ -540,17 +540,18 @@ impl Board {
                     // We trust that move generation already validated castling prerequisites.
                     // Just check the basic structure: correct king position and castling rights.
                     if self.w_to_move {
-                        if mv.from == 4 && mv.to == 6 && self.castling_rights.white_kingside {
+                        if mv.from() == 4 && mv.to() == 6 && self.castling_rights.white_kingside {
                             return true;
                         }
-                        if mv.from == 4 && mv.to == 2 && self.castling_rights.white_queenside {
+                        if mv.from() == 4 && mv.to() == 2 && self.castling_rights.white_queenside {
                             return true;
                         }
                     } else {
-                        if mv.from == 60 && mv.to == 62 && self.castling_rights.black_kingside {
+                        if mv.from() == 60 && mv.to() == 62 && self.castling_rights.black_kingside {
                             return true;
                         }
-                        if mv.from == 60 && mv.to == 58 && self.castling_rights.black_queenside {
+                        if mv.from() == 60 && mv.to() == 58 && self.castling_rights.black_queenside
+                        {
                             return true;
                         }
                     }
@@ -700,14 +701,14 @@ impl Board {
         use crate::board_utils::bit_to_sq_ind;
 
         // Handle special moves with fallback (these are rare)
-        if mv.promotion.is_some() || mv.is_castle() {
+        if mv.promotion().is_some() || mv.is_castle() {
             let new_board = self.apply_move_to_board(mv);
             return new_board.is_check(move_gen);
         }
 
         // En passant: also fallback (pawn disappears from a different square)
-        if self.en_passant.is_some() && mv.to == self.en_passant.unwrap() as usize {
-            if let Some((_, PAWN)) = self.get_piece(mv.from) {
+        if self.en_passant.is_some() && mv.to() == self.en_passant.unwrap() as usize {
+            if let Some((_, PAWN)) = self.get_piece(mv.from()) {
                 let new_board = self.apply_move_to_board(mv);
                 return new_board.is_check(move_gen);
             }
@@ -723,15 +724,15 @@ impl Board {
         }
         let king_sq = bit_to_sq_ind(opp_king_bb);
 
-        let from_bit = 1u64 << mv.from;
-        let to_bit = 1u64 << mv.to;
+        let from_bit = 1u64 << mv.from();
+        let to_bit = 1u64 << mv.to();
 
         // Build occupancy with the piece moved (remove from `from`, add to `to`,
         // and remove any captured piece at `to`)
         let all_occ = (self.pieces_occ[0] | self.pieces_occ[1]) & !from_bit | to_bit;
 
         // 1. Direct check: does the moved piece attack the king from its destination?
-        let piece_type = match self.get_piece(mv.from) {
+        let piece_type = match self.get_piece(mv.from()) {
             Some((_, pt)) => pt,
             None => return false,
         };
@@ -740,24 +741,24 @@ impl Board {
             PAWN => {
                 if stm_color == WHITE {
                     // White pawn attacks diagonally upward
-                    move_gen.wp_capture_bitboard[mv.to] & opp_king_bb != 0
+                    move_gen.wp_capture_bitboard[mv.to()] & opp_king_bb != 0
                 } else {
                     // Black pawn attacks diagonally downward
-                    move_gen.bp_capture_bitboard[mv.to] & opp_king_bb != 0
+                    move_gen.bp_capture_bitboard[mv.to()] & opp_king_bb != 0
                 }
             }
-            KNIGHT => move_gen.n_move_bitboard[mv.to] & opp_king_bb != 0,
+            KNIGHT => move_gen.n_move_bitboard[mv.to()] & opp_king_bb != 0,
             BISHOP => {
-                let bishop_attacks = move_gen.gen_bishop_attacks_occ(mv.to, all_occ);
+                let bishop_attacks = move_gen.gen_bishop_attacks_occ(mv.to(), all_occ);
                 bishop_attacks & opp_king_bb != 0
             }
             ROOK => {
-                let rook_attacks = move_gen.gen_rook_attacks_occ(mv.to, all_occ);
+                let rook_attacks = move_gen.gen_rook_attacks_occ(mv.to(), all_occ);
                 rook_attacks & opp_king_bb != 0
             }
             QUEEN => {
-                let bishop_attacks = move_gen.gen_bishop_attacks_occ(mv.to, all_occ);
-                let rook_attacks = move_gen.gen_rook_attacks_occ(mv.to, all_occ);
+                let bishop_attacks = move_gen.gen_bishop_attacks_occ(mv.to(), all_occ);
+                let rook_attacks = move_gen.gen_rook_attacks_occ(mv.to(), all_occ);
                 (bishop_attacks | rook_attacks) & opp_king_bb != 0
             }
             KING => {
@@ -803,11 +804,11 @@ impl Board {
         let stm = if self.w_to_move { WHITE } else { BLACK };
         let opp = 1 - stm;
 
-        let from_bit = 1u64 << mv.from;
-        let to_bit = 1u64 << mv.to;
+        let from_bit = 1u64 << mv.from();
+        let to_bit = 1u64 << mv.to();
 
         // Determine the moving piece type
-        let piece_type = match self.get_piece(mv.from) {
+        let piece_type = match self.get_piece(mv.from()) {
             Some((_, pt)) => pt,
             None => return false,
         };
@@ -815,7 +816,7 @@ impl Board {
         // Find the king square (may have moved)
         let king_sq: usize;
         if piece_type == KING {
-            king_sq = mv.to;
+            king_sq = mv.to();
         } else {
             let king_bb = self.pieces[stm][KING];
             if king_bb == 0 {
@@ -831,9 +832,13 @@ impl Board {
         let mut ep_captured_sq: Option<usize> = None;
         if piece_type == PAWN
             && self.en_passant.is_some()
-            && mv.to == self.en_passant.unwrap() as usize
+            && mv.to() == self.en_passant.unwrap() as usize
         {
-            let cap_sq = if self.w_to_move { mv.to - 8 } else { mv.to + 8 };
+            let cap_sq = if self.w_to_move {
+                mv.to() - 8
+            } else {
+                mv.to() + 8
+            };
             ep_captured_sq = Some(cap_sq);
             all_occ &= !(1u64 << cap_sq);
         }
@@ -845,16 +850,16 @@ impl Board {
         // final king position isn't attacked (which is what we do below).
         // The rook also moves, so update occupancy for castling.
         if piece_type == KING {
-            if mv.from == 4 && mv.to == 6 {
+            if mv.from() == 4 && mv.to() == 6 {
                 // White O-O
                 all_occ = (all_occ & !(1u64 << 7)) | (1u64 << 5);
-            } else if mv.from == 4 && mv.to == 2 {
+            } else if mv.from() == 4 && mv.to() == 2 {
                 // White O-O-O
                 all_occ = (all_occ & !(1u64 << 0)) | (1u64 << 3);
-            } else if mv.from == 60 && mv.to == 62 {
+            } else if mv.from() == 60 && mv.to() == 62 {
                 // Black O-O
                 all_occ = (all_occ & !(1u64 << 63)) | (1u64 << 61);
-            } else if mv.from == 60 && mv.to == 58 {
+            } else if mv.from() == 60 && mv.to() == 58 {
                 // Black O-O-O
                 all_occ = (all_occ & !(1u64 << 56)) | (1u64 << 59);
             }

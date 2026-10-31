@@ -229,7 +229,7 @@ impl MctsNode {
         parent_num_legal_moves: usize,
         exploration_constant: f64,
     ) -> f64 {
-        if self.action.is_some() && self.state.get_piece(self.action.unwrap().from).is_none() {
+        if self.action.is_some() && self.state.get_piece(self.action.unwrap().from()).is_none() {
             return f64::NEG_INFINITY;
         }
         if self.visits == 0 {
@@ -257,7 +257,7 @@ impl MctsNode {
     }
 
     pub fn uct_value(&self, parent_visits: u32, exploration_constant: f64) -> f64 {
-        if self.action.is_some() && self.state.get_piece(self.action.unwrap().from).is_none() {
+        if self.action.is_some() && self.state.get_piece(self.action.unwrap().from()).is_none() {
             return f64::NEG_INFINITY;
         }
         if self.visits == 0 {
@@ -312,14 +312,14 @@ impl MctsNode {
 
         let mut capture_scores: HashMap<Move, i32> = HashMap::new();
         for mv in &legal_moves {
-            if self.state.get_piece(mv.from).is_none() {
+            if self.state.get_piece(mv.from()).is_none() {
                 continue;
             }
             let opponent_color = if self.state.w_to_move { 1 } else { 0 };
-            let is_capture = (self.state.pieces_occ[opponent_color] & (1u64 << mv.to)) != 0
+            let is_capture = (self.state.pieces_occ[opponent_color] & (1u64 << mv.to())) != 0
                 || mv.is_en_passant();
             if is_capture || mv.is_promotion() {
-                capture_scores.insert(*mv, move_gen.mvv_lva(&self.state, mv.from, mv.to));
+                capture_scores.insert(*mv, move_gen.mvv_lva(&self.state, mv.from(), mv.to()));
             }
         }
 
@@ -347,7 +347,7 @@ impl MctsNode {
     }
 
     fn categorize_move(&self, mv: &Move, move_gen: &MoveGen) -> MoveCategory {
-        if self.state.get_piece(mv.from).is_none() {
+        if self.state.get_piece(mv.from()).is_none() {
             return MoveCategory::Quiet;
         }
         // Use gives_check to avoid cloning the board
@@ -357,7 +357,7 @@ impl MctsNode {
 
         let opponent_color = if self.state.w_to_move { 1 } else { 0 };
         let is_capture =
-            (self.state.pieces_occ[opponent_color] & (1u64 << mv.to)) != 0 || mv.is_en_passant();
+            (self.state.pieces_occ[opponent_color] & (1u64 << mv.to())) != 0 || mv.is_en_passant();
         if is_capture || mv.is_promotion() {
             return MoveCategory::Capture;
         }
@@ -557,7 +557,7 @@ impl MctsNode {
             // Safety check for move legality
             if let Some(mv) = child_ref.action {
                 let mg = MoveGen::new();
-                if self.state.get_piece(mv.from).is_none()
+                if self.state.get_piece(mv.from()).is_none()
                     || !self.state.apply_move_to_board(mv).is_legal(&mg)
                 {
                     continue;

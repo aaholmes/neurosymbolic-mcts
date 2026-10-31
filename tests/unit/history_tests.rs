@@ -7,11 +7,7 @@ use kingfisher::move_types::Move;
 use kingfisher::search::history::HistoryTable;
 
 fn create_move(from: usize, to: usize) -> Move {
-    Move {
-        from,
-        to,
-        promotion: None,
-    }
+    Move::new(from, to, None)
 }
 
 #[test]

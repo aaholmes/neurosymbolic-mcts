@@ -204,8 +204,8 @@ fn test_index_within_policy_range() {
             idx < 4672,
             "Index {} for move {}->{} exceeds 4672",
             idx,
-            mv.from,
-            mv.to
+            mv.from(),
+            mv.to()
         );
     }
 }

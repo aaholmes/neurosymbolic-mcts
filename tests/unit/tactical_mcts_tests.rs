@@ -61,7 +61,7 @@ fn test_tactical_mcts_finds_mate_in_1() {
     let mv = best_move.unwrap();
 
     // Re8 is e1->e8, which is square 4 to square 60
-    assert_eq!(mv.to, 60, "Should find Re8# (to e8 = square 60)");
+    assert_eq!(mv.to(), 60, "Should find Re8# (to e8 = square 60)");
 
     // Should have found at least one mate
     assert!(
@@ -237,7 +237,7 @@ fn test_q_value_sign_convention() {
     for child in &root_ref.children {
         let c = child.borrow();
         if let Some(mv) = c.action {
-            if mv.from == 52 && mv.to == 36 && c.visits > 0 {
+            if mv.from() == 52 && mv.to() == 36 && c.visits > 0 {
                 found_e7e5 = true;
                 let q = c.total_value / c.visits as f64;
                 assert!(
@@ -449,7 +449,7 @@ fn test_koth_win_in_1_selected_and_search_aborts() {
     let mv = best_move.unwrap();
 
     // d3=19, d4=27, e4=28 in LERF
-    let is_koth_win_move = (mv.from == 19 && mv.to == 27) || (mv.from == 19 && mv.to == 28);
+    let is_koth_win_move = (mv.from() == 19 && mv.to() == 27) || (mv.from() == 19 && mv.to() == 28);
     assert!(
         is_koth_win_move,
         "Should select KOTH win-in-1 (d3d4 or d3e4), got {}",
@@ -684,7 +684,7 @@ fn test_select_best_move_prefers_koth_win_over_captures() {
     assert!(best_move.is_some());
     let mv = best_move.unwrap();
     // Must be d3d4 (19->27) or d3e4 (19->28), NOT d3c3 (19->18, captures rook)
-    let is_koth = (mv.from == 19 && mv.to == 27) || (mv.from == 19 && mv.to == 28);
+    let is_koth = (mv.from() == 19 && mv.to() == 27) || (mv.from() == 19 && mv.to() == 28);
     assert!(
         is_koth,
         "Should prefer KOTH win over rook capture, got {}",
