@@ -8,8 +8,8 @@ an exact method can evaluate, such as a forced mate in N moves, becomes a termin
 Carlo tree search (MCTS) with its exact value, just as checkmate does, so the engine is rewarded for
 reaching it rather than only for checkmate. The training signal is denser, and unlike a learned
 reward model it cannot be gamed. The exact evaluation is also cheaper: an exact search costs about
-140 µs per position, compared with about 1,350 µs for a network evaluation. Only positions no exact
-method can evaluate are sent to the neural network.
+140 µs per position, compared with about 1,350 µs for a network evaluation as the search sees it.
+Only positions no exact method can evaluate are sent to the neural network.
 
 Where no exact answer exists, the classical search still informs the network. A quiescence search
 plays out the forcing moves in a position, mainly captures, and scores the quiet position that
@@ -25,28 +25,43 @@ The pattern, exact solutions for tractable subproblems injected as terminal sear
 any domain with classically solvable subproblems, such as mathematical reasoning with an automated
 theorem prover.
 
-## Result
+## Where the project stands
 
-Both engines below were trained by self-play in King of the Hill, a chess variant in which moving
-your king to one of the four central squares also wins. The variant makes positions with exact
-solutions common, which gives the classical layer room to matter
-([DESIGN_DECISIONS.md](DESIGN_DECISIONS.md)). Both use the same network (6 residual blocks, 128
-channels, ~2M parameters) and 200 search simulations per move; the baseline uses the neural network
-alone, as AlphaZero does.
+- **King of the Hill** (a chess variant where reaching the center also wins): the tiered engine
+  rates about 625 Elo above a network-only baseline, with caveats below that make this a
+  preliminary result.
+- **Standard chess**, the intended headline: training has not yet made progress; the classical
+  search is expensive there, and the acceptance test for new generations rejected three in a row.
+- **Self-play speed** (standard chess, 200 simulations per move): **730 moves per second** with
+  the network alone, up from about 65 under LibTorch; **109** with the classical tiers on.
 
-After 18 generations the engine rates **2663 Elo [2565, 2763]**, about 625 Elo above the baseline
-after 28 generations, **2038 [1957, 2111]**.
+## Result in King of the Hill
+
+Both engines were trained by self-play in King of the Hill, a variant chosen because positions
+with exact solutions are common in it ([DESIGN_DECISIONS.md](DESIGN_DECISIONS.md)). Both use the
+same network (6 residual blocks, 128 channels, ~2M parameters) and 200 search simulations per move;
+the baseline uses the neural network alone, as AlphaZero does.
+
+After 18 generations the tiered engine rates **2663 Elo [2565, 2763]**, and the baseline after 28
+generations **2038 [1957, 2111]**.
 
 ![Elo by training generation for both runs](tournament_results_800eval_elo_plot.png)
 
 Ratings come from 6,579 games over 17 pairings, fitted with the Bradley–Terry model, with 95%
-bootstrap intervals (1,000 resamples) relative to the baseline's first generation. Each training run
-was rated as a ladder of adjacent generations, and the two ladders are joined by a single 100-game
-match: this engine before any training, with its network initialized to zero so that it evaluates
-positions classically, versus the baseline after 28 generations. That match gives +30 Elo
-[−20, +74], so the untrained engine is about level with the fully trained baseline. The 625-Elo gap
-between the final models is far larger than that uncertainty; a bootstrap interval on the gap itself
-has not yet been computed.
+bootstrap intervals (1,000 resamples) relative to the baseline's first generation. Three things
+limit what this shows:
+
+- **Compute is not matched.** Both engines get 200 simulations per move, but the tiered engine's
+  classical search is extra computation that is not counted.
+- **The two runs are joined by one 100-game match**: the tiered engine before any training (its
+  network initialized to zero, so it evaluates positions classically) versus the baseline after 28
+  generations, +30 Elo [−20, +74]. Each run was rated as a ladder of adjacent generations, and no
+  bootstrap interval on the gap between the final models has been computed.
+- **Part of the gap may be a head start**: the untrained tiered engine is already about level with
+  the fully trained baseline.
+
+A comparison in standard chess at equal wall-clock time, including the untrained tiered engine, is
+the next measurement (see [next steps](#current-state-and-next-steps)).
 
 <details>
 <summary>All 18 ratings</summary>
@@ -86,9 +101,9 @@ Each position is handled by the cheapest method that can evaluate it:
 | 2 | Quiescence search: captures and promotions are played out until the position is quiet, with all replies to check, one quiet check or fork per side, and a test for threats made by letting the side to move pass; the quiet position is scored with PeSTO, a standard hand-tuned evaluation of material and piece placement | Heuristic value | 8 µs |
 | 3 | Neural network | Learned value | 1,346 µs |
 
-The Tier 3 cost is the mean time per network call as the search sees it, measured with
-`profile_engine` (4 games played one after another, 200 simulations per move). It includes up to
-0.5 ms that the inference server waits for other requests to fill a batch.
+Costs were measured with `profile_engine` (4 games played one after another,
+200 simulations per move). The Tier 3 cost is the time per network call as the search sees it,
+including up to 0.5 ms that the inference server waits for other requests to fill a batch.
 
 A position evaluated exactly in Tier 1 is terminal, like checkmate or stalemate, so its proven value
 propagates up the tree without being averaged with approximate evaluations of its children.
@@ -100,7 +115,8 @@ $$V = \tanh(V_{\text{net}} + k \cdot \Delta M)$$
 where $\Delta M$ is the Tier 2 score, $V_{\text{net}}$ is the network's unbounded output (which also
 receives $\Delta M$ as an input), and $k$ is a learned scalar for how much to trust material,
 initialized to 0.326. With no network, $V = \tanh(0.326 \cdot \Delta M)$; this is the untrained
-engine in the result above.
+engine in the result above. The baseline ("vanilla") runs with Tiers 1 and 2 off: no exact
+search, and the network receives $\Delta M = 0$.
 
 Moves are selected with AlphaZero's rule (PUCT, a variant of the upper confidence bound for trees),
 with one change:
@@ -113,12 +129,16 @@ whichever the move generator lists first. With $\max(N, 1)$ the bonus is proport
 network's prior $P(s,a)$ from the first visit, so the network's top choice is tried first. For
 $N \geq 1$ the two rules are identical.
 
+After each move the subtree under the move played is kept for the next search. Its visits count
+toward the next move's budget, so "200 simulations per move" means the root reaches 200 visits,
+not that 200 new simulations run.
+
 ## How the components fit together
 
 | Component | Language | Role |
 |---|---|---|
 | Search engine (`src/`) | Rust | Board representation, move generation, the three tiers, MCTS, self-play and evaluation binaries |
-| Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle), CUDA | Runs the network on CPU or GPU, called from batching threads that collect requests from all search threads |
+| Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle), cuDNN, CUDA | Runs the network on CPU or GPU, called from batching threads that collect requests from all search threads |
 | Training (`python/`) | Python, PyTorch | Defines the network, trains it on self-play data, and runs the whole loop (`orchestrate.py`) |
 | GPU search (`cuda/`) | CUDA C++ | An alternative in which the entire search runs on the GPU (see below) |
 
@@ -130,109 +150,118 @@ reference outputs, from a small network with every weight randomized, checks tha
 implementations agree to within 1e-4.
 
 The search runs in Rust because a Tier 1 search visits about 1,000 positions per call, which
-needs bit-level board operations with no interpreter overhead. Network calls from all games
-are collected into batches, because a GPU call on 16 positions takes 1.08 ms, compared with 0.82 ms
-for a single position.
+needs bit-level board operations with no interpreter overhead. Each game runs on its own search
+thread (1,920 by default), and their network requests are collected into batches: in f16 a call on 128 positions takes 13 µs per
+position, compared with 29 µs per position for a batch of 32.
 
-### Inference with candle instead of LibTorch
+**Why candle instead of LibTorch.** The engine first ran the network through LibTorch, PyTorch's C++
+library, via the `tch` bindings. Candle, a machine learning library written in Rust, removed that
+dependency and its run-time CUDA library setup, lets the network tests run in continuous integration
+on CPU, and allows custom CUDA kernels and cuDNN calls next to the network code. With batch
+normalization folded into the convolutions at load time and the cuDNN algorithm fixed per batch
+size, a batch of 128 took 4.40 ms in candle and 7.19 ms in LibTorch (f32, before any of the changes
+below).
 
-The engine originally ran the network through LibTorch, PyTorch's C++ library, using the `tch`
-Rust bindings. It now uses candle, a machine learning library written in Rust, which removed the
-LibTorch dependency and the work needed to make LibTorch find its CUDA libraries at run time; the
-network tests now run in continuous integration on CPU. On the GPU, convolutions go through cuDNN,
-each batch normalization is folded into the preceding convolution when the model loads, and the
-cuDNN algorithm is fixed by batch size rather than searched for on every call.
-
-Time for one batched network call on an RTX 5060 Ti, 6×128 model, identical positions for both
-backends, before the fused kernels described below (median of 200–500 calls; interquartile ranges
-are within 2% of the median):
-
-| Batch size | LibTorch | candle | Speedup |
-|---|---|---|---|
-| 1 | 0.97 ms | 0.95 ms | 1.02× |
-| 16 | 1.51 ms | 1.38 ms | 1.09× |
-| 128 | 7.19 ms | 4.40 ms | 1.63× |
-| 512 | 31.3 ms | 17.4 ms | 1.80× |
-| 2048 | 140 ms | 92.6 ms | 1.51× |
-
-Candle's own GPU kernels agree with plain 32-bit floating-point arithmetic to within 5e-6. With
-cuDNN, and with LibTorch, the value logit differs by up to 3e-3 and 4e-3, consistent with cuDNN
-computing 32-bit convolutions in the lower-precision TF32 format. On 512 positions all three agree
-on the top move.
-
-**Half precision.** `KF_PRECISION=f16` (or `bf16`) runs the network in 16-bit floating point on
-the GPU's tensor cores. Candle's own half-precision convolution rebuilt its cuDNN setup on every call
-and accumulated in 16 bits, which cuDNN serves with slow kernels; a small cuDNN wrapper
-(`src/nn/cudnn_conv.rs`) instead keeps the setup for each batch size and accumulates in 32 bits. On the
-generation-34 model, f16 changes move priors by at most 0.004 and the value logit by at most 0.023,
-and picks the top move of f32 on 64 of 64 test positions. Time per network call (`nn_bench`):
+**Precision.** `KF_PRECISION=f16` (or `bf16`) runs the network in 16-bit floating point on the
+GPU's tensor cores, accumulating in 32 bits. On the generation-34 model, f16 changes move priors by
+at most 0.004 and the value logit by at most 0.023, and picks the top move of f32 on 64 of 64 test
+positions. Time per call through `predict_batch` (`nn_bench`, median of 500 calls; interquartile
+ranges within 1.5% of the median):
 
 | Batch size | f32 | f16 |
 |---|---|---|
-| 32 | 1.72 ms | 0.85 ms |
-| 64 | 2.28 ms | 1.29 ms |
-| 128 | 3.08 ms | 1.99 ms |
+| 32 | 1.74 ms | 0.93 ms |
+| 64 | 2.30 ms | 1.07 ms |
+| 128 | 3.25 ms | 1.72 ms |
 
-### Self-play throughput
+## Self-play throughput
 
-Self-play speed decides how much training data each hour of compute buys. It was measured in
-standard chess with the classical tiers off and a randomly initialized network, so that every run
-does identical work per move and only speed differs. All runs use 200 simulations per move, f16, an
-RTX 5060 Ti and a 16-core Ryzen 9 7950X, with one game per search thread.
+Self-play speed decides how much training data each hour of compute buys. It is measured in
+standard chess with a randomly initialized network and the classical tiers off, so that every run
+does the same work per move and only speed differs. All runs use 200 simulations per move, an RTX
+5060 Ti and a 16-core Ryzen 9 7950X, with one game per search thread.
 
-The fastest configuration measured makes **453 moves per second** (five runs, 450.6–454.1): four
-batching threads, each with its own copy of the network on its own CUDA stream, serve 1,920 search
-threads with a batch cap of 128 (built with `--features cudnn`). These are the defaults of
-`self_play` and `orchestrate.py`, apart from f16, which is opt-in:
+The fastest setup makes **730 moves per second** (729.9 and 730.5 in two runs): f16, CUDA graphs on,
+four batching threads serving 1,920 search threads, batch cap 128, built with `--features cudnn`.
+Apart from f16 and CUDA graphs, which are opt-in, these are the defaults of `self_play` and
+`orchestrate.py`:
 
 ```bash
-KF_PRECISION=f16 ./target/release/self_play 1920 200 out/ model.pt false false false none
+KF_PRECISION=f16 KF_CUDA_GRAPHS=1 ./target/release/self_play 1920 200 out/ model.pt false false false none
 ```
 
-How each setting contributes (two runs each unless noted):
+### From 65 to 730 moves per second
 
-| Configuration | Batching threads | Search threads | Moves per second |
+Each row is its own before-and-after comparison, at the setting where it was measured, so the
+gains do not multiply exactly. Values are moves per second for each run.
+
+| Change | Setting | Before | After |
 |---|---|---|---|
-| Full policy read back, batches launched one after another | 1 | 480 | 249.5, 236.7, 249.4 |
-| Priors gathered on the GPU for legal moves only | 1 | 480 | 310.0, 310.2 |
-| Also collecting the next batch while the GPU runs the current one | 1 | 480 | 298.0, 298.0 |
-| As above | 2 | 480 | 376.2, 375.5 |
-| As above | 2 | 960 | 422.6, 427.0 |
-| As above | 3 | 1,440 | 448.8 (one run) |
-| As above | 4 | 1,920 | 453.1 mean of five, 450.6–454.1 |
-| Four batching threads, next batch not collected early | 4 | 1,920 | 456.9, 456.9 |
+| LibTorch, the starting point | not recorded | about 65 | |
+| **Candle with cuDNN** (described above) | one network call, batch 128 | 7.19 ms | 4.40 ms |
+| **Fused kernels** for bias, ReLU and squeeze-and-excitation | 60 threads | 67.6 | 80.2 |
+| **Priors for legal moves only**, gathered on the GPU | 1 batching thread, 480 search threads | 249.5, 236.7, 249.4 | 310.0, 310.2 |
+| **f16 on tensor cores** instead of f32 | 1 batching thread, 480 search threads | 189.0 | 298.0 |
+| **mimalloc** instead of glibc's allocator | f32, 1 batching thread, 480 search threads | 115.9, 120.3 | 159.4, 159.7 |
+| **Four batching threads** and 1,920 search threads, from one and 480 | f16 | 298.0 | 453.1 (mean of five) |
+| **One cuDNN call for convolution, bias and ReLU** | 4 batching threads, 1,920 search threads, cap 128 | 437.1 | 442.1 |
+| **Channels-last activations** throughout | as above | 442.6 | 474.0 |
+| **CUDA graphs**: each batch replays a recorded forward pass | as above | 473.9, 473.6 | 534.0, 534.6 |
+| **Two-byte moves** | as above, graphs on | 538.2, 536.2 | 561.3, 558.8 |
+| **Reused subtree counts toward the budget** (5.5% fewer network evaluations per move, so not the same work) | as above | 561.3, 558.8 | 614.3, 617.4 |
+| **No root quiescence search in vanilla self-play** | as above | 617.1, 617.3 | 729.9, 730.5 |
 
-- **Legal-move priors (adopted, +26%).** Gathering just the legal moves' policy logits on the GPU
-  cuts the copy back to the CPU from 0.36 ms to 0.04 ms per batch.
-- **Collecting the next batch during GPU work (on by default, no measurable gain).** It costs 4%
-  with one batching thread and changes throughput by +0.9% with four; `KF_PIPELINE=0` turns it off.
-- **Several batching threads (adopted, +52% from one to four).** A batch of about 120 positions
-  launches only 64 thread blocks in the main convolution kernel, too few to fill the GPU. With four
-  streams, kernels from different batches run concurrently (1.42 on average while the GPU is busy),
-  and the GPU is busy 84% of the time instead of 70%. Larger batches from a single thread gain less:
-  326 moves per second at cap 256 with 960 threads, and 334 and 329 at cap 512 with 1,920.
-- **mimalloc as the memory allocator (adopted).** With 480 search threads, glibc's allocator spent
-  most of its time on shared locks: in f32 it gave 115.9 and 120.3 moves per second, compared with
-  159.4 and 159.7 for mimalloc, which keeps a separate heap per thread.
-- **Fused kernels for bias, ReLU and squeeze-and-excitation (adopted).** Candle's broadcast kernels
-  for these took about 40% of GPU time, 18–30 µs each on tensors that need about 2 µs. Three custom
-  CUDA kernels, compiled when the model loads, do each in one pass and match the unfused operations
-  to 1e-5; at 60 threads they raised self-play from 67.6 to 80.2 moves per second.
-- **f32 instead of f16:** 189.0 moves per second with one batching thread and 480 search threads,
-  0.63× f16.
+- **The 65 moves per second was not recorded** in this repository, and its settings (game, threads,
+  tiers) are not confirmed to match the later rows.
+- **Candle and fused kernels.** Candle's generic broadcast kernels for bias, ReLU and
+  squeeze-and-excitation took about 40% of GPU time, 18–30 µs each on tensors that need about 2 µs.
+  Three custom CUDA kernels, compiled when the model loads, do each in one pass and match the unfused
+  operations to 1e-5.
+- **Legal-move priors.** The policy head scores all 4,672 possible moves; copying only the legal
+  moves' logits back cuts the transfer from 0.36 ms to 0.04 ms per batch.
+- **f16.** Candle's own half-precision convolution rebuilt its cuDNN setup on every call and
+  accumulated in 16 bits, which cuDNN serves with slow kernels; a small wrapper
+  (`src/nn/cudnn_conv.rs`) keeps the setup for each batch size and accumulates in 32 bits.
+- **mimalloc.** With hundreds of search threads, glibc's allocator spent most of its time on shared
+  locks; mimalloc keeps a separate heap per thread.
+- **Several batching threads.** A batch of about 120 positions launches too few thread blocks to
+  fill the GPU. Each batching thread has its own copy of the network on its own CUDA stream, so
+  kernels from different batches overlap. With CUDA graphs on, 2 batching threads give 457 and 3
+  give 520, compared with 534 for 4; 6 threads and 2,880 search threads are no faster.
+- **Channels-last and fused convolution.** cuDNN's tensor-core kernels work in channels-last
+  (NHWC) layout, so with the network in channels-first layout cuDNN converted every convolution's
+  input and output, 15% of kernel time. Fusing bias and ReLU into the convolution alone gained
+  little because it added layout conversions; keeping activations channels-last removed them.
+- **CUDA graphs.** An eager forward pass launches about 120 kernels and makes about 160 GPU
+  allocations, each launch taking ~9 µs in the driver with four batching threads. A recorded graph
+  replays the pass with one launch; batches are padded to a few sizes, each with its own graph. The
+  batching thread's launch time per batch fell from 2,715 µs to 438 µs.
+- **Two-byte moves.** A move was a 32-byte struct; packed into 16 bits (6 bits per square, 4 for
+  the promotion piece, as Stockfish does) it shrinks move lists and search nodes and cut search CPU
+  time 8.8%. With tiers on, the gain was +9.6%.
+- **Reuse budget.** Previously each move ran 200 new simulations on top of the reused subtree. This
+  changes the search's work per move by design; with tiers on, network evaluations per move fell 36%
+  and throughput rose from 68.9 to 109.7.
+- **Root quiescence search.** Self-play ran a full quiescence search at the root of every move to
+  record the network's material input, even in vanilla mode, where training sets that input to zero.
+  On positions from games between random networks it took more than half of the search threads' CPU
+  time, sometimes seconds for one position. Skipping it cut CPU time per move from 34.3 ms to
+  15.6 ms.
+- **Unexplained.** Rebuilding the move-generation change that preceded the fused convolution
+  measured 437 instead of 453 moves per second (two runs each); the cause was not found.
 
-**What limits it now.** Each batching thread spends about 2.6 ms of every batch launching kernels:
-a batch makes about 117 kernel launches and 160 GPU memory allocations and frees, and with four
-threads each launch call takes 9 µs. On the GPU, the convolutions take 53% of kernel time,
-converting tensors between the NCHW layout the network uses and the NHWC layout cuDNN's tensor-core
-kernels need takes 15%, squeeze-and-excitation 13%, and bias with activation 9%. Replaying the
-forward pass as a recorded CUDA graph, keeping tensors in NHWC throughout, and folding bias and
-activation into the convolution each address one of these.
+### What limits it now
 
-With the tiers on, self-play is limited by the CPU instead: 72.4 and 72.3 moves per second with 480
-search threads, 30 of the 32 logical CPUs busy and the GPU busy 19% of the time. Nearly all of that
-CPU time goes to the classical search's move handling: move generation 28%, making and undoing
-moves 30% (each move copies the board), and check detection 12%.
+With the network alone, the GPU is busy 92–93% of the time. Profiled just before the last change,
+each batch spent 1.4 ms waiting for the GPU and about 1 ms in other driver calls: creating and
+destroying an event (0.3 ms), four uploads from pageable host memory (0.29 ms), two downloads
+(0.2 ms) and six allocations (0.15 ms). Reserving room for 256 moves in each move list
+(`KF_RESERVE_MOVES=1`) gave a further +4.5% with two-byte moves, but has not been measured since the
+last two changes.
+
+With the tiers on, self-play is limited by the CPU: 109.0–110.3 moves per second with 480 search
+threads and one batching thread, the GPU busy 14% of the time. Nearly all of that CPU time goes to
+the classical search's move handling.
 
 Changes measured and not adopted:
 
@@ -241,16 +270,22 @@ Changes measured and not adopted:
   the Hill, K = 4 raised throughput 58% at 60 threads, but at equal simulations it plays weaker: in
   200 games of the generation-34 model playing itself, K = 4 scored 0.435, or −45 Elo [−92, +2]
   relative to K = 1 (`--leaves-per-game`). More threads raise batch sizes without this cost.
+- **Collecting the next batch while the GPU runs the current one** (on by default, `KF_PIPELINE=0`
+  turns it off): 298.0 compared with 310.0 with one batching thread, and 453.1 compared with 456.9
+  with four.
 - **Reserving CPU cores for the batching thread** (`KF_INFER_CPUS`). With the tiers off, the thread
   waited for a free core only 1–5% of the time, which bounds what reserving cores can gain.
 - **A shorter wait for a batch to fill.** An idle batching thread waits up to 500 µs for more
   requests; 0 µs gave 244 moves per second and 2,000 µs gave 287, compared with 298.
+- **Larger batches from one batching thread:** 326 moves per second at cap 256 with 960 threads,
+  and 334 and 329 at cap 512 with 1,920, compared with 453 for four threads at cap 128.
 
 ## Training
 
 Self-play, a replay buffer, training, and evaluation of each new generation in a loop:
 
-- **Optimizer:** Muon (learning rate 0.02), with adaptive epochs and early stopping.
+- **Optimizer:** Muon (learning rate 0.02), with adaptive epochs and early stopping. It has not yet
+  been compared with AdamW.
 - **Accepting a new generation:** a sequential probability ratio test (SPRT) over up to 800
   evaluation games, which usually stops after about 30 when the result is clear.
 - **Data:** after generation 1 the evaluation games also supply training data, so separate self-play
@@ -279,33 +314,51 @@ details and measurements: [BENCHMARKS.md](BENCHMARKS.md) and [CUDA_TC_ANALYSIS.m
 
 ## Current state and next steps
 
-The engine, training loop and both search back ends work, and the King of the Hill result above is
-complete apart from a confidence interval on the Elo gap between the final models.
+The engine, training loop and both search back ends work. Training in standard chess has not yet
+made progress: three successive candidate generations each scored 0.48–0.50 versus the model they
+would replace, were rejected by the acceptance test, and the run was stopped. In standard chess,
+positions with exact solutions are rarer and the classical search is expensive: with the
+generation-34 model and 60 threads, quiescence search takes 56% of search-thread time, waiting for
+the network 42%, and mate search 1%. Quiescence search itself runs at 1.27 million positions per
+second per thread, but averages 11,931 positions and 9.4 ms per call, mostly from a few positions
+with exposed kings where checks and their evasions multiply the tree. Capping it at 2,000 positions
+makes it 16× faster on 6,375 logged positions, but changes the score by at least one pawn in 11% of
+them.
 
-Training in standard chess has not yet made progress: three successive candidate generations were
-each rejected by the acceptance test, scoring 0.48–0.50 versus the model they would replace, and the
-run was stopped. In standard chess, positions with exact solutions are rarer, and the classical
-search is expensive: with the generation-34 model and 60 threads, quiescence search takes 56% of
-search-thread time, waiting for the network 42%, and mate search 1%. Most of that quiescence time
-comes from a few positions with exposed kings, where checks and their evasions multiply the tree.
-Capping a quiescence search at 2,000 positions makes it 16× faster on 6,375 logged positions, but
-changes the score by at least one pawn in 11% of them.
+Next, in order:
 
-Open directions:
+1. **Prune quiescence search**: discard captures that lose material by static exchange evaluation,
+   skip captures that cannot raise the score enough to matter (delta pruning), search checks only on
+   its first ply, cache results in a transposition table, and cap its size. The aim is a tree at
+   least 10× smaller with fewer than 2% of positions changing by a pawn or more.
+2. **Accept unless clearly worse**: replace the SPRT acceptance test with one that rejects only clear
+   regressions, and play a fixed number of games per generation. AlphaZero kept a single,
+   continually updated network with no acceptance step
+   ([Silver et al., 2017](https://arxiv.org/abs/1712.01815)).
+3. **Tiers versus network alone in standard chess at equal wall-clock time**: two runs from scratch
+   on one rating ladder, with a bootstrap interval on the Elo difference, including the untrained
+   tiered engine to separate a head start from better learning.
+4. **Full searches on only some moves** (playout cap randomization,
+   [Wu, 2019](https://arxiv.org/abs/1902.10565)): train only on moves that got a full search, and play
+   the rest with a cheap one. This needs a training comparison, not just a throughput one.
+5. **Defaults**: make f16 and CUDA graphs the default, and remove the remaining per-batch driver
+   calls (reuse one event, pinned host buffers, the gather inside the graph).
 
-- **Quiescence search in chess:** bound its cost without losing its accuracy, for example with a
-  node cap combined with better move ordering in check, and then measure whether it helps training
-  in standard chess at all.
-- **Self-play speed:** with the tiers on, make quiescence search cheaper per position (moves made in
-  place instead of copying the board, and generating only the moves it searches); with the tiers
-  off, record the forward pass as a CUDA graph and keep tensors in NHWC layout.
-- **The Elo gap:** compute a bootstrap interval on the Elo difference between the final models.
-- **Networks built around piece moves:** layers that pass information between squares a knight or
-  queen move apart, rather than only between neighbours as a 3×3 convolution does. Each new
-  architecture must be written in both PyTorch and Rust; the reference-output tests make that a
-  repeatable check.
-- **Other domains:** this tiered search for problems with classically solvable subproblems, such
-  as theorem proving.
+Later directions:
+
+- **A learned evaluation inside quiescence search**, a small network updated incrementally as moves
+  are made, as in Stockfish's NNUE, trained on this project's own self-play data.
+- **Shallow alpha-beta search (depth 2–4) at leaves**, judged only at equal wall-clock time.
+- **Exact search on spare CPU cores** in network-only mode: run mate and quiescence search on newly
+  expanded nodes in parallel with network evaluation, and correct the tree when an exact result
+  arrives.
+- **Training settings**: Muon versus AdamW, the amount of training per new sample, and eventually
+  Bayesian optimization of the simulation schedule, architecture and training ratio for strength
+  after a fixed training budget.
+- **Networks built around piece moves**: layers that pass information between squares a knight or
+  queen move apart, rather than only between neighbours as a 3×3 convolution does.
+- **Other domains**: this tiered search for problems with classically solvable subproblems, such as
+  theorem proving.
 
 ## Building and running
 
@@ -316,15 +369,16 @@ pip install torch numpy python-chess
 cargo build --release                      # search without the network
 cargo build --release --features neural    # with the network, on CPU (candle)
 cargo build --release --features cuda      # with the network on the GPU (needs nvcc >= 12.8 for RTX 50-series)
-cargo build --release --features cudnn     # as cuda, with cuDNN convolutions (fastest; libcudnn on LIBRARY_PATH)
+cargo build --release --features cudnn     # as cuda, with cuDNN convolutions (fastest; libcudnn.so on LIBRARY_PATH)
 ./target/release/caissawary                # the engine, speaking the Universal Chess Interface (UCI)
 
 # Inference settings, read from the environment by self_play and evaluate_models
 KF_PRECISION=f16        # f32 (default), f16 or bf16 network on the GPU
+KF_CUDA_GRAPHS=1        # replay each half-precision batch as a recorded CUDA graph (needs cudnn)
 KF_PIPELINE=0           # launch a batch only after the previous one returns
 KF_FULL_POLICY=1        # read back the full policy and compute legal-move priors on the CPU
 KF_INFER_CPUS=0,16      # pin the batching thread to these CPUs, and search threads to the others
-KF_RESERVE_MOVES=1      # start each move list with room for 256 moves (5.8% slower in self-play)
+KF_RESERVE_MOVES=1      # start each move list with room for 256 moves
 # self_play flags: --batch-size N (cap, default 128), --inference-workers N (batching threads,
 # default 4), --threads N (default: one per game)
 
@@ -339,6 +393,7 @@ about 50 s. See [TESTING.md](TESTING.md).
 ```bash
 cargo test                                        # fast Rust tests (~50 s)
 cargo test --features neural                      # plus the network, compared with PyTorch reference outputs
+cargo test --features cudnn --test unit_tests     # plus cuDNN, channels-last and CUDA graph tests
 cargo test --features slow-tests                  # full suite, including move-generation counts (~200 s)
 cd python && python -m pytest test_*.py -v        # training pipeline
 cuda/build/test_mcts_kernel                       # GPU search
@@ -349,7 +404,6 @@ cuda/build/test_nn_ops
 cuda/build/bench_throughput 100 200 36 [p2]       # end-to-end self-play throughput
 cuda/build/bench_forward_b2 1000                  # batched convolution microbenchmark
 cargo test --release --features cudnn --test nn_bench -- --ignored --nocapture   # network latency by batch size
-cargo test --release --features cudnn --test cuda_graph_spike -- --ignored --nocapture   # CUDA graph replay
 ```
 
 <details>
