@@ -35,6 +35,7 @@ mod nn_counter_tests;
 mod node_tests;
 mod pesto_qsearch_tests;
 mod position_classifier_tests;
+mod qsearch_inputs_tests;
 mod quiescence_tests;
 mod search_logger_tests;
 mod see_tests;

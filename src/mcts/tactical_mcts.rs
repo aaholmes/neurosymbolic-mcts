@@ -67,6 +67,51 @@ impl QSearchVariant {
     }
 }
 
+/// The network's two quiescence inputs for a position: the quiescence score in
+/// pawns and whether that search finished, with the search's size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QsearchInputs {
+    pub score: f32,
+    pub completed: bool,
+    pub nodes: u32,
+    pub depth: u8,
+}
+
+/// The quiescence inputs the search gives the network for `board`, and that
+/// training data records for it. With the material score off no search runs:
+/// the network gets a score of 0 and a finished flag.
+pub fn qsearch_inputs(
+    board: &Board,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+    variant: QSearchVariant,
+    enable_material: bool,
+) -> QsearchInputs {
+    if !enable_material {
+        return QsearchInputs {
+            score: 0.0,
+            completed: true,
+            nodes: 0,
+            depth: 0,
+        };
+    }
+    let mut stack = BoardStack::with_board(board.clone());
+    let (score, completed, nodes, depth) = match variant {
+        QSearchVariant::PrincipalExchange => {
+            let (s, n) = forced_principal_exchange(&mut stack, move_gen, pesto);
+            (s, true, n, 0) // a single line of captures always finishes
+        }
+        QSearchVariant::Cap1 => forced_cap1_pesto_balance(&mut stack, move_gen, pesto),
+        QSearchVariant::Extended => forced_ext_pesto_balance_counted(&mut stack, move_gen, pesto),
+    };
+    QsearchInputs {
+        score,
+        completed,
+        nodes,
+        depth,
+    }
+}
+
 /// Configuration for tactical-first MCTS search
 #[derive(Debug, Clone)]
 pub struct TacticalMctsConfig {
@@ -846,34 +891,25 @@ fn begin_leaf_evaluation(
         let v_logit: f64 = f64::NEG_INFINITY; // sentinel: no NN result
 
         // 1. Run Q-search FIRST so completion flag is available for NN inference
-        let (q_result, qsearch_completed) = if config.enable_material_value {
-            let qsearch_start = Instant::now();
-            let mut board_stack = BoardStack::with_board(node_ref.state.clone());
-            let (score, completed, nodes, depth_used) = match config.qsearch_variant {
-                QSearchVariant::PrincipalExchange => {
-                    let (s, n) =
-                        forced_principal_exchange(&mut board_stack, move_gen, &config.pesto);
-                    (s, true, n, 0u8) // PE always completes
-                }
-                QSearchVariant::Cap1 => {
-                    forced_cap1_pesto_balance(&mut board_stack, move_gen, &config.pesto)
-                }
-                QSearchVariant::Extended => {
-                    forced_ext_pesto_balance_counted(&mut board_stack, move_gen, &config.pesto)
-                }
-            };
+        let qsearch_start = Instant::now();
+        let q = qsearch_inputs(
+            &node_ref.state,
+            move_gen,
+            &config.pesto,
+            config.qsearch_variant,
+            config.enable_material_value,
+        );
+        if config.enable_material_value {
             stats.qsearch_timing.record(qsearch_start.elapsed());
-            stats.qsearch_nodes.record(nodes as f64);
-            stats.qsearch_depth.record(depth_used as f64);
-            if completed {
+            stats.qsearch_nodes.record(q.nodes as f64);
+            stats.qsearch_depth.record(q.depth as f64);
+            if q.completed {
                 stats.qsearch_completed_count += 1;
             } else {
                 stats.qsearch_hit_limit_count += 1;
             }
-            (score, completed)
-        } else {
-            (0.0f32, true)
-        };
+        }
+        let (q_result, qsearch_completed) = (q.score, q.completed);
 
         // 2. Batched Inference — NN now returns raw v_logit (unbounded)
         if config.enable_tier3_neural {

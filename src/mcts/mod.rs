@@ -26,9 +26,10 @@ pub use self::neural_mcts::neural_mcts_search;
 pub use self::node::{select_leaf_for_expansion, MctsNode, MoveCategory, NodeOrigin};
 pub use self::search_logger::{GateReason, SearchLogger, SelectionReason, Verbosity};
 pub use self::tactical_mcts::{
-    apply_dirichlet_noise, reuse_subtree, tactical_mcts_search, tactical_mcts_search_for_training,
-    tactical_mcts_search_for_training_with_reuse, tactical_mcts_search_with_tt, MctsTrainingResult,
-    QSearchVariant, StatsAccumulator, TacticalMctsConfig, TacticalMctsStats, TimingAccumulator,
+    apply_dirichlet_noise, qsearch_inputs, reuse_subtree, tactical_mcts_search,
+    tactical_mcts_search_for_training, tactical_mcts_search_for_training_with_reuse,
+    tactical_mcts_search_with_tt, MctsTrainingResult, QSearchVariant, QsearchInputs,
+    StatsAccumulator, TacticalMctsConfig, TacticalMctsStats, TimingAccumulator,
 };
 
 /// Exploration constant for UCB (sqrt(2))

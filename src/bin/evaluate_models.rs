@@ -9,13 +9,11 @@ use kingfisher::boardstack::BoardStack;
 use kingfisher::eval::PestoEval;
 use kingfisher::mcts::sprt::{SprtConfig, SprtResult, SprtState};
 use kingfisher::mcts::{
-    tactical_mcts_search_with_tt, InferenceServer, MctsNode, QSearchVariant, TacticalMctsConfig,
+    qsearch_inputs, tactical_mcts_search_with_tt, InferenceServer, MctsNode, QSearchVariant,
+    TacticalMctsConfig,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
-use kingfisher::search::quiescence::{
-    forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange,
-};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
 use kingfisher::transposition::TranspositionTable;
@@ -339,23 +337,20 @@ pub fn play_evaluation_game_with_servers(
                     }
                 }
 
-                let mut temp_stack = BoardStack::with_board(board.clone());
-                let pesto = PestoEval::new();
-                let (q_result, qsearch_completed) = match qsearch_variant {
-                    QSearchVariant::PrincipalExchange => {
-                        let (s, _nodes) =
-                            forced_principal_exchange(&mut temp_stack, &move_gen, &pesto);
-                        (s, true)
-                    }
-                    QSearchVariant::Cap1 => {
-                        let (s, completed, _nodes, _depth) =
-                            forced_cap1_pesto_balance(&mut temp_stack, &move_gen, &pesto);
-                        (s, completed)
-                    }
-                    QSearchVariant::Extended => {
-                        forced_ext_pesto_balance(&mut temp_stack, &move_gen, &pesto)
-                    }
+                // Each side's samples carry the inputs its own search gives the network.
+                let enable_material = if candidate_turn {
+                    candidate_enable_material
+                } else {
+                    current_enable_material
                 };
+                let q = qsearch_inputs(
+                    &board,
+                    &move_gen,
+                    &PestoEval::new(),
+                    qsearch_variant,
+                    enable_material,
+                );
+                let (q_result, qsearch_completed) = (q.score, q.completed);
                 let material_scalar = q_result;
 
                 let sample = TrainingSample {

@@ -5,15 +5,12 @@
 
 use kingfisher::boardstack::BoardStack;
 use kingfisher::mcts::{
-    reuse_subtree, tactical_mcts_search_for_training_with_reuse, InferenceServer, QSearchVariant,
-    TacticalMctsConfig,
+    qsearch_inputs, reuse_subtree, tactical_mcts_search_for_training_with_reuse, InferenceServer,
+    QSearchVariant, TacticalMctsConfig,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::search::mate_search;
-use kingfisher::search::quiescence::{
-    forced_cap1_pesto_balance, forced_ext_pesto_balance, forced_principal_exchange,
-};
 use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{save_binary_data, TrainingSample};
@@ -350,22 +347,14 @@ fn play_game(
             }
         }
 
-        let mut temp_stack = BoardStack::with_board(board.clone());
-        let (q_result, qsearch_completed) = match qsearch_variant {
-            QSearchVariant::PrincipalExchange => {
-                let (s, _nodes) =
-                    forced_principal_exchange(&mut temp_stack, &move_gen, &config.pesto);
-                (s, true)
-            }
-            QSearchVariant::Cap1 => {
-                let (s, completed, _nodes, _depth) =
-                    forced_cap1_pesto_balance(&mut temp_stack, &move_gen, &config.pesto);
-                (s, completed)
-            }
-            QSearchVariant::Extended => {
-                forced_ext_pesto_balance(&mut temp_stack, &move_gen, &config.pesto)
-            }
-        };
+        let q = qsearch_inputs(
+            &board,
+            &move_gen,
+            &config.pesto,
+            qsearch_variant,
+            enable_material,
+        );
+        let (q_result, qsearch_completed) = (q.score, q.completed);
         let material_scalar = q_result;
 
         samples.push(TrainingSample {
