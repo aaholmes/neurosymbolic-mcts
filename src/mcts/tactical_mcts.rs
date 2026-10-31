@@ -1191,6 +1191,9 @@ pub fn tactical_mcts_search_for_training(
 }
 
 /// Search for training with optional tree reuse and shared transposition table.
+///
+/// The root ends with about `config.max_iterations` visits: a reused root keeps
+/// its visits and gets only enough new simulations to reach the budget.
 pub fn tactical_mcts_search_for_training_with_reuse(
     board: Board,
     move_gen: &MoveGen,
@@ -1230,6 +1233,13 @@ pub fn tactical_mcts_search_for_training_with_reuse(
             root_node,
         };
     }
+
+    // `max_iterations` is the visit count the root should reach: a reused
+    // subtree's visits count toward it, so only the rest are new simulations.
+    let mut config = config;
+    config.max_iterations = config
+        .max_iterations
+        .saturating_sub(root_node.borrow().visits);
 
     let logger = config.logger.as_ref();
     if root_node.borrow().children.is_empty() {

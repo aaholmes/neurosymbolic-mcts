@@ -145,3 +145,89 @@ fn test_reuse_subtree_preserves_grandchildren() {
         "Reused node should still have children (grandchildren of original root)"
     );
 }
+
+// === The simulation budget counts the visits a reused subtree already has ===
+
+use kingfisher::mcts::tactical_mcts::{
+    tactical_mcts_search_for_training_with_reuse, MctsTrainingResult,
+};
+use kingfisher::transposition::TranspositionTable;
+
+fn training_config(iterations: u32, leaves_per_iteration: u32) -> TacticalMctsConfig {
+    TacticalMctsConfig {
+        max_iterations: iterations,
+        time_limit: std::time::Duration::from_secs(30),
+        // No early stop on forced results, so the budget alone ends the search.
+        enable_tier1_gate: false,
+        leaves_per_iteration,
+        ..Default::default()
+    }
+}
+
+fn training_search(
+    board: Board,
+    config: TacticalMctsConfig,
+    reused: Option<std::rc::Rc<std::cell::RefCell<kingfisher::mcts::node::MctsNode>>>,
+) -> MctsTrainingResult {
+    let move_gen = MoveGen::new();
+    let mut tt = TranspositionTable::new();
+    tactical_mcts_search_for_training_with_reuse(board, &move_gen, config, reused, &mut tt)
+}
+
+/// The most visited child of a fresh 200-simulation search from the start, the
+/// position after it, and its visit count.
+fn reused_child(
+    leaves_per_iteration: u32,
+) -> (
+    std::rc::Rc<std::cell::RefCell<kingfisher::mcts::node::MctsNode>>,
+    Board,
+    u32,
+) {
+    let board = Board::new();
+    let first = training_search(
+        board.clone(),
+        training_config(200, leaves_per_iteration),
+        None,
+    );
+    let best = first.best_move.expect("a move from the start position");
+    let child = reuse_subtree(first.root_node, best).expect("the played child");
+    let visits = child.borrow().visits;
+    assert!(
+        visits > 1 && visits < 200,
+        "the played child should hold part of the search, has {visits}"
+    );
+    (child, board.apply_move_to_board(best), visits)
+}
+
+#[test]
+fn a_fresh_search_runs_the_whole_budget() {
+    let result = training_search(Board::new(), training_config(200, 1), None);
+    assert_eq!(result.stats.iterations, 200);
+}
+
+#[test]
+fn a_reused_subtree_is_topped_up_to_the_budget() {
+    for leaves in [1, 8] {
+        let (child, board, visits) = reused_child(leaves);
+        let result = training_search(board, training_config(200, leaves), Some(child));
+        assert_eq!(
+            result.stats.iterations + visits,
+            200,
+            "{leaves} leaves per iteration: {visits} reused visits"
+        );
+        assert!(result.best_move.is_some());
+    }
+}
+
+#[test]
+fn a_reused_subtree_at_or_over_the_budget_runs_no_new_simulations() {
+    let (child, board, visits) = reused_child(1);
+    let result = training_search(board, training_config(visits, 1), Some(child));
+    assert_eq!(result.stats.iterations, 0);
+    assert!(
+        result.best_move.is_some(),
+        "the reused tree still chooses a move"
+    );
+    let policy_visits: u32 = result.root_policy.iter().map(|(_, v)| *v).sum();
+    assert!(policy_visits > 0, "the policy comes from the reused visits");
+}
