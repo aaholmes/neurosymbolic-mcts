@@ -103,7 +103,7 @@ static int run_eval_cmd(int argc, char** argv) {
         d_a = load_nn_weights(argv[2]);
         if (!d_a) return 1;
         d_b = load_nn_weights(argv[3]);
-        if (!d_b) { free_nn_weights((OracleNetWeights*)d_a); return 1; }
+        if (!d_b) { free_nn_weights((SeresNetWeights*)d_a); return 1; }
     } else {
         d_a = load_transformer_weights(argv[2]);
         if (!d_a) return 1;
@@ -125,8 +125,8 @@ static int run_eval_cmd(int argc, char** argv) {
     printf("Eval completed in %.1f seconds\n", elapsed);
 
     if (config.use_resnet) {
-        free_nn_weights((OracleNetWeights*)d_a);
-        free_nn_weights((OracleNetWeights*)d_b);
+        free_nn_weights((SeresNetWeights*)d_a);
+        free_nn_weights((SeresNetWeights*)d_b);
     } else {
         free_transformer_weights((TransformerWeights*)d_a);
         free_transformer_weights((TransformerWeights*)d_b);

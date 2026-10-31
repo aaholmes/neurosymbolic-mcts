@@ -43,7 +43,7 @@ mod candle_impl {
     use crate::board::Board;
     use crate::mcts::tactical_mcts::{StatsAccumulator, TimingAccumulator};
     use crate::move_types::Move;
-    use crate::nn::oracle_net::OracleNet;
+    use crate::nn::seres_net::SeresNet;
     use crate::nn::weights::load_state_dict;
     use crate::nn::{PolicyValueNet, Precision};
     use crate::tensor::{board_to_planes, move_to_index, policy_to_move_priors};
@@ -119,7 +119,7 @@ mod candle_impl {
     }
 
     pub struct NeuralNetPolicy {
-        model: Option<OracleNet>,
+        model: Option<SeresNet>,
         device: Device,
         pub transfer_to_gpu_timing: TimingAccumulator,
         pub forward_timing: TimingAccumulator,
@@ -192,8 +192,8 @@ mod candle_impl {
         ) -> Result<(), String> {
             let state_dict = load_state_dict(Path::new(path), &self.device)?;
             let model =
-                OracleNet::from_state_dict_with_precision(state_dict, &self.device, precision)
-                    .map_err(|e| format!("Failed to build OracleNet from {}: {}", path, e))?;
+                SeresNet::from_state_dict_with_precision(state_dict, &self.device, precision)
+                    .map_err(|e| format!("Failed to build SeresNet from {}: {}", path, e))?;
             let cfg = model.config();
             println!(
                 "✅ Neural network loaded ({} blocks x {} channels, {}) on {:?}",

@@ -12,7 +12,7 @@ Decompose MCTS evaluation into three tiers: **compute what you can exactly, orde
 
 **Tier 2 — Quiescence Search (classical tree search).** Every MCTS leaf evaluation runs `forced_ext_pesto_balance_counted()`: an extended PeSTO Q-search (depth 20) that resolves forced captures, checks, and forks — with null-move threat detection — not just captures. This produces deltaM, a tapered material+placement balance after the tactical dust settles. (A simpler material-only variant, `forced_material_balance()`, also exists.) A position may look equal (P=P) but after forced exchanges be +3. No neural network can easily replicate this because it requires a classical tree search over variable-depth exchange sequences. deltaM feeds directly into both the value function additive path (`k * deltaM`) and as an input feature to the value head's FC layer, giving the NN position-dependent control over material trust. Q-search runs before NN inference so the result is available as a model input. Additionally, captures are visited in MVV-LVA order on their first visit (PxQ before QxP), though this is a minor optimization.
 
-**Tier 3 — Neural Network (learned).** OracleNet provides policy (move probabilities) and V_logit (positional assessment). The NN only needs to learn what the Q-search can't compute: piece activity, king safety, pawn structure, and how much to trust material (k).
+**Tier 3 — Neural Network (learned).** SeresNet provides policy (move probabilities) and V_logit (positional assessment). The NN only needs to learn what the Q-search can't compute: piece activity, king safety, pawn structure, and how much to trust material (k).
 
 ## Value Function
 
@@ -28,7 +28,7 @@ V_final = tanh(V_logit + k * deltaM)
 
 The Q-search result is the foundation: it provides information that requires a classical tree search to compute (hanging pieces, exchange sequences, forced promotions). The NN adds a positional residual through V_logit; position-dependent modulation of material trust is learned through the value head FC, which receives deltaM as a direct input feature. The scalar k provides a global operating point for material trust. This factorization avoids the NN having to rediscover piece values and tactical exchange outcomes from scratch. The classical fallback (no NN) uses V_logit=0, k=0.326: pure material evaluation from the Q-search.
 
-## OracleNet
+## SeresNet
 
 SE-ResNet backbone (default: 6 blocks, 128 channels, ~2M params). 17x8x8 input in side-to-move perspective.
 

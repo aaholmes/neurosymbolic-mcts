@@ -405,7 +405,7 @@ bool get_best_child_board(BoardState* out_board, uint16_t* out_move) {
 // ============================================================
 
 // Set child priors from the policy log-probability vector.
-// Called by thread 0 of the warp after oracle_net_forward().
+// Called by thread 0 of the warp after seres_net_forward().
 __device__ void set_child_priors(int parent_idx, const float* log_policy, bool w_to_move) {
     MCTSNode* parent = &g_node_pool[parent_idx];
     int n = parent->num_children;
@@ -447,7 +447,7 @@ __device__ void set_child_priors(int parent_idx, const float* log_policy, bool w
 // all 32 threads cooperate on the NN forward pass.
 __global__ void mcts_kernel_nn(
     int max_simulations, bool enable_koth, float c_puct,
-    OracleNetWeights* weights, float* nn_scratch, int scratch_stride
+    SeresNetWeights* weights, float* nn_scratch, int scratch_stride
 ) {
     int warp_id = blockIdx.x;
     int lane = threadIdx.x & 31;
@@ -549,7 +549,7 @@ __global__ void mcts_kernel_nn(
 
             // Forward pass (all 32 threads)
             float nn_value, nn_k;
-            oracle_net_forward(&bs, q_result, weights, my_scratch,
+            seres_net_forward(&bs, q_result, weights, my_scratch,
                               policy_buf, &nn_value, &nn_k);
             __syncwarp();
 
@@ -598,7 +598,7 @@ GPUMctsResult gpu_mcts_search_nn(
     int simulations,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_nn_scratch,
     int num_warps
 ) {
@@ -675,7 +675,7 @@ GPUMctsResult gpu_mcts_search_nn(
 
 __global__ void mcts_kernel_nn_block(
     int max_simulations, bool enable_koth, float c_puct,
-    OracleNetWeights* weights, float* global_policy_bufs,
+    SeresNetWeights* weights, float* global_policy_bufs,
     const ConvWeightsHalf* half_w,
     const ConvWeightsShifted* shifted_w
 ) {
@@ -773,9 +773,9 @@ __global__ void mcts_kernel_nn_block(
         // === NN FORWARD PASS (all 256 threads) ===
         if (!evaluated) {
             float nn_value, nn_k;
-            oracle_net_forward_block(&sh_bs, sh_comm[4], weights,
+            seres_net_forward_block(&sh_bs, sh_comm[4], weights,
                                      smem, my_policy, &nn_value, &nn_k, half_w, shifted_w);
-            // oracle_net_forward_block ends with __syncthreads()
+            // seres_net_forward_block ends with __syncthreads()
 
             if (tid == 0) {
                 int node_idx   = (int)sh_comm[1];
@@ -817,7 +817,7 @@ GPUMctsResult gpu_mcts_search_nn_block(
     int simulations,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_policy_bufs,
     int num_blocks
 ) {
@@ -903,7 +903,7 @@ GPUMctsResult gpu_mcts_search_nn_block(
 // Each block runs 2 explorers per round:
 //   - Thread 0 sequentially does SELECT for both (so VL steers explorer 1)
 //   - EXPAND runs in parallel: warp 0 thread 0 for explorer 0, warp 1 for explorer 1
-//   - NN FORWARD: all 256 threads cooperate on oracle_net_forward_block_b2
+//   - NN FORWARD: all 256 threads cooperate on seres_net_forward_block_b2
 //   - BACKUP runs in parallel: warp 0 thread 0 backs up path 0, warp 1 path 1
 //
 // Policy buffer per block: 2 * NN_POLICY_SIZE floats (two slots, one per explorer).
@@ -911,7 +911,7 @@ GPUMctsResult gpu_mcts_search_nn_block(
 
 __global__ void mcts_kernel_nn_block_p2(
     int max_simulations, bool enable_koth, float c_puct,
-    OracleNetWeights* weights, float* global_policy_bufs,
+    SeresNetWeights* weights, float* global_policy_bufs,
     const ConvWeightsHalf* /*half_w*/,                // unused: b2 uses shifted only
     const ConvWeightsShifted* shifted_w
 ) {
@@ -1023,7 +1023,7 @@ __global__ void mcts_kernel_nn_block_p2(
         bool eval0 = (sh_comm[0 * 8 + 2] == 0.0f) && !sh_skip[0];
         bool eval1 = (sh_comm[1 * 8 + 2] == 0.0f) && !sh_skip[1];
         if (eval0 || eval1) {
-            oracle_net_forward_block_b2(&sh_bs[0], &sh_bs[1],
+            seres_net_forward_block_b2(&sh_bs[0], &sh_bs[1],
                                         sh_comm[0 * 8 + 4], sh_comm[1 * 8 + 4],
                                         weights, smem,
                                         my_policy_p2, v_out, k_out, shifted_w);
@@ -1092,7 +1092,7 @@ GPUMctsResult gpu_mcts_search_nn_block_p2(
     int simulations,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_policy_bufs,
     int num_blocks
 ) {
@@ -1188,7 +1188,7 @@ GPUMctsResult gpu_mcts_search_nn_block_p2(
 __global__ void mcts_kernel_eval(
     int max_simulations, int max_nodes_per_tree,
     bool enable_koth, float c_puct,
-    OracleNetWeights* weights, float* global_policy_bufs,
+    SeresNetWeights* weights, float* global_policy_bufs,
     int num_trees, int* d_node_counts,
     const ConvWeightsHalf* half_w,
     const ConvWeightsShifted* shifted_w
@@ -1375,7 +1375,7 @@ __global__ void mcts_kernel_eval(
         if (!evaluated) {
             if (weights != nullptr) {
                 float nn_value, nn_k;
-                oracle_net_forward_block(&sh_bs, sh_comm[4], weights,
+                seres_net_forward_block(&sh_bs, sh_comm[4], weights,
                                          smem, my_policy, &nn_value, &nn_k, half_w, shifted_w);
                 if (tid == 0) {
                     int node_idx_ = (int)sh_comm[1];
@@ -1427,13 +1427,13 @@ __global__ void mcts_kernel_eval(
 // v5: 2-explorer virtual-loss multi-tree eval kernel.
 // Per-tree state (g_eval_*[bid]) is shared between the two explorers.
 // Per-block static smem holds two SELECT contexts. NN forward is one
-// batched call via oracle_net_forward_block_b2.
+// batched call via seres_net_forward_block_b2.
 // ============================================================
 
 __global__ void mcts_kernel_eval_p2(
     int /*max_simulations*/, int max_nodes_per_tree,
     bool enable_koth, float c_puct,
-    OracleNetWeights* weights, float* global_policy_bufs,
+    SeresNetWeights* weights, float* global_policy_bufs,
     int num_trees, int* /*d_node_counts*/,
     const ConvWeightsHalf* /*half_w*/,
     const ConvWeightsShifted* shifted_w
@@ -1622,7 +1622,7 @@ __global__ void mcts_kernel_eval_p2(
         // === NN FORWARD or CLASSICAL EVAL ===
         if (eval0 || eval1) {
             if (weights != nullptr) {
-                oracle_net_forward_block_b2(&sh_bs[0], &sh_bs[1],
+                seres_net_forward_block_b2(&sh_bs[0], &sh_bs[1],
                                             sh_comm[0 * 8 + 4], sh_comm[1 * 8 + 4],
                                             weights, smem,
                                             my_policy_p2, v_out, k_out, shifted_w);
@@ -1752,7 +1752,7 @@ int gpu_mcts_eval_trees_budget(
     int max_nodes_per_tree,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_policy_bufs,
     TreeEvalResult* h_results,
     int* game_root_idxs,
@@ -1925,7 +1925,7 @@ int gpu_mcts_eval_trees_budget_p2(
     int max_nodes_per_tree,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_policy_bufs,
     TreeEvalResult* h_results,
     int* game_root_idxs,

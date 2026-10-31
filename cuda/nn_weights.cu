@@ -3,14 +3,14 @@
 #include <cstdlib>
 #include <cstring>
 
-OracleNetWeights* init_nn_weights_zeros() {
-    OracleNetWeights* d_weights = nullptr;
-    cudaError_t err = cudaMalloc(&d_weights, sizeof(OracleNetWeights));
+SeresNetWeights* init_nn_weights_zeros() {
+    SeresNetWeights* d_weights = nullptr;
+    cudaError_t err = cudaMalloc(&d_weights, sizeof(SeresNetWeights));
     if (err != cudaSuccess) {
         printf("Failed to allocate NN weights: %s\n", cudaGetErrorString(err));
         return nullptr;
     }
-    err = cudaMemset(d_weights, 0, sizeof(OracleNetWeights));
+    err = cudaMemset(d_weights, 0, sizeof(SeresNetWeights));
     if (err != cudaSuccess) {
         printf("Failed to zero NN weights: %s\n", cudaGetErrorString(err));
         cudaFree(d_weights);
@@ -21,7 +21,7 @@ OracleNetWeights* init_nn_weights_zeros() {
     // With zero weights: conv outputs are 0, BN normalizes to (-mean)/sqrt(var+eps) * gamma + beta.
     // With gamma=0, beta=0, mean=0, var=1: output = 0. Clean zeros throughout.
     // But we need var != 0 for the BN formula to not produce NaN.
-    OracleNetWeights h_weights;
+    SeresNetWeights h_weights;
     memset(&h_weights, 0, sizeof(h_weights));
 
     // Set all BN running_var to 1.0
@@ -39,11 +39,11 @@ OracleNetWeights* init_nn_weights_zeros() {
     }
     h_weights.v_bn.running_var[0] = 1.0f;
 
-    cudaMemcpy(d_weights, &h_weights, sizeof(OracleNetWeights), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, &h_weights, sizeof(SeresNetWeights), cudaMemcpyHostToDevice);
     return d_weights;
 }
 
-OracleNetWeights* load_nn_weights(const char* path) {
+SeresNetWeights* load_nn_weights(const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) {
         printf("Failed to open weights file: %s\n", path);
@@ -55,48 +55,48 @@ OracleNetWeights* load_nn_weights(const char* path) {
     long file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    if ((size_t)file_size != sizeof(OracleNetWeights)) {
+    if ((size_t)file_size != sizeof(SeresNetWeights)) {
         printf("Weight file size mismatch: expected %zu bytes, got %ld\n",
-               sizeof(OracleNetWeights), file_size);
+               sizeof(SeresNetWeights), file_size);
         fclose(f);
         return nullptr;
     }
 
     // Read into host buffer
-    OracleNetWeights* h_weights = (OracleNetWeights*)malloc(sizeof(OracleNetWeights));
+    SeresNetWeights* h_weights = (SeresNetWeights*)malloc(sizeof(SeresNetWeights));
     if (!h_weights) {
         fclose(f);
         return nullptr;
     }
 
-    size_t read = fread(h_weights, 1, sizeof(OracleNetWeights), f);
+    size_t read = fread(h_weights, 1, sizeof(SeresNetWeights), f);
     fclose(f);
-    if (read != sizeof(OracleNetWeights)) {
-        printf("Failed to read weights: got %zu of %zu bytes\n", read, sizeof(OracleNetWeights));
+    if (read != sizeof(SeresNetWeights)) {
+        printf("Failed to read weights: got %zu of %zu bytes\n", read, sizeof(SeresNetWeights));
         free(h_weights);
         return nullptr;
     }
 
     // Copy to GPU
-    OracleNetWeights* d_weights = nullptr;
-    cudaError_t err = cudaMalloc(&d_weights, sizeof(OracleNetWeights));
+    SeresNetWeights* d_weights = nullptr;
+    cudaError_t err = cudaMalloc(&d_weights, sizeof(SeresNetWeights));
     if (err != cudaSuccess) {
         free(h_weights);
         return nullptr;
     }
-    cudaMemcpy(d_weights, h_weights, sizeof(OracleNetWeights), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, h_weights, sizeof(SeresNetWeights), cudaMemcpyHostToDevice);
     free(h_weights);
 
     printf("NN weights loaded: %zu bytes (%.1f MB)\n",
-           sizeof(OracleNetWeights), sizeof(OracleNetWeights) / (1024.0 * 1024.0));
+           sizeof(SeresNetWeights), sizeof(SeresNetWeights) / (1024.0 * 1024.0));
     return d_weights;
 }
 
-void free_nn_weights(OracleNetWeights* d_weights) {
+void free_nn_weights(SeresNetWeights* d_weights) {
     if (d_weights) cudaFree(d_weights);
 }
 
-bool update_nn_weights(OracleNetWeights* d_weights, const char* path) {
+bool update_nn_weights(SeresNetWeights* d_weights, const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) return false;
 
@@ -104,26 +104,26 @@ bool update_nn_weights(OracleNetWeights* d_weights, const char* path) {
     long file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    if ((size_t)file_size != sizeof(OracleNetWeights)) {
+    if ((size_t)file_size != sizeof(SeresNetWeights)) {
         fclose(f);
         return false;
     }
 
-    OracleNetWeights* h_weights = (OracleNetWeights*)malloc(sizeof(OracleNetWeights));
-    size_t read = fread(h_weights, 1, sizeof(OracleNetWeights), f);
+    SeresNetWeights* h_weights = (SeresNetWeights*)malloc(sizeof(SeresNetWeights));
+    size_t read = fread(h_weights, 1, sizeof(SeresNetWeights), f);
     fclose(f);
-    if (read != sizeof(OracleNetWeights)) {
+    if (read != sizeof(SeresNetWeights)) {
         free(h_weights);
         return false;
     }
 
-    cudaMemcpy(d_weights, h_weights, sizeof(OracleNetWeights), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, h_weights, sizeof(SeresNetWeights), cudaMemcpyHostToDevice);
     free(h_weights);
     return true;
 }
 
 size_t nn_weights_size() {
-    return sizeof(OracleNetWeights);
+    return sizeof(SeresNetWeights);
 }
 
 // ============================================================
@@ -131,8 +131,8 @@ size_t nn_weights_size() {
 // ============================================================
 
 // Guard against struct layout changes (must match export_weights_cuda.py)
-static_assert(sizeof(OracleNetWeights) == 7930688,
-              "OracleNetWeights size changed — update weight export and this assert");
+static_assert(sizeof(SeresNetWeights) == 7930688,
+              "SeresNetWeights size changed — update weight export and this assert");
 
 __global__ void kernel_fp32_to_fp16(const float* src, half* dst, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -145,14 +145,14 @@ static void convert_array(const float* d_src, half* d_dst, int count) {
     kernel_fp32_to_fp16<<<blocks, threads>>>(d_src, d_dst, count);
 }
 
-ConvWeightsHalf* convert_weights_to_half(const OracleNetWeights* d_weights) {
+ConvWeightsHalf* convert_weights_to_half(const SeresNetWeights* d_weights) {
     ConvWeightsHalf h_hw;  // host copy with device pointers
 
     // start_conv: [128, 17, 9]
     int start_n = NN_HIDDEN_DIM * NN_INPUT_CHANNELS * 9;
     cudaMalloc(&h_hw.start_conv, start_n * sizeof(half));
     const float* start_ptr = (const float*)d_weights +
-        offsetof(OracleNetWeights, start_conv_weight) / sizeof(float);
+        offsetof(SeresNetWeights, start_conv_weight) / sizeof(float);
     convert_array(start_ptr, h_hw.start_conv, start_n);
 
     // block conv weights: [128, 128, 9] each
@@ -160,14 +160,14 @@ ConvWeightsHalf* convert_weights_to_half(const OracleNetWeights* d_weights) {
     for (int b = 0; b < NN_NUM_BLOCKS; b++) {
         cudaMalloc(&h_hw.block_conv1[b], block_n * sizeof(half));
         const float* c1 = (const float*)d_weights +
-            (offsetof(OracleNetWeights, blocks) +
+            (offsetof(SeresNetWeights, blocks) +
              b * sizeof(ResBlockParams) +
              offsetof(ResBlockParams, conv1_weight)) / sizeof(float);
         convert_array(c1, h_hw.block_conv1[b], block_n);
 
         cudaMalloc(&h_hw.block_conv2[b], block_n * sizeof(half));
         const float* c2 = (const float*)d_weights +
-            (offsetof(OracleNetWeights, blocks) +
+            (offsetof(SeresNetWeights, blocks) +
              b * sizeof(ResBlockParams) +
              offsetof(ResBlockParams, conv2_weight)) / sizeof(float);
         convert_array(c2, h_hw.block_conv2[b], block_n);
@@ -176,7 +176,7 @@ ConvWeightsHalf* convert_weights_to_half(const OracleNetWeights* d_weights) {
     // policy conv: [128, 128, 9]
     cudaMalloc(&h_hw.p_conv, block_n * sizeof(half));
     const float* p_ptr = (const float*)d_weights +
-        offsetof(OracleNetWeights, p_conv_weight) / sizeof(float);
+        offsetof(SeresNetWeights, p_conv_weight) / sizeof(float);
     convert_array(p_ptr, h_hw.p_conv, block_n);
 
     cudaDeviceSynchronize();
@@ -214,24 +214,24 @@ static void convert_shifted_layer(const float* d_src, half** d_slices, int C_out
     }
 }
 
-ConvWeightsShifted* convert_weights_shifted(const OracleNetWeights* d_weights) {
+ConvWeightsShifted* convert_weights_shifted(const SeresNetWeights* d_weights) {
     ConvWeightsShifted h_sw;
 
     // start_conv: [128, 17, 9] → 9 × [128, 17]
     const float* start_ptr = (const float*)d_weights +
-        offsetof(OracleNetWeights, start_conv_weight) / sizeof(float);
+        offsetof(SeresNetWeights, start_conv_weight) / sizeof(float);
     convert_shifted_layer(start_ptr, h_sw.start_conv, NN_HIDDEN_DIM, NN_INPUT_CHANNELS);
 
     // block convs: [128, 128, 9] → 9 × [128, 128]
     for (int b = 0; b < NN_NUM_BLOCKS; b++) {
         const float* c1 = (const float*)d_weights +
-            (offsetof(OracleNetWeights, blocks) +
+            (offsetof(SeresNetWeights, blocks) +
              b * sizeof(ResBlockParams) +
              offsetof(ResBlockParams, conv1_weight)) / sizeof(float);
         convert_shifted_layer(c1, h_sw.block_conv1[b], NN_HIDDEN_DIM, NN_HIDDEN_DIM);
 
         const float* c2 = (const float*)d_weights +
-            (offsetof(OracleNetWeights, blocks) +
+            (offsetof(SeresNetWeights, blocks) +
              b * sizeof(ResBlockParams) +
              offsetof(ResBlockParams, conv2_weight)) / sizeof(float);
         convert_shifted_layer(c2, h_sw.block_conv2[b], NN_HIDDEN_DIM, NN_HIDDEN_DIM);
@@ -239,7 +239,7 @@ ConvWeightsShifted* convert_weights_shifted(const OracleNetWeights* d_weights) {
 
     // policy conv: [128, 128, 9] → 9 × [128, 128]
     const float* p_ptr = (const float*)d_weights +
-        offsetof(OracleNetWeights, p_conv_weight) / sizeof(float);
+        offsetof(SeresNetWeights, p_conv_weight) / sizeof(float);
     convert_shifted_layer(p_ptr, h_sw.p_conv, NN_HIDDEN_DIM, NN_HIDDEN_DIM);
 
     cudaDeviceSynchronize();

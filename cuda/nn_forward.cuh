@@ -28,7 +28,7 @@ constexpr int SCRATCH_TOTAL_BYTES = SCRATCH_TOTAL_FLOATS * sizeof(float);
 // = (8192*2 + 73728 + 1088 + 4672) * 4 = 383,488 bytes ≈ 375 KB
 
 // ============================================================
-// Full OracleNet forward pass (device-side, warp-cooperative)
+// Full SeresNet forward pass (device-side, warp-cooperative)
 // ============================================================
 
 // Run the full SE-ResNet forward pass on a single position.
@@ -44,10 +44,10 @@ constexpr int SCRATCH_TOTAL_BYTES = SCRATCH_TOTAL_FLOATS * sizeof(float);
 //   policy_out — [4672] log-probabilities (AlphaZero move encoding)
 //   value_out  — final value: tanh(v_logit + k * q_result)
 //   k_out      — confidence scalar: 0.47 * softplus(k_logit)
-__device__ void oracle_net_forward(
+__device__ void seres_net_forward(
     const BoardState* bs,
     float q_result,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     float* scratch,
     float* policy_out,
     float* value_out,

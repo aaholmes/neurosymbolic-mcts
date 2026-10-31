@@ -1,5 +1,5 @@
-//! OracleNet (SE-ResNet) inference, a layer-for-layer port of
-//! `python/model.py::OracleNet` in eval mode.
+//! SeresNet (SE-ResNet) inference, a layer-for-layer port of
+//! `python/model.py::SeresNet` in eval mode.
 
 use super::{fused, NetOutput, PolicyValueNet, Precision};
 use candle_core::conv::CudnnFwdAlgo;
@@ -14,12 +14,12 @@ const SE_REDUCTION: usize = 16;
 const VALUE_HIDDEN: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OracleNetConfig {
+pub struct SeresNetConfig {
     pub num_blocks: usize,
     pub hidden_dim: usize,
 }
 
-impl OracleNetConfig {
+impl SeresNetConfig {
     /// Read the architecture off the state dict, so no config file is needed.
     pub fn infer(state_dict: &HashMap<String, Tensor>) -> Result<Self> {
         let start = state_dict
@@ -209,8 +209,8 @@ impl ResBlock {
     }
 }
 
-pub struct OracleNet {
-    config: OracleNetConfig,
+pub struct SeresNet {
+    config: SeresNetConfig,
     start_conv: Conv,
     blocks: Vec<ResBlock>,
     p_conv: Conv,
@@ -222,7 +222,7 @@ pub struct OracleNet {
     dtype: DType,
 }
 
-impl OracleNet {
+impl SeresNet {
     /// Build the network from a PyTorch state dict (names as in `model.state_dict()`).
     pub fn from_state_dict(state_dict: HashMap<String, Tensor>, device: &Device) -> Result<Self> {
         Self::from_state_dict_with_precision(state_dict, device, Precision::F32)
@@ -265,7 +265,7 @@ impl OracleNet {
     }
 
     fn build_f32(state_dict: HashMap<String, Tensor>, device: &Device) -> Result<Self> {
-        let config = OracleNetConfig::infer(&state_dict)?;
+        let config = SeresNetConfig::infer(&state_dict)?;
         let k_logit = state_dict
             .get("k_logit")
             .ok_or_else(|| candle_core::Error::Msg("missing k_logit".into()))?
@@ -276,7 +276,7 @@ impl OracleNet {
         Self::new(config, k_logit, vb)
     }
 
-    fn new(config: OracleNetConfig, k_logit: f64, vb: VarBuilder) -> Result<Self> {
+    fn new(config: SeresNetConfig, k_logit: f64, vb: VarBuilder) -> Result<Self> {
         let h = config.hidden_dim;
         let blocks = (0..config.num_blocks)
             .map(|i| ResBlock::new(h, vb.pp(format!("res_blocks.{i}"))))
@@ -302,7 +302,7 @@ impl OracleNet {
         })
     }
 
-    pub fn config(&self) -> OracleNetConfig {
+    pub fn config(&self) -> SeresNetConfig {
         self.config
     }
 }
@@ -316,7 +316,7 @@ fn softplus(x: f64) -> f64 {
     }
 }
 
-impl OracleNet {
+impl SeresNet {
     /// The trunk and both heads, with the policy left as raw logits in the
     /// network's own layout: `[B, 4672]` indexed by `plane * 64 + square`.
     /// Returns `(policy_logits, v_logit)`.
@@ -347,7 +347,7 @@ impl OracleNet {
     }
 }
 
-impl PolicyValueNet for OracleNet {
+impl PolicyValueNet for SeresNet {
     fn forward(&self, planes: &Tensor, scalars: &Tensor) -> Result<NetOutput> {
         let b = planes.dim(0)?;
         let (logits, v_logit) = self.forward_logits(planes, scalars)?;

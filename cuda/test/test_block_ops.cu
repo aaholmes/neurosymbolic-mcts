@@ -258,26 +258,26 @@ void test_block_bn_relu_matches_warp(bool& test_failed) {
 }
 
 // ============================================================
-// oracle_net_forward_block vs oracle_net_forward (zero weights)
+// seres_net_forward_block vs seres_net_forward (zero weights)
 // ============================================================
 
 __global__ void kernel_warp_forward(
-    const BoardState* bs, float q_result, const OracleNetWeights* w,
+    const BoardState* bs, float q_result, const SeresNetWeights* w,
     float* scratch, float* policy_out, float* value_out, float* k_out
 ) {
-    oracle_net_forward(bs, q_result, w, scratch, policy_out, value_out, k_out);
+    seres_net_forward(bs, q_result, w, scratch, policy_out, value_out, k_out);
 }
 
 __global__ void kernel_block_forward(
-    const BoardState* bs, float q_result, const OracleNetWeights* w,
+    const BoardState* bs, float q_result, const SeresNetWeights* w,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out);
+    seres_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out);
 }
 
 void test_block_forward_zero_weights(bool& test_failed) {
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_scratch = alloc_nn_scratch(1);
     BoardState bs = make_starting_position();
     BoardState* d_bs;
@@ -341,7 +341,7 @@ void test_block_forward_zero_weights(bool& test_failed) {
 void test_block_forward_q_sensitivity(bool& test_failed) {
     // With zero weights: V = tanh(k * q_result), same formula as warp version.
     // Block version should also show V(-3) < V(0) < V(3).
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     BoardState bs = make_starting_position();
     BoardState* d_bs;
     cudaMalloc(&d_bs, sizeof(BoardState));
@@ -394,7 +394,7 @@ void test_block_smem_size(bool& test_failed) {
 
 void test_block_mcts_produces_moves(bool& test_failed) {
     BoardState start = make_starting_position();
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
 
     // Policy buffers: 1 block × 4672 floats
     float* d_policy_bufs;
@@ -429,7 +429,7 @@ void test_block_mcts_mate_detection(bool& test_failed) {
     // FEN: r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4
     BoardState bs = parse_fen_blk("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4");
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_policy_bufs;
     cudaMalloc(&d_policy_bufs, 1 * NN_POLICY_SIZE * sizeof(float));
     cudaDeviceSetLimit(cudaLimitStackSize, 32768);
@@ -708,16 +708,16 @@ void test_tc_conv_start(bool& test_failed) {
 
 // TC forward pass test: compare scalar vs TC forward pass with zero weights
 __global__ void kernel_block_forward_tc(
-    const BoardState* bs, float q_result, const OracleNetWeights* w,
+    const BoardState* bs, float q_result, const SeresNetWeights* w,
     const ConvWeightsHalf* half_w,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out, half_w);
+    seres_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out, half_w);
 }
 
 void test_tc_forward_zero_weights(bool& test_failed) {
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     ConvWeightsHalf* d_half = convert_weights_to_half(d_weights);
 
     BoardState bs = make_starting_position();
@@ -891,12 +891,12 @@ void test_shifted_conv_vs_scalar(bool& test_failed) {
 
 // Shifted forward pass test with zero weights
 __global__ void kernel_block_forward_shifted(
-    const BoardState* bs, float q_result, const OracleNetWeights* w,
+    const BoardState* bs, float q_result, const SeresNetWeights* w,
     const ConvWeightsShifted* shifted_w,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out,
+    seres_net_forward_block(bs, q_result, w, (float*)smem, policy_out, value_out, k_out,
                              nullptr, shifted_w);
 }
 
@@ -1008,7 +1008,7 @@ void test_shifted_conv_start(bool& test_failed) {
 }
 
 void test_shifted_forward_zero_weights(bool& test_failed) {
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     ConvWeightsShifted* d_shifted = convert_weights_shifted(d_weights);
 
     BoardState bs = make_starting_position();
@@ -1086,14 +1086,14 @@ void test_shifted_forward_zero_weights(bool& test_failed) {
 // (matching the existing warp-vs-block tolerances).
 // ============================================================
 
-static void fill_pseudo_random_weights(OracleNetWeights* h_w) {
+static void fill_pseudo_random_weights(SeresNetWeights* h_w) {
     // Small symmetric weights so activations stay in safe range
     // through 6 residual blocks. Pattern: ((i*11 + 5) % 13 - 6) / 130
     // gives values in roughly [-0.046, 0.054].
     auto rval = [](int i) { return (((i * 11 + 5) % 13) - 6) / 130.0f; };
 
     float* w = (float*)h_w;
-    size_t n_floats = sizeof(OracleNetWeights) / sizeof(float);
+    size_t n_floats = sizeof(SeresNetWeights) / sizeof(float);
     for (size_t i = 0; i < n_floats; i++) w[i] = rval((int)i);
 
     // Override BN params: gamma=1, beta=0, mean=0, var=1 (identity BN).
@@ -1124,10 +1124,10 @@ static void fill_pseudo_random_weights(OracleNetWeights* h_w) {
 void test_block_forward_fp16_activations_vs_fp32(bool& test_failed) {
     // Allocate device weights via the existing allocator (sets running_var=1
     // by default), then overwrite with our pseudo-random non-zero pattern.
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
-    OracleNetWeights* h_weights = (OracleNetWeights*)malloc(sizeof(OracleNetWeights));
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* h_weights = (SeresNetWeights*)malloc(sizeof(SeresNetWeights));
     fill_pseudo_random_weights(h_weights);
-    cudaMemcpy(d_weights, h_weights, sizeof(OracleNetWeights), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, h_weights, sizeof(SeresNetWeights), cudaMemcpyHostToDevice);
 
     float* d_scratch = alloc_nn_scratch(1);
 
@@ -1199,8 +1199,8 @@ void test_block_forward_fp16_activations_vs_fp32(bool& test_failed) {
 // ============================================================
 // v4 batched-conv tests
 // ----------------------------------------------------------------
-// True batched WMMA at B=2: oracle_net_forward_block_b2 should produce
-// outputs that match two sequential oracle_net_forward_block calls within
+// True batched WMMA at B=2: seres_net_forward_block_b2 should produce
+// outputs that match two sequential seres_net_forward_block calls within
 // FP16 round-off. The matmul accumulator order changes (A loaded once,
 // applied to both batches) — that's the only numerically meaningful diff.
 // Both paths use the same FP16 inputs and FP32 accumulators internally.
@@ -1209,14 +1209,14 @@ void test_block_forward_fp16_activations_vs_fp32(bool& test_failed) {
 __global__ void kernel_block_forward_b2(
     const BoardState* bs0, const BoardState* bs1,
     float q0, float q1,
-    const OracleNetWeights* w,
+    const SeresNetWeights* w,
     float* policy_out_b2,    // [2 * NN_POLICY_SIZE]
     float* value_out_b2,     // [2]
     float* k_out_b2,         // [2]
     const ConvWeightsShifted* shifted_w
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block_b2(bs0, bs1, q0, q1, w, (float*)smem,
+    seres_net_forward_block_b2(bs0, bs1, q0, q1, w, (float*)smem,
                                 policy_out_b2, value_out_b2, k_out_b2, shifted_w);
 }
 
@@ -1227,10 +1227,10 @@ void test_b2_smem_size(bool& test_failed) {
 }
 
 void test_block_forward_b2_matches_b1(bool& test_failed) {
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
-    OracleNetWeights* h_weights = (OracleNetWeights*)malloc(sizeof(OracleNetWeights));
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* h_weights = (SeresNetWeights*)malloc(sizeof(SeresNetWeights));
     fill_pseudo_random_weights(h_weights);
-    cudaMemcpy(d_weights, h_weights, sizeof(OracleNetWeights), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, h_weights, sizeof(SeresNetWeights), cudaMemcpyHostToDevice);
     ConvWeightsShifted* d_shifted = convert_weights_shifted(d_weights);
 
     // Two non-trivial mid-game positions to exercise different inputs per batch.
@@ -1330,7 +1330,7 @@ void test_block_mcts_p2_mate_detection(bool& test_failed) {
     // White to move, Qh5 is checkmate (mate-in-1)
     BoardState bs = parse_fen_blk("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4");
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     // p2 needs 2× per-block policy buffer
     float* d_policy_bufs;
     cudaMalloc(&d_policy_bufs, 1 * 2 * NN_POLICY_SIZE * sizeof(float));

@@ -30,7 +30,7 @@ void test_fresh_start_invariants(bool& test_failed) {
     for (int i = 0; i < NUM_TREES; i++)
         positions[i] = make_starting_position();
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, NUM_TREES * NN_POLICY_SIZE * sizeof(float));
 
@@ -116,7 +116,7 @@ void test_reuse_equivalence_property(bool& test_failed) {
     const int N = 200;
     BoardState P0 = make_starting_position();
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, NN_POLICY_SIZE * sizeof(float));
 
@@ -198,7 +198,7 @@ void test_parent_idx_invariant(bool& test_failed) {
     const int N = 50;
     BoardState pos = make_starting_position();
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, NN_POLICY_SIZE * sizeof(float));
 
@@ -233,7 +233,7 @@ void test_zero_budget_noop(bool& test_failed) {
     const int N = 50;
     BoardState pos = make_starting_position();
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, NN_POLICY_SIZE * sizeof(float));
 
@@ -308,7 +308,7 @@ void test_pool_exhaustion_fallback(bool& test_failed) {
     const int RESTART_THRESH = (int)(0.8f * (float)TIGHT_POOL); // 3276
 
     BoardState pos = make_starting_position();
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, NN_POLICY_SIZE * sizeof(float));
 
@@ -391,7 +391,7 @@ void test_e2e_selfplay_reuse(bool& test_failed) {
     cfg.seed = 42;
     cfg.use_resnet = true;
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     GameRecord* records = new GameRecord[cfg.num_games];
     for (int i = 0; i < cfg.num_games; i++) {
         records[i].samples = nullptr; records[i].num_samples = 0; records[i].result = 0;
@@ -479,7 +479,7 @@ void test_eval_trees_budget_p2_basic(bool& test_failed) {
     for (int i = 0; i < NUM_TREES; i++)
         positions[i] = make_starting_position();
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     // p2 needs 2× per-tree policy buffer
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, NUM_TREES * 2 * NN_POLICY_SIZE * sizeof(float));

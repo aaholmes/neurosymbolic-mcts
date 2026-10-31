@@ -55,7 +55,7 @@ int run_selfplay(
 );
 
 // Lower-level: play games and return records in memory (for testing)
-// d_weights is OracleNetWeights* when config.use_resnet, TransformerWeights* otherwise.
+// d_weights is SeresNetWeights* when config.use_resnet, TransformerWeights* otherwise.
 int run_selfplay_games(
     void* d_weights,
     const SelfPlayConfig& config,
@@ -124,7 +124,7 @@ const char* check_sprt(float llr, float alpha, float beta);
 // Play evaluation games between two networks with SPRT early stopping.
 // Half the games have A=white, half have A=black.
 // Optionally saves training data from both players.
-// d_weights_a/b are OracleNetWeights* when config.use_resnet, TransformerWeights* otherwise.
+// d_weights_a/b are SeresNetWeights* when config.use_resnet, TransformerWeights* otherwise.
 EvalResult run_eval_games(
     void* d_weights_a,
     void* d_weights_b,

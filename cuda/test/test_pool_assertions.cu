@@ -44,7 +44,7 @@ void test_watermark_adequate_pool(bool& test_failed) {
     for (int i = 0; i < NUM_TREES; i++)
         positions[i] = make_starting_position();
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, NUM_TREES * NN_POLICY_SIZE * sizeof(float));
 
@@ -86,7 +86,7 @@ void test_watermark_undersized_pool_saturates(bool& test_failed) {
     BoardState positions[NUM_TREES];
     positions[0] = make_starting_position();
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_policy_bufs = nullptr;
     cudaMalloc(&d_policy_bufs, NUM_TREES * NN_POLICY_SIZE * sizeof(float));
 

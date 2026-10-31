@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
     cfg.use_resnet = true;
     cfg.use_vloss_p2 = use_p2;
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     GameRecord* records = new GameRecord[num_games];
     for (int i = 0; i < num_games; i++) {
         records[i].samples = nullptr; records[i].num_samples = 0; records[i].result = 0;

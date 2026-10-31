@@ -79,11 +79,11 @@ struct Timer {
 // Wrapper kernel for full forward pass timing
 __global__ void kernel_block_forward_pass(
     const BoardState* bs, float q_result,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out);
+    seres_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out);
 }
 
 // Individual kernels for timing each operation
@@ -114,11 +114,11 @@ __global__ void k_conv_3x3_tc(const __half* in, const half* w, __half* out, int 
 
 __global__ void kernel_block_forward_tc(
     const BoardState* bs, float q_result,
-    const OracleNetWeights* weights, const ConvWeightsHalf* half_w,
+    const SeresNetWeights* weights, const ConvWeightsHalf* half_w,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, half_w);
+    seres_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, half_w);
 }
 
 __global__ void k_bn_relu(__half* data, const float* g, const float* b,
@@ -149,7 +149,7 @@ int main(int argc, char** argv) {
     if (argc < 2) { printf("Usage: %s <weights.bin>\n", argv[0]); return 1; }
     init_movegen_tables();
 
-    OracleNetWeights* d_weights = load_nn_weights(argv[1]);
+    SeresNetWeights* d_weights = load_nn_weights(argv[1]);
     if (!d_weights) return 1;
 
     // Allocate device buffers (FP16 activation buffers post v3 conversion).

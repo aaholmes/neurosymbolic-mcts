@@ -1,4 +1,4 @@
-// Profile inference latency with real trained OracleNet weights.
+// Profile inference latency with real trained SeresNet weights.
 // Loads weights from a binary file exported by python/export_weights_cuda.py,
 // runs single forward passes and full MCTS searches, measures wall-clock time.
 //
@@ -20,7 +20,7 @@
 #include <functional>
 
 // Forward declarations for weight conversion
-ConvWeightsShifted* convert_weights_shifted(const OracleNetWeights* d_weights);
+ConvWeightsShifted* convert_weights_shifted(const SeresNetWeights* d_weights);
 void free_shifted_weights(ConvWeightsShifted* d_sw);
 
 // Max input channels for staging buffer allocation
@@ -114,41 +114,41 @@ static BoardState parse_fen(const char* fen) {
     return bs;
 }
 
-// Wrapper kernel for forward pass (oracle_net_forward is __device__)
+// Wrapper kernel for forward pass (seres_net_forward is __device__)
 __global__ void kernel_forward_pass(
     const BoardState* bs, float q_result,
-    const OracleNetWeights* weights, float* scratch,
+    const SeresNetWeights* weights, float* scratch,
     float* policy_out, float* value_out, float* k_out
 ) {
-    oracle_net_forward(bs, q_result, weights, scratch, policy_out, value_out, k_out);
+    seres_net_forward(bs, q_result, weights, scratch, policy_out, value_out, k_out);
 }
 
 // Wrapper kernels for forward pass timing
 __global__ void kernel_block_forward_pass(
     const BoardState* bs, float q_result,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out);
+    seres_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out);
 }
 __global__ void kernel_block_forward_pass_tc(
     const BoardState* bs, float q_result,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     const ConvWeightsHalf* half_w,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, half_w, nullptr);
+    seres_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, half_w, nullptr);
 }
 __global__ void kernel_block_forward_pass_shifted(
     const BoardState* bs, float q_result,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     const ConvWeightsShifted* shifted_w,
     float* policy_out, float* value_out, float* k_out
 ) {
     extern __shared__ __half smem[];
-    oracle_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, nullptr, shifted_w);
+    seres_net_forward_block(bs, q_result, weights, (float*)smem, policy_out, value_out, k_out, nullptr, shifted_w);
 }
 
 // CUDA event timer helper
@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
     printf("Weights: %s\n", weights_path);
 
     // Load real weights
-    OracleNetWeights* d_weights = load_nn_weights(weights_path);
+    SeresNetWeights* d_weights = load_nn_weights(weights_path);
     if (!d_weights) {
         printf("FATAL: Failed to load weights from %s\n", weights_path);
         return 1;

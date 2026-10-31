@@ -20,11 +20,11 @@ fn test_neural_network_integration() {
     let move_gen = MoveGen::new();
 
     // Test neural network availability
-    // Tiny randomized OracleNet committed for parity tests (python/export_parity_fixture.py)
+    // Tiny randomized SeresNet committed for parity tests (python/export_parity_fixture.py)
     let mut nn_policy = NeuralNetPolicy::new();
     let fixture = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/oraclenet_tiny.safetensors"
+        "/tests/fixtures/seresnet_tiny.safetensors"
     );
     nn_policy.load(fixture).expect("fixture model should load");
 

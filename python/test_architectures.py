@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from model import OracleNet
+from model import SeresNet
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -53,18 +53,18 @@ def index_to_uci(idx):
     return f"idx{idx}"
 
 def test_model_shapes():
-    print(f"\nTesting OracleNet...")
+    print(f"\nTesting SeresNet...")
     batch_size = 4
     # Random chess board input: [Batch, Channels, Height, Width]
     dummy_input = torch.randn(batch_size, 17, 8, 8)
     dummy_scalars = torch.randn(batch_size, 2)  # [material, qsearch_flag]
 
     try:
-        model = OracleNet()
+        model = SeresNet()
         policy, value, k = model(dummy_input, dummy_scalars)
         
         # Check Policy Shape
-        # OracleNet uses 4672 for policy output size
+        # SeresNet uses 4672 for policy output size
         assert policy.shape == (batch_size, 4672), f"Policy shape mismatch! Expected ({batch_size}, 4672), got {policy.shape}"
         
         # Check Value Shape
@@ -82,8 +82,8 @@ def test_model_shapes():
         return None
 
 def test_overfitting():
-    print(f"\nRunning Overfitting Test on OracleNet...")
-    model = OracleNet()
+    print(f"\nRunning Overfitting Test on SeresNet...")
+    model = SeresNet()
     model.train() # Explicitly set to train mode
     
     # Use Adam for faster convergence in overfitting test
@@ -108,7 +108,7 @@ def test_overfitting():
     for i in range(201):
         optimizer.zero_grad()
         
-        # Forward pass: OracleNet returns (policy, value, k)
+        # Forward pass: SeresNet returns (policy, value, k)
         pred_policy, pred_value, k = model(inputs, materials)
         
         # Loss = MSE(Value) + CrossEntropy(Policy)
@@ -200,7 +200,7 @@ def print_tensor_as_board(tensor):
 
 def test_no_k_head_layers():
     """K-head layers removed, scalar k_logit added."""
-    model = OracleNet()
+    model = SeresNet()
     # Old layers must be gone
     assert not hasattr(model, 'k_stm_patch_fc')
     assert not hasattr(model, 'k_opp_patch_fc')
@@ -213,7 +213,7 @@ def test_no_k_head_layers():
 
 def test_scalar_k_is_position_independent():
     """k must be identical for all inputs (global scalar)."""
-    model = OracleNet()
+    model = SeresNet()
     model.eval()
     with torch.no_grad():
         s = torch.zeros(1, 2)
@@ -223,12 +223,12 @@ def test_scalar_k_is_position_independent():
 
 def test_v_fc_accepts_65_inputs():
     """Value head FC widened to 65 (64 conv + 1 q_result)."""
-    model = OracleNet()
+    model = SeresNet()
     assert model.v_fc.in_features == 65
 
 def test_k_logit_zero_init_gives_texel_calibrated():
     """0.47 * softplus(0) = 0.47 * ln(2) ≈ 0.326."""
-    model = OracleNet()
+    model = SeresNet()
     k = 0.47 * F.softplus(model.k_logit)
     assert abs(k.item() - 0.326) < 0.01
 
@@ -238,7 +238,7 @@ def test_q_result_influences_v_logit():
     At zero-init v_out is all zeros so v_logit=0 regardless of input.
     A single training step breaks the symmetry and lets q_result flow through.
     """
-    model = OracleNet()
+    model = SeresNet()
     # One training step to break zero-init symmetry
     model.train()
     optimizer = optim.Adam(model.parameters(), lr=0.01)
@@ -261,7 +261,7 @@ def test_q_result_influences_v_logit():
 
 def test_param_count_reduced():
     """~21,536 fewer params than old model."""
-    model = OracleNet()
+    model = SeresNet()
     count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # Old: ~2,000,622. New: ~1,979,086. Allow margin.
     assert count < 1_985_000, f"Too many params: {count}"
@@ -272,7 +272,7 @@ def sample_output_demo():
     print(f"\nSample Inference Output")
     print("-" * 30)
     
-    model = OracleNet()
+    model = SeresNet()
     model.eval()
     
     # Use starting position
@@ -303,7 +303,7 @@ def sample_output_demo():
     print(f"Top moves: {', '.join(moves_str)}")
 
 if __name__ == "__main__":
-    print("=== Verifying OracleNet Architecture ===")
+    print("=== Verifying SeresNet Architecture ===")
 
     # 1. Test Shapes & Sizes
     test_model_shapes()

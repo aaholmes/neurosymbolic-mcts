@@ -12,7 +12,7 @@
 // threadIdx.x % 32. All threads must call each function together
 // (implicit warp synchronization via lockstep execution).
 //
-// These implement the building blocks of OracleNet's SE-ResNet:
+// These implement the building blocks of SeresNet's SE-ResNet:
 // GEMM, BatchNorm, ReLU, SE attention, im2col for 3x3 conv.
 // ============================================================
 

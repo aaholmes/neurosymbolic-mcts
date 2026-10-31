@@ -29,10 +29,10 @@ int block_smem_bytes() { return BLOCK_SMEM_BYTES; }
 //   FC1 -> smem_reduce[0:256]  (FP32)
 //   FC2 reduction -> v_logit (thread 0)
 
-__device__ void oracle_net_forward_block(
+__device__ void seres_net_forward_block(
     const BoardState* bs,
     float q_result,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     float* smem,
     float* policy_out,
     float* value_out,
@@ -261,10 +261,10 @@ __device__ void oracle_net_forward_block(
 // each batch's slice, sharing the FP32 reduce workspace between calls.
 // ============================================================
 
-__device__ void oracle_net_forward_block_b2(
+__device__ void seres_net_forward_block_b2(
     const BoardState* bs0, const BoardState* bs1,
     float q0, float q1,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     float* smem,
     float* policy_out_b2,
     float* value_out_b2,

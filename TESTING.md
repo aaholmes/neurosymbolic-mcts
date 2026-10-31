@@ -53,7 +53,7 @@ Located in `python/`:
 | `test_train.py` | Model training, loss computation, data loading, chunk refreshing |
 | `test_augmentation.py` | D4/horizontal flip transforms, policy vector permutation |
 | `test_replay_buffer.py` | Elo-based weighting, FIFO eviction, manifest handling |
-| `test_architectures.py` | OracleNet variants, k-head, SE-ResNet blocks |
+| `test_architectures.py` | SeresNet variants, k-head, SE-ResNet blocks |
 
 ```bash
 cd python && python -m pytest test_*.py -v

@@ -1,12 +1,12 @@
 """
-Export trained OracleNet weights to the flat binary format consumed by
+Export trained SeresNet weights to the flat binary format consumed by
 cuda/nn_weights.cu (load_nn_weights).
 
 Usage:
     python python/export_weights_cuda.py <checkpoint.pt> <output.bin>
     python python/export_weights_cuda.py <checkpoint.pt> <output.bin> --verify
 
-The output file is a raw float32 binary dump of the OracleNetWeights C struct,
+The output file is a raw float32 binary dump of the SeresNetWeights C struct,
 with fields in the exact order defined in cuda/nn_weights.cuh.
 """
 
@@ -19,7 +19,7 @@ import torch.nn.functional as F
 # Add python/ to path so we can import model.py regardless of cwd
 import os
 sys.path.insert(0, os.path.dirname(__file__))
-from model import OracleNet
+from model import SeresNet
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ def verify(output_path, model):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export OracleNet weights for CUDA kernel")
+    parser = argparse.ArgumentParser(description="Export SeresNet weights for CUDA kernel")
     parser.add_argument("checkpoint", help="Path to PyTorch checkpoint (.pt)")
     parser.add_argument("output", help="Output binary file path (.bin)")
     parser.add_argument("--verify", action="store_true",
@@ -186,7 +186,7 @@ def main():
         print("  Detected TorchScript archive, extracting state_dict...")
         state_dict = raw.state_dict()
 
-    model = OracleNet(num_blocks=args.num_blocks, hidden_dim=args.hidden_dim)
+    model = SeresNet(num_blocks=args.num_blocks, hidden_dim=args.hidden_dim)
     model.load_state_dict(state_dict)
     model.eval()
 

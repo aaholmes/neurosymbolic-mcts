@@ -11,7 +11,7 @@ import pytest
 # Ensure python/ is on path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from model import OracleNet
+from model import SeresNet
 from replay_buffer import ReplayBuffer, SAMPLE_SIZE_FLOATS, BYTES_PER_SAMPLE
 
 # Import training internals (we'll test functions directly)
@@ -26,7 +26,7 @@ def make_fake_bin(path, num_positions):
 
 def make_tiny_model():
     """Create a tiny model for fast testing."""
-    return OracleNet(num_blocks=1, hidden_dim=16)
+    return SeresNet(num_blocks=1, hidden_dim=16)
 
 
 @pytest.fixture
@@ -309,17 +309,17 @@ class TestGetLrForStep:
 
 class TestMakeOptimizer:
     def test_adam_optimizer(self):
-        model = OracleNet(num_blocks=1, hidden_dim=16)
+        model = SeresNet(num_blocks=1, hidden_dim=16)
         opt = train_module.make_optimizer(model, "adam", 0.001)
         assert isinstance(opt, torch.optim.Adam)
 
     def test_adamw_optimizer(self):
-        model = OracleNet(num_blocks=1, hidden_dim=16)
+        model = SeresNet(num_blocks=1, hidden_dim=16)
         opt = train_module.make_optimizer(model, "adamw", 0.001)
         assert isinstance(opt, torch.optim.AdamW)
 
     def test_unknown_optimizer_defaults_to_adam(self):
-        model = OracleNet(num_blocks=1, hidden_dim=16)
+        model = SeresNet(num_blocks=1, hidden_dim=16)
         opt = train_module.make_optimizer(model, "unknown", 0.001)
         assert isinstance(opt, torch.optim.Adam)
 
@@ -419,7 +419,7 @@ class TestResumeEdgeCases:
         make_fake_bin(os.path.join(data_dir, "game.bin"), 100)
 
         # Create legacy checkpoint (just state_dict)
-        model = OracleNet()
+        model = SeresNet()
         legacy_path = os.path.join(output_dir, "legacy.pth")
         torch.save(model.state_dict(), legacy_path)
 
@@ -1104,8 +1104,8 @@ class TestQsearchFlag:
             shutil.rmtree(buffer_dir, ignore_errors=True)
 
     def test_model_output_changes_with_qsearch_flag(self):
-        """OracleNet k-head should produce different output when qsearch_flag changes."""
-        model = OracleNet(num_blocks=1, hidden_dim=16)
+        """SeresNet k-head should produce different output when qsearch_flag changes."""
+        model = SeresNet(num_blocks=1, hidden_dim=16)
         model.eval()
 
         board = torch.randn(1, 17, 8, 8)
@@ -1125,7 +1125,7 @@ class TestQsearchFlag:
 
     def test_backward_compat_single_scalar(self):
         """Model should handle [B, 1] input via backward compat (pads qsearch_flag=1.0)."""
-        model = OracleNet(num_blocks=1, hidden_dim=16)
+        model = SeresNet(num_blocks=1, hidden_dim=16)
         model.eval()
 
         board = torch.randn(2, 17, 8, 8)

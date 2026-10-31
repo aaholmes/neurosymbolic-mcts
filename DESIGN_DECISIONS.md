@@ -115,7 +115,7 @@ $k = 0.47 \cdot \text{Softplus}(k_{logit})$ where $k_{logit}$ is a single learne
 
 With no NN: $V_{logit} = 0$, $k = 0.326$, so $V_{final} = \tanh(0.326 \cdot \Delta M)$. A freshly initialized network produces identical values, ensuring smooth bootstrapping.
 
-## 6. OracleNet Architecture
+## 6. SeresNet Architecture
 
 **SE-ResNet backbone.** Configurable depth and width (default: 6 blocks, 128 channels, ~2M params). SE attention in each block learns per-position channel importance.
 
@@ -191,9 +191,9 @@ The GPU forward pass went through four kernel-level implementations and three MC
 
 **v3 — FP16 inter-layer activation storage.** A late discovery: the shifted-copy path was already FP16+WMMA+FP32-accumulator at the matmul level; the remaining FP32 surface was inter-layer activation buffers (`buf1`/`buf2`, 16 KB each). Converting these to FP16 dropped per-block smem from 81 KB to 49 KB and removed an FP16/FP32 round-trip at every conv boundary. Throughput gain: **86.4 samples/sec** (~9% over v2). The bigger win was the smem headroom that v4 needed.
 
-**v4 — true batched conv primitive (B=2).** A new device function `oracle_net_forward_block_b2` plus underlying `block_conv_3x3_shifted_b2` load each WMMA weight tile A *once* per (n_tile, k_tile) and apply it to both batch elements before advancing — true weight-load amortization. The "naive" sequential B-loop design (call the existing forward twice) was rejected because it provides no per-FLOP improvement. Microbenchmark in isolation (single block, 1000 iterations, CUDA-event timing): **1.19× per-sim NN improvement** at B=2. Smem 99 KB (just under cap). Three runs identical to four sig figs — confirms weight-bandwidth was a real fraction of NN time.
+**v4 — true batched conv primitive (B=2).** A new device function `seres_net_forward_block_b2` plus underlying `block_conv_3x3_shifted_b2` load each WMMA weight tile A *once* per (n_tile, k_tile) and apply it to both batch elements before advancing — true weight-load amortization. The "naive" sequential B-loop design (call the existing forward twice) was rejected because it provides no per-FLOP improvement. Microbenchmark in isolation (single block, 1000 iterations, CUDA-event timing): **1.19× per-sim NN improvement** at B=2. Smem 99 KB (just under cap). Three runs identical to four sig figs — confirms weight-bandwidth was a real fraction of NN time.
 
-**v5 — 2-explorer virtual-loss scheduling.** Wires v4 into the production MCTS path. Each block runs 2 explorers per round: thread 0 does SELECT for both sequentially (so virtual loss steers the second away from the first's path); EXPAND and BACKUP parallelize across warps 0 and 1; the NN forward is one batched `oracle_net_forward_block_b2` call. The virtual-loss infrastructure (atomic `apply_virtual_loss`, `backprop_value` that decrements VL on backup) was already present from earlier work — v5 just needed a second explorer that exercises it. Per-block static smem grew ~1.1 KB; `sh_path` shrunk from 256 to 128 deep to fit the per-block 99 KB cap. End-to-end speedup: **101.4 samples/sec at 6×128**, **188.6 at 6×64** — same ~1.17× ratio at both architectures, confirming the mechanism is architecture-agnostic.
+**v5 — 2-explorer virtual-loss scheduling.** Wires v4 into the production MCTS path. Each block runs 2 explorers per round: thread 0 does SELECT for both sequentially (so virtual loss steers the second away from the first's path); EXPAND and BACKUP parallelize across warps 0 and 1; the NN forward is one batched `seres_net_forward_block_b2` call. The virtual-loss infrastructure (atomic `apply_virtual_loss`, `backprop_value` that decrements VL on backup) was already present from earlier work — v5 just needed a second explorer that exercises it. Per-block static smem grew ~1.1 KB; `sh_path` shrunk from 256 to 128 deep to fit the per-block 99 KB cap. End-to-end speedup: **101.4 samples/sec at 6×128**, **188.6 at 6×64** — same ~1.17× ratio at both architectures, confirming the mechanism is architecture-agnostic.
 
 **Cumulative result (v2 → v5):** 79 → 101.4 samples/sec at 6×128 production (1.28×), 161.9 → 188.6 at 6×64 apples-to-apples (1.17×).
 

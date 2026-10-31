@@ -74,7 +74,7 @@ GPUMctsResult gpu_mcts_search_nn(
     int simulations,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,   // GPU-resident weights (shared, read-only)
+    SeresNetWeights* d_weights,   // GPU-resident weights (shared, read-only)
     float* d_nn_scratch,            // per-warp scratch (num_warps * SCRATCH_TOTAL_FLOATS)
     int num_warps
 );
@@ -93,13 +93,13 @@ GPUMctsResult gpu_mcts_search_nn_block(
     int simulations,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_policy_bufs,
     int num_blocks
 );
 
 // v5: 2-explorer virtual-loss variant of gpu_mcts_search_nn_block.
-// Each block runs 2 explorers per round, using oracle_net_forward_block_b2
+// Each block runs 2 explorers per round, using seres_net_forward_block_b2
 // for batched NN evaluation. Policy buffer must be sized for 2× per block:
 // d_policy_bufs needs num_blocks * 2 * NN_POLICY_SIZE floats.
 GPUMctsResult gpu_mcts_search_nn_block_p2(
@@ -107,7 +107,7 @@ GPUMctsResult gpu_mcts_search_nn_block_p2(
     int simulations,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_policy_bufs,
     int num_blocks
 );
@@ -154,7 +154,7 @@ int gpu_mcts_eval_trees_budget(
     int max_nodes_per_tree,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_policy_bufs,
     TreeEvalResult* h_results,
     int* game_root_idxs,
@@ -164,7 +164,7 @@ int gpu_mcts_eval_trees_budget(
 
 // v5: 2-explorer virtual-loss variant. Same semantics as above but
 // uses mcts_kernel_eval_p2 internally — each block runs 2 explorers per
-// round and uses oracle_net_forward_block_b2 for batched NN evaluation.
+// round and uses seres_net_forward_block_b2 for batched NN evaluation.
 // d_policy_bufs must be sized num_trees * 2 * NN_POLICY_SIZE floats.
 int gpu_mcts_eval_trees_budget_p2(
     const BoardState* root_positions,
@@ -173,7 +173,7 @@ int gpu_mcts_eval_trees_budget_p2(
     int max_nodes_per_tree,
     bool enable_koth,
     float c_puct,
-    OracleNetWeights* d_weights,
+    SeresNetWeights* d_weights,
     float* d_policy_bufs,
     TreeEvalResult* h_results,
     int* game_root_idxs,

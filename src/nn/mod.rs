@@ -6,7 +6,7 @@
 #[cfg(feature = "cudnn")]
 pub mod cudnn_conv;
 pub mod fused;
-pub mod oracle_net;
+pub mod seres_net;
 pub mod weights;
 
 use candle_core::{Result, Tensor};

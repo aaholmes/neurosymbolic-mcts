@@ -320,7 +320,7 @@ void test_nn_mode_dummy_equals_classical(bool& test_failed) {
     GPUMctsResult classical = gpu_mcts_search(start, 100, false);
 
     // NN mode with dummy weights (zeros → uniform policy, V = tanh(0.326*q))
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_scratch = alloc_nn_scratch(1);
     GPUMctsResult nn = gpu_mcts_search_nn(start, 100, false, 1.414f, d_weights, d_scratch, 1);
 
@@ -337,7 +337,7 @@ void test_nn_mode_dummy_equals_classical(bool& test_failed) {
 // Test: NN mode mate-in-1 should still detect exact value
 void test_nn_mode_mate_detection(bool& test_failed) {
     BoardState bs = parse_fen("6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1");
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_scratch = alloc_nn_scratch(1);
 
     GPUMctsResult result = gpu_mcts_search_nn(bs, 50, false, 1.414f, d_weights, d_scratch, 1);
@@ -351,7 +351,7 @@ void test_nn_mode_mate_detection(bool& test_failed) {
 
 // Test: NN mode plays a complete game
 void test_nn_mode_play_game(bool& test_failed) {
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_scratch = alloc_nn_scratch(1);
 
     BoardState pos = make_starting_position();

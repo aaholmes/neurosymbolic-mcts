@@ -98,7 +98,7 @@ mod with_model {
         let mut nn = NeuralNetPolicy::with_device(candle_core::Device::Cpu);
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/oraclenet_tiny.safetensors"
+            "/tests/fixtures/seresnet_tiny.safetensors"
         );
         nn.load(path).unwrap();
         nn
@@ -334,7 +334,7 @@ mod with_model {
     fn load_starts_the_requested_number_of_workers() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/oraclenet_tiny.safetensors"
+            "/tests/fixtures/seresnet_tiny.safetensors"
         );
         let server = InferenceServer::load(path, 2, 8).unwrap();
         assert!(server

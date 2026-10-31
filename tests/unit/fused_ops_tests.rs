@@ -123,16 +123,16 @@ fn fused_ops_match_unfused_on_gpu() {
 #[cfg(feature = "cuda")]
 #[test]
 fn tiny_net_on_gpu_matches_pytorch_golden_outputs() {
-    use kingfisher::nn::oracle_net::OracleNet;
+    use kingfisher::nn::seres_net::SeresNet;
     use kingfisher::nn::weights::load_state_dict;
     use kingfisher::nn::PolicyValueNet;
     use std::path::Path;
 
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let dev = Device::new_cuda(0).expect("CUDA device");
-    let sd = load_state_dict(&fixtures.join("oraclenet_tiny.safetensors"), &dev).unwrap();
-    let net = OracleNet::from_state_dict(sd, &dev).unwrap();
-    let io = candle_core::safetensors::load(fixtures.join("oraclenet_tiny_io.safetensors"), &dev)
+    let sd = load_state_dict(&fixtures.join("seresnet_tiny.safetensors"), &dev).unwrap();
+    let net = SeresNet::from_state_dict(sd, &dev).unwrap();
+    let io = candle_core::safetensors::load(fixtures.join("seresnet_tiny_io.safetensors"), &dev)
         .unwrap();
     let out = net.forward(&io["input"], &io["scalars"]).unwrap();
     assert!(max_abs_diff(&out.log_policy, &io["log_policy"]) < 1e-4);

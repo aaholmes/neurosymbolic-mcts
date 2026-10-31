@@ -1,4 +1,4 @@
-//! Fused elementwise kernels for the OracleNet forward pass.
+//! Fused elementwise kernels for the SeresNet forward pass.
 //!
 //! candle runs bias adds, ReLUs and the squeeze-and-excitation (SE) scaling as
 //! separate broadcast kernels, each of which re-reads the whole activation and

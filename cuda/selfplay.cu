@@ -356,7 +356,7 @@ int run_selfplay_games(
     // Avoids the per-call alloc/convert/free path inside the eval kernel.
     ConvWeightsShifted* d_shifted_w = nullptr;
     if (config.use_resnet && d_weights) {
-        d_shifted_w = convert_weights_shifted((OracleNetWeights*)d_weights);
+        d_shifted_w = convert_weights_shifted((SeresNetWeights*)d_weights);
     }
 
     // GPU buffers for move generation and board operations
@@ -442,7 +442,7 @@ int run_selfplay_games(
                     positions, active_count,
                     config.sims_per_move, config.max_nodes_per_tree,
                     config.enable_koth, config.c_puct,
-                    (OracleNetWeights*)d_weights, d_policy_bufs, results,
+                    (SeresNetWeights*)d_weights, d_policy_bufs, results,
                     reuse_root_idxs, fresh_starts, d_shifted_w
                 );
             } else {
@@ -450,7 +450,7 @@ int run_selfplay_games(
                     positions, active_count,
                     config.sims_per_move, config.max_nodes_per_tree,
                     config.enable_koth, config.c_puct,
-                    (OracleNetWeights*)d_weights, d_policy_bufs, results,
+                    (SeresNetWeights*)d_weights, d_policy_bufs, results,
                     reuse_root_idxs, fresh_starts, d_shifted_w
                 );
             }
@@ -707,7 +707,7 @@ int run_selfplay(
     int total = run_selfplay_games(d_weights, config, records, num_games);
     if (total < 0) {
         delete[] records;
-        if (config.use_resnet) free_nn_weights((OracleNetWeights*)d_weights);
+        if (config.use_resnet) free_nn_weights((SeresNetWeights*)d_weights);
         else                   free_transformer_weights((TransformerWeights*)d_weights);
         return -1;
     }
@@ -722,7 +722,7 @@ int run_selfplay(
         printf("Failed to open %s for writing\n", path);
         delete[] records;
         if (config.use_resnet)
-            free_nn_weights((OracleNetWeights*)d_weights);
+            free_nn_weights((SeresNetWeights*)d_weights);
         else
             free_transformer_weights((TransformerWeights*)d_weights);
         return -1;
@@ -740,7 +740,7 @@ int run_selfplay(
     for (int i = 0; i < num_games; i++) records[i].free_buf();
     delete[] records;
     if (config.use_resnet)
-        free_nn_weights((OracleNetWeights*)d_weights);
+        free_nn_weights((SeresNetWeights*)d_weights);
     else
         free_transformer_weights((TransformerWeights*)d_weights);
     return written;
@@ -798,8 +798,8 @@ EvalResult run_eval_games(
     ConvWeightsShifted* d_shifted_w_a = nullptr;
     ConvWeightsShifted* d_shifted_w_b = nullptr;
     if (config.use_resnet) {
-        if (d_weights_a) d_shifted_w_a = convert_weights_shifted((OracleNetWeights*)d_weights_a);
-        if (d_weights_b) d_shifted_w_b = convert_weights_shifted((OracleNetWeights*)d_weights_b);
+        if (d_weights_a) d_shifted_w_a = convert_weights_shifted((SeresNetWeights*)d_weights_a);
+        if (d_weights_b) d_shifted_w_b = convert_weights_shifted((SeresNetWeights*)d_weights_b);
     }
 
     BoardState* d_bs = nullptr; cudaMalloc(&d_bs, sizeof(BoardState));
@@ -880,7 +880,7 @@ EvalResult run_eval_games(
             if (config.use_resnet) {
                 gpu_mcts_eval_trees_budget(positions_a, count_a, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
-                    (OracleNetWeights*)d_weights_a, d_policy_bufs, mcts_a,
+                    (SeresNetWeights*)d_weights_a, d_policy_bufs, mcts_a,
                     side_root_idxs, all_fresh, d_shifted_w_a);
             } else {
                 gpu_mcts_eval_trees_transformer(positions_a, count_a, config.sims_per_move,
@@ -893,7 +893,7 @@ EvalResult run_eval_games(
             if (config.use_resnet) {
                 gpu_mcts_eval_trees_budget(positions_b, count_b, config.sims_per_move,
                     config.max_nodes_per_tree, config.enable_koth, config.c_puct,
-                    (OracleNetWeights*)d_weights_b, d_policy_bufs, mcts_b,
+                    (SeresNetWeights*)d_weights_b, d_policy_bufs, mcts_b,
                     side_root_idxs, all_fresh, d_shifted_w_b);
             } else {
                 gpu_mcts_eval_trees_transformer(positions_b, count_b, config.sims_per_move,

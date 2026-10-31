@@ -4,11 +4,11 @@
 #include <cuda_fp16.h>
 
 // ============================================================
-// OracleNet Weight Storage for GPU-Resident Inference
+// SeresNet Weight Storage for GPU-Resident Inference
 //
 // All weights stored in GPU global memory as flat float arrays.
 // One shared copy (~7.6 MB) read by all explorer warps.
-// Layout matches PyTorch's OracleNet (model.py) exactly.
+// Layout matches PyTorch's SeresNet (model.py) exactly.
 //
 // Architecture: SE-ResNet with 6 blocks, 128 channels
 //   Input:  [B, 17, 8, 8]
@@ -57,8 +57,8 @@ struct ResBlockParams {
     SEParams se;
 };
 
-// Complete OracleNet weights
-struct OracleNetWeights {
+// Complete SeresNet weights
+struct SeresNetWeights {
     // === Input conv + BN ===
     float start_conv_weight[NN_HIDDEN_DIM * NN_INPUT_CHANNELS * 3 * 3]; // [128, 17, 3, 3]
     BNParams start_bn;
@@ -86,7 +86,7 @@ struct OracleNetWeights {
 };
 
 // Pre-converted FP16 conv weights for Tensor Core path.
-// Allocated alongside OracleNetWeights; freed separately.
+// Allocated alongside SeresNetWeights; freed separately.
 // Only conv3x3 weights are converted (BN, SE, 1x1 stay FP32).
 struct ConvWeightsHalf {
     half* start_conv;                    // [128, 17, 9]
@@ -112,33 +112,33 @@ struct ConvWeightsShifted {
 // Allocate weights on GPU, initialize to zeros (classical-equivalent behavior:
 // uniform policy, v_logit=0, k=0.326).
 // Returns pointer to GPU-resident weights.
-OracleNetWeights* init_nn_weights_zeros();
+SeresNetWeights* init_nn_weights_zeros();
 
 // Load weights from a flat binary file (exported by export_weights_cuda.py).
 // Returns pointer to GPU-resident weights, or nullptr on failure.
-OracleNetWeights* load_nn_weights(const char* path);
+SeresNetWeights* load_nn_weights(const char* path);
 
 // Free GPU-resident weights.
-void free_nn_weights(OracleNetWeights* d_weights);
+void free_nn_weights(SeresNetWeights* d_weights);
 
 // Hot-swap: update weights from a new binary file without reallocating.
 // Returns true on success.
-bool update_nn_weights(OracleNetWeights* d_weights, const char* path);
+bool update_nn_weights(SeresNetWeights* d_weights, const char* path);
 
 // Get the size of the weights struct in bytes.
 size_t nn_weights_size();
 
-// Convert conv3x3 weights from FP32 OracleNetWeights to FP16 for Tensor Core path.
+// Convert conv3x3 weights from FP32 SeresNetWeights to FP16 for Tensor Core path.
 // Returns heap-allocated ConvWeightsHalf with GPU-resident half arrays.
 // d_weights must be GPU-resident.
-ConvWeightsHalf* convert_weights_to_half(const OracleNetWeights* d_weights);
+ConvWeightsHalf* convert_weights_to_half(const SeresNetWeights* d_weights);
 
 // Free GPU-resident FP16 conv weights.
 void free_half_weights(ConvWeightsHalf* d_half);
 
 // Convert conv3x3 weights to per-kernel-position FP16 slices for shifted-copy conv.
 // Each conv layer produces 9 × [C_out, C_in] FP16 matrices (one per kernel position).
-ConvWeightsShifted* convert_weights_shifted(const OracleNetWeights* d_weights);
+ConvWeightsShifted* convert_weights_shifted(const SeresNetWeights* d_weights);
 
 // Free GPU-resident shifted FP16 conv weights.
 void free_shifted_weights(ConvWeightsShifted* d_sw);

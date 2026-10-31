@@ -29,7 +29,7 @@ Throughput measurements follow below.
 
 - **Throughput:** see below. At 200 sims/move on RTX 5060 Ti, 36 concurrent games: **101.4 samples/sec, 20.3K sims/sec** (v5: 2-explorer virtual loss + batched conv).
 - **Apples-to-apples vs Lc0+Maia (both at 6×64):** Caissawary v5 188.6 samples/sec vs Lc0 368 — at ~51% of Lc0's throughput, gap narrowed from 2.27× to 1.95× over the v3→v5 work. (The 6×64 figure is from a temporary, *uncommitted* benchmark branch; reproducing it requires editing `nn_weights.cuh` and relaxing a `static_assert` — see the v5 section below.)
-- **Optimization stack:** v3 (FP16 inter-layer activation storage, smem 81→49 KB) → v4 (`oracle_net_forward_block_b2`: true batched WMMA at B=2 with weight-load amortization, 1.19× per-sim NN improvement) → v5 (2-explorer scheduling per block: thread 0 sequentially does SELECT for both with virtual loss, EXPAND/BACKUP parallelize across warps 0/1, NN forward is one batched call). End-to-end gain v3→v5: **~1.17×** on samples/sec.
+- **Optimization stack:** v3 (FP16 inter-layer activation storage, smem 81→49 KB) → v4 (`seres_net_forward_block_b2`: true batched WMMA at B=2 with weight-load amortization, 1.19× per-sim NN improvement) → v5 (2-explorer scheduling per block: thread 0 sequentially does SELECT for both with virtual loss, EXPAND/BACKUP parallelize across warps 0/1, NN forward is one batched call). End-to-end gain v3→v5: **~1.17×** on samples/sec.
 - **Smem-bound batch ceiling:** B=2 is the practical limit at 6×128 (97 KB of 99 KB cap). Pushing further requires FP8 activations, streaming activations through global memory, or a cross-block batching architecture.
 
 ### Transformer Also Supported
@@ -60,7 +60,7 @@ The benchmark uses zero-initialized SE-ResNet weights (no model file required); 
 
 ## GPU MCTS v5 — intra-block 2-explorer virtual loss + batched forward
 
-Measured 2026-05-07 on the `v5-vloss-p2` branch. The v4 batched conv primitive (`oracle_net_forward_block_b2`) is now wired into the production MCTS path via 2-explorer virtual-loss scheduling. Each block runs 2 explorers per round: thread 0 sequentially does SELECT for both (so virtual loss steers the second explorer away from the first's path); EXPAND and BACKUP run in parallel on warps 0 and 1; the NN forward is one batched call instead of two.
+Measured 2026-05-07 on the `v5-vloss-p2` branch. The v4 batched conv primitive (`seres_net_forward_block_b2`) is now wired into the production MCTS path via 2-explorer virtual-loss scheduling. Each block runs 2 explorers per round: thread 0 sequentially does SELECT for both (so virtual loss steers the second explorer away from the first's path); EXPAND and BACKUP run in parallel on warps 0 and 1; the NN forward is one batched call instead of two.
 
 Per-block static smem grew by ~1.1 KB (sh_bs[2], sh_path[2][128], sh_skip[2]); `sh_path` shrunk from 256 to 128 deep (chess MCTS depth never exceeds ~30 in practice) to fit static + dynamic within the per-block 99 KB cap.
 
@@ -107,14 +107,14 @@ All 19 test_block_ops + 13 test_mcts_kernel + 8 test_budget_reuse tests pass at 
 
 ## GPU MCTS v4 — batched conv microbenchmark (B=2)
 
-Measured 2026-05-07 on the `v4-batched-conv` branch. **Primitive-level benchmark only**; no MCTS integration in this phase. The new `block_conv_3x3_shifted_b2` loads each weight tile A once per (n_tile, k_tile) and applies it to both batch elements before advancing — true batched WMMA with weight-load amortization. The new `oracle_net_forward_block_b2` uses it; BN/SE/heads still run sequentially per batch on each batch's slice.
+Measured 2026-05-07 on the `v4-batched-conv` branch. **Primitive-level benchmark only**; no MCTS integration in this phase. The new `block_conv_3x3_shifted_b2` loads each weight tile A once per (n_tile, k_tile) and applies it to both batch elements before advancing — true batched WMMA with weight-load amortization. The new `seres_net_forward_block_b2` uses it; BN/SE/heads still run sequentially per batch on each batch's slice.
 
 **Microbenchmark** (`bench_forward_b2 1000` — single block, 256 threads, 1000 iterations after 50-iter warmup, CUDA-event timing):
 
 | mode | smem | per-call | per-sim | per-sim ratio |
 |------|------|---------:|--------:|--------------:|
-| B=1 (existing `oracle_net_forward_block`) | 50,176 B (49 KB) | 1392.7 µs | 1392.7 µs | 1.00× |
-| **B=2 (new `oracle_net_forward_block_b2`)** | 99,328 B (97 KB) | 2339.0 µs | **1169.5 µs** | **1.191×** |
+| B=1 (existing `seres_net_forward_block`) | 50,176 B (49 KB) | 1392.7 µs | 1392.7 µs | 1.00× |
+| **B=2 (new `seres_net_forward_block_b2`)** | 99,328 B (97 KB) | 2339.0 µs | **1169.5 µs** | **1.191×** |
 
 Three runs all hit 1.191× to 4 significant figures (run-to-run variation < 0.1%). The 1.19× per-sim speedup confirms the bottleneck includes a substantial weight-bandwidth component — true batched WMMA halves weight memory traffic, and we observe roughly that fraction of the per-sim wall time recovered.
 
@@ -244,7 +244,7 @@ This revises the earlier 1.5–2× projection downward to ~1.25–1.4×. The MCT
 
 Not committed to main. To re-run:
 1. Edit `cuda/nn_weights.cuh`: change `NN_HIDDEN_DIM = 128` to `NN_HIDDEN_DIM = 64` (and `NN_SE_REDUCTION = 16` to `NN_SE_REDUCTION = 8` to keep `NN_SE_INNER = 8`).
-2. Comment out the `static_assert(sizeof(OracleNetWeights) == 7930688, ...)` in `cuda/nn_weights.cu` (export was sized for 6×128).
+2. Comment out the `static_assert(sizeof(SeresNetWeights) == 7930688, ...)` in `cuda/nn_weights.cu` (export was sized for 6×128).
 3. Parameterize the hardcoded `32`s in `block_forward.cu` (residual save/add) and `block_ops.cu` (`block_conv_3x3_smem_w` accumulator) to use `(NN_HIDDEN_DIM * 64 + 255) / 256`.
 4. Rebuild and run `bench_throughput 100 200 36`.
 

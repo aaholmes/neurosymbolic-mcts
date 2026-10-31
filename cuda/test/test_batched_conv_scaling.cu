@@ -79,7 +79,7 @@ static float det_rand(uint32_t idx, uint32_t seed) {
 // ============================================================
 //
 // Source conv3x3 weights: [C_out, C_in, 3, 3] FP32, matches
-// OracleNetWeights conv layout: W[oc, ic, ky, kx] at offset
+// SeresNetWeights conv layout: W[oc, ic, ky, kx] at offset
 //   oc * (C_in * 9) + ic * 9 + (ky * 3 + kx)
 //
 // Produce 9 FP16 device buffers W_s[s] of shape [C_out, C_in]

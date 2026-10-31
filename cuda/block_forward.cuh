@@ -7,7 +7,7 @@
 #ifdef __CUDACC__
 
 // ============================================================
-// Shared memory layout for oracle_net_forward_block (FP16 activations)
+// Shared memory layout for seres_net_forward_block (FP16 activations)
 //
 // The conv math (shifted-copy + WMMA) was already FP16 + FP32-accumulator.
 // What used to be FP32 was the inter-layer activation buffers (buf1, buf2)
@@ -87,10 +87,10 @@ static_assert((B2_BUF2_OFFSET_H * 2) % 16 == 0, "B2 buf2 offset must be 16-byte 
 // Same caller-side smem signature pattern (`float* smem`); reinterpreted
 // as `__half*` internally. Caller must supply at least B2_SMEM_BYTES.
 // ============================================================
-__device__ void oracle_net_forward_block_b2(
+__device__ void seres_net_forward_block_b2(
     const BoardState* bs0, const BoardState* bs1,
     float q0, float q1,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     float* smem,
     float* policy_out_b2,    // [2, NN_POLICY_SIZE] FP32 in global memory
     float* value_out_b2,     // [2] FP32, written by thread 0
@@ -116,10 +116,10 @@ __device__ void oracle_net_forward_block_b2(
 // shifted_w:  optional per-position FP16 weights for shifted-copy path (nullptr = skip)
 // Priority: shifted_w > half_w > scalar fallback
 // ============================================================
-__device__ void oracle_net_forward_block(
+__device__ void seres_net_forward_block(
     const BoardState* bs,
     float q_result,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     float* smem,
     float* policy_out,
     float* value_out,

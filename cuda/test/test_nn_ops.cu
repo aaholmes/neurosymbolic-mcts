@@ -48,12 +48,12 @@ void test_weights_struct_size(bool& test_failed) {
 }
 
 void test_dummy_weights_init(bool& test_failed) {
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     ASSERT_TRUE(d_weights != nullptr);
 
     // Read back and verify some values
-    OracleNetWeights* h_weights = (OracleNetWeights*)malloc(sizeof(OracleNetWeights));
-    cudaMemcpy(h_weights, d_weights, sizeof(OracleNetWeights), cudaMemcpyDeviceToHost);
+    SeresNetWeights* h_weights = (SeresNetWeights*)malloc(sizeof(SeresNetWeights));
+    cudaMemcpy(h_weights, d_weights, sizeof(SeresNetWeights), cudaMemcpyDeviceToHost);
 
     // All conv weights should be zero
     ASSERT_NEAR(h_weights->start_conv_weight[0], 0.0f, 1e-6f);
@@ -290,10 +290,10 @@ void test_log_softmax(bool& test_failed) {
 
 __global__ void kernel_forward_pass(
     const BoardState* bs, float q_result,
-    const OracleNetWeights* weights, float* scratch,
+    const SeresNetWeights* weights, float* scratch,
     float* policy_out, float* value_out, float* k_out
 ) {
-    oracle_net_forward(bs, q_result, weights, scratch, policy_out, value_out, k_out);
+    seres_net_forward(bs, q_result, weights, scratch, policy_out, value_out, k_out);
 }
 
 void test_full_forward_dummy_weights(bool& test_failed) {
@@ -302,7 +302,7 @@ void test_full_forward_dummy_weights(bool& test_failed) {
     // v_logit = 0, k = 0.47 * ln(2) ≈ 0.326
     // V = tanh(0 + 0.326 * q_result)
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     ASSERT_TRUE(d_weights != nullptr);
 
     float* d_scratch = alloc_nn_scratch(1);
@@ -511,7 +511,7 @@ void test_gpu_pe_hanging_piece(bool& test_failed) {
 void test_forward_pass_q_result_sensitivity(bool& test_failed) {
     // With dummy weights, value should scale with q_result:
     // V = tanh(0.326 * q_result)
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     float* d_scratch = alloc_nn_scratch(1);
     BoardState bs = make_starting_position();
     BoardState* d_bs;

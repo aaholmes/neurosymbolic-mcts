@@ -1,8 +1,8 @@
 """
-Write golden fixtures for the Rust (candle) OracleNet port.
+Write golden fixtures for the Rust (candle) SeresNet port.
 
-A tiny OracleNet (2 blocks, hidden 32) with every parameter randomized,
-including the heads that OracleNet zero-initializes and the BatchNorm running
+A tiny SeresNet (2 blocks, hidden 32) with every parameter randomized,
+including the heads that SeresNet zero-initializes and the BatchNorm running
 statistics. With the default init the policy is uniform and v_logit is 0, so
 a broken port would still match.
 
@@ -17,7 +17,7 @@ import torch
 from safetensors.torch import save_file
 
 sys.path.insert(0, os.path.dirname(__file__))
-from model import OracleNet  # noqa: E402
+from model import SeresNet  # noqa: E402
 
 NUM_BLOCKS = 2
 HIDDEN_DIM = 32
@@ -26,7 +26,7 @@ BATCH = 16
 
 def randomized_model(seed=0):
     torch.manual_seed(seed)
-    model = OracleNet(num_blocks=NUM_BLOCKS, hidden_dim=HIDDEN_DIM)
+    model = SeresNet(num_blocks=NUM_BLOCKS, hidden_dim=HIDDEN_DIM)
     with torch.no_grad():
         for name, p in model.named_parameters():
             if p.dim() == 0:
@@ -64,16 +64,16 @@ def main():
     with torch.no_grad():
         log_policy, v_logit, k = model(x, scalars)
 
-    save_file(state, os.path.join(out_dir, "oraclenet_tiny.safetensors"))
+    save_file(state, os.path.join(out_dir, "seresnet_tiny.safetensors"))
     torch.save({"model_state_dict": model.state_dict(), "optimizer_state_dict": {}},
-               os.path.join(out_dir, "oraclenet_tiny.pth"))
+               os.path.join(out_dir, "seresnet_tiny.pth"))
     save_file({
         "input": x.contiguous(),
         "scalars": scalars.contiguous(),
         "log_policy": log_policy.contiguous(),
         "v_logit": v_logit.contiguous(),
         "k": k.contiguous(),
-    }, os.path.join(out_dir, "oraclenet_tiny_io.safetensors"))
+    }, os.path.join(out_dir, "seresnet_tiny_io.safetensors"))
 
     p = log_policy.exp()
     print(f"wrote fixtures to {out_dir}: policy max prob {p.max():.4f}, "

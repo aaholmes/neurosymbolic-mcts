@@ -1,4 +1,4 @@
-//! Spike: does replaying a captured CUDA graph of one OracleNet forward pass
+//! Spike: does replaying a captured CUDA graph of one SeresNet forward pass
 //! match the normal forward pass, and how much per-call time does it save?
 //!
 //! BENCH_MODEL=weights/gen_34.pt \
@@ -6,7 +6,7 @@
 
 use candle_core::cuda::cudarc::driver::sys;
 use candle_core::{DType, Device, Tensor};
-use kingfisher::nn::oracle_net::OracleNet;
+use kingfisher::nn::seres_net::SeresNet;
 use kingfisher::nn::weights::load_state_dict;
 use kingfisher::nn::PolicyValueNet;
 use rand::rngs::StdRng;
@@ -51,7 +51,7 @@ fn cuda_graph_spike() -> candle_core::Result<()> {
     };
     // Event tracking makes captured ops wait on uncaptured events; this device uses one stream.
     unsafe { cuda.disable_event_tracking() };
-    let net = OracleNet::from_state_dict(load_state_dict(Path::new(&path), &dev).unwrap(), &dev)?;
+    let net = SeresNet::from_state_dict(load_state_dict(Path::new(&path), &dev).unwrap(), &dev)?;
     let stream = cuda.cuda_stream();
     let mut rng = StdRng::seed_from_u64(3);
 

@@ -10,7 +10,7 @@ import os
 import struct
 import glob
 import sys
-from model import OracleNet, TransformerNet
+from model import SeresNet, TransformerNet
 from augmentation import augment_sample, augment_all_transforms
 
 # Configuration
@@ -287,7 +287,7 @@ def train_with_config(
     augment=True,
     reset_optimizer=False,
     train_heads="all",
-    arch="oraclenet",
+    arch="seresnet",
     num_blocks=6,
     hidden_dim=128,
     use_epochs=False,
@@ -346,7 +346,7 @@ def train_with_config(
     if arch == "transformer":
         model = TransformerNet(num_blocks=num_blocks, hidden_dim=hidden_dim).to(DEVICE)
     else:
-        model = OracleNet(num_blocks=num_blocks, hidden_dim=hidden_dim).to(DEVICE)
+        model = SeresNet(num_blocks=num_blocks, hidden_dim=hidden_dim).to(DEVICE)
 
     # Resume from checkpoint
     global_minibatch = 0
@@ -579,7 +579,7 @@ def train_with_config(
 
 def parse_args():
     import argparse
-    parser = argparse.ArgumentParser(description="Train OracleNet chess model")
+    parser = argparse.ArgumentParser(description="Train SeresNet chess model")
     parser.add_argument('data_dir', type=str, nargs='?', default='data/training',
                         help='Directory containing .bin training data')
     parser.add_argument('output_path', type=str, nargs='?', default='python/models/latest.pt',
@@ -614,9 +614,9 @@ def parse_args():
     parser.add_argument('--train-heads', type=str, default='all',
                         choices=['all', 'policy', 'value'],
                         help='Which heads to train: all, policy (freeze value+k), value (freeze policy)')
-    parser.add_argument('--arch', type=str, default='oraclenet',
-                        choices=['oraclenet', 'transformer'],
-                        help='Network architecture (default: oraclenet)')
+    parser.add_argument('--arch', type=str, default='seresnet',
+                        choices=['seresnet', 'oraclenet', 'transformer'],  # oraclenet: earlier name of seresnet
+                        help='Network architecture (default: seresnet)')
     parser.add_argument('--num-blocks', type=int, default=6,
                         help='Number of blocks (default: 6)')
     parser.add_argument('--hidden-dim', type=int, default=128,

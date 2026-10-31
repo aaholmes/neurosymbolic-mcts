@@ -50,8 +50,8 @@ class ResBlock(nn.Module):
         out += residual
         return F.relu(out)
 
-# --- 3. The Main Network (OracleNet) ---
-class OracleNet(nn.Module):
+# --- 3. The Main Network (SeresNet) ---
+class SeresNet(nn.Module):
     def __init__(self, num_blocks=6, hidden_dim=128, input_channels=17, policy_output_size=4672): 
         # Defaulting input_channels to 17 to match current Rust implementation
         # Defaulting hidden_dim to 128 to match previous capacity
@@ -246,7 +246,7 @@ class TransformerNet(nn.Module):
         self.v_fc1 = nn.Linear(hidden_dim + 1, 256)  # +1 for q_result
         self.v_fc2 = nn.Linear(256, 1)
 
-        # K scalar (same as OracleNet)
+        # K scalar (same as SeresNet)
         self.k_logit = nn.Parameter(torch.tensor(0.0))
 
         self.apply(self._init_weights)

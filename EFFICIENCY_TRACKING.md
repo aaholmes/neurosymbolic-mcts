@@ -21,8 +21,8 @@ To append a new measurement: edit this file and add a row to the table. Source d
 
 | date       | kernel path                          | NN arch      | per-call (µs) | per-sim (µs) | speedup | commit   | source                |
 |:-----------|:-------------------------------------|:-------------|--------------:|-------------:|--------:|:---------|:----------------------|
-| 2026-05-07 | `oracle_net_forward_block` (B=1, v3) | SE-ResNet 6×128 | 1393 | 1393 | 1.00× | 5a2977f | BENCHMARKS.md "v4 microbench" |
-| 2026-05-07 | `oracle_net_forward_block_b2` (B=2)  | SE-ResNet 6×128 | 2339 | 1170 | 1.19× | 5a2977f | BENCHMARKS.md "v4 microbench" |
+| 2026-05-07 | `seres_net_forward_block` (B=1, v3) | SE-ResNet 6×128 | 1393 | 1393 | 1.00× | 5a2977f | BENCHMARKS.md "v4 microbench" |
+| 2026-05-07 | `seres_net_forward_block_b2` (B=2)  | SE-ResNet 6×128 | 2339 | 1170 | 1.19× | 5a2977f | BENCHMARKS.md "v4 microbench" |
 
 ## Calibration tests (for hybrid CPU-NNUE + GPU-bignet evaluation)
 

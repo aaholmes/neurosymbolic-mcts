@@ -1,5 +1,5 @@
-// Microbenchmark: per-call wall time for oracle_net_forward_block (B=1)
-// vs oracle_net_forward_block_b2 (B=2). Measures pure forward throughput
+// Microbenchmark: per-call wall time for seres_net_forward_block (B=1)
+// vs seres_net_forward_block_b2 (B=2). Measures pure forward throughput
 // in isolation — no MCTS, no allocation, no host roundtrip.
 //
 // Two modes are run back-to-back inside a tight loop with CUDA-event
@@ -18,14 +18,14 @@
 #include <cuda_fp16.h>
 
 __global__ void bench_forward_b1_kernel(
-    const BoardState* bs, float q, const OracleNetWeights* w,
+    const BoardState* bs, float q, const SeresNetWeights* w,
     const ConvWeightsShifted* shifted_w,
     float* policy_out, float* value_out, float* k_out,
     int n_iters
 ) {
     extern __shared__ __half smem[];
     for (int it = 0; it < n_iters; it++) {
-        oracle_net_forward_block(bs, q, w, (float*)smem,
+        seres_net_forward_block(bs, q, w, (float*)smem,
                                  policy_out, value_out, k_out,
                                  nullptr, shifted_w);
     }
@@ -33,13 +33,13 @@ __global__ void bench_forward_b1_kernel(
 
 __global__ void bench_forward_b2_kernel(
     const BoardState* bs0, const BoardState* bs1, float q0, float q1,
-    const OracleNetWeights* w, const ConvWeightsShifted* shifted_w,
+    const SeresNetWeights* w, const ConvWeightsShifted* shifted_w,
     float* policy_out_b2, float* value_out_b2, float* k_out_b2,
     int n_iters
 ) {
     extern __shared__ __half smem[];
     for (int it = 0; it < n_iters; it++) {
-        oracle_net_forward_block_b2(bs0, bs1, q0, q1, w, (float*)smem,
+        seres_net_forward_block_b2(bs0, bs1, q0, q1, w, (float*)smem,
                                     policy_out_b2, value_out_b2, k_out_b2,
                                     shifted_w);
     }
@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
     int n_iters = (argc > 1) ? atoi(argv[1]) : 1000;
     int n_warmup = 50;
 
-    OracleNetWeights* d_weights = init_nn_weights_zeros();
+    SeresNetWeights* d_weights = init_nn_weights_zeros();
     ConvWeightsShifted* d_shifted = convert_weights_shifted(d_weights);
 
     // Two boards (we use the same starting position for both batches —

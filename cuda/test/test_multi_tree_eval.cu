@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
     // NN mode
     if (argc > 1) {
         printf("\n=== Multi-Tree Eval (NN Mode) ===\n");
-        OracleNetWeights* d_weights = load_nn_weights(argv[1]);
+        SeresNetWeights* d_weights = load_nn_weights(argv[1]);
         if (!d_weights) {
             printf("Failed to load weights from %s\n", argv[1]);
             return 1;

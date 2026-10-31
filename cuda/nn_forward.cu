@@ -6,10 +6,10 @@
 // Full forward pass implementation
 // ============================================================
 
-__device__ void oracle_net_forward(
+__device__ void seres_net_forward(
     const BoardState* bs,
     float q_result,
-    const OracleNetWeights* weights,
+    const SeresNetWeights* weights,
     float* scratch,
     float* policy_out,
     float* value_out,

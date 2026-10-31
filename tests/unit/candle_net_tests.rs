@@ -1,5 +1,5 @@
-//! Parity tests for the candle OracleNet port, using golden outputs written by
-//! `python/export_parity_fixture.py` (a 2-block, hidden-32 OracleNet with all
+//! Parity tests for the candle SeresNet port, using golden outputs written by
+//! `python/export_parity_fixture.py` (a 2-block, hidden-32 SeresNet with all
 //! parameters randomized).
 
 #![cfg(feature = "neural")]
@@ -7,7 +7,7 @@
 use crate::common::{board_from_fen, positions};
 use candle_core::{Device, Tensor};
 use kingfisher::neural_net::NeuralNetPolicy;
-use kingfisher::nn::oracle_net::OracleNet;
+use kingfisher::nn::seres_net::SeresNet;
 use kingfisher::nn::weights::{load_state_dict, resolve_weights, WeightsFile};
 use kingfisher::nn::PolicyValueNet;
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn io() -> HashMap<String, Tensor> {
-    candle_core::safetensors::load(fixture("oraclenet_tiny_io.safetensors"), &Device::Cpu).unwrap()
+    candle_core::safetensors::load(fixture("seresnet_tiny_io.safetensors"), &Device::Cpu).unwrap()
 }
 
 fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
@@ -37,15 +37,15 @@ fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
         .unwrap()
 }
 
-fn tiny_net(file: &str) -> OracleNet {
+fn tiny_net(file: &str) -> SeresNet {
     let sd = load_state_dict(&fixture(file), &Device::Cpu).unwrap();
-    OracleNet::from_state_dict(sd, &Device::Cpu).unwrap()
+    SeresNet::from_state_dict(sd, &Device::Cpu).unwrap()
 }
 
 #[test]
 fn forward_matches_pytorch_golden_outputs() {
     let io = io();
-    let net = tiny_net("oraclenet_tiny.safetensors");
+    let net = tiny_net("seresnet_tiny.safetensors");
     let out = net.forward(&io["input"], &io["scalars"]).unwrap();
 
     let dp = max_abs_diff(&out.log_policy, &io["log_policy"]);
@@ -63,7 +63,7 @@ fn forward_matches_pytorch_golden_outputs() {
 
 #[test]
 fn config_is_inferred_from_weight_shapes() {
-    let cfg = tiny_net("oraclenet_tiny.safetensors").config();
+    let cfg = tiny_net("seresnet_tiny.safetensors").config();
     assert_eq!(cfg.hidden_dim, 32);
     assert_eq!(cfg.num_blocks, 2);
 }
@@ -71,10 +71,10 @@ fn config_is_inferred_from_weight_shapes() {
 #[test]
 fn pth_and_safetensors_give_identical_outputs() {
     let io = io();
-    let a = tiny_net("oraclenet_tiny.safetensors")
+    let a = tiny_net("seresnet_tiny.safetensors")
         .forward(&io["input"], &io["scalars"])
         .unwrap();
-    let b = tiny_net("oraclenet_tiny.pth")
+    let b = tiny_net("seresnet_tiny.pth")
         .forward(&io["input"], &io["scalars"])
         .unwrap();
     assert_eq!(max_abs_diff(&a.log_policy, &b.log_policy), 0.0);
@@ -90,14 +90,14 @@ fn resolve_prefers_sibling_safetensors_then_pth() {
 
     assert!(resolve_weights(&pt).is_err(), "no state dict next to .pt");
 
-    std::fs::copy(fixture("oraclenet_tiny.pth"), dir.path().join("gen_3.pth")).unwrap();
+    std::fs::copy(fixture("seresnet_tiny.pth"), dir.path().join("gen_3.pth")).unwrap();
     assert_eq!(
         resolve_weights(&pt).unwrap(),
         WeightsFile::Pth(dir.path().join("gen_3.pth"))
     );
 
     std::fs::copy(
-        fixture("oraclenet_tiny.safetensors"),
+        fixture("seresnet_tiny.safetensors"),
         dir.path().join("gen_3.safetensors"),
     )
     .unwrap();
@@ -114,9 +114,9 @@ fn resolve_errors_on_missing_file() {
 
 #[test]
 fn missing_tensor_is_an_error_not_a_panic() {
-    let mut sd = load_state_dict(&fixture("oraclenet_tiny.safetensors"), &Device::Cpu).unwrap();
+    let mut sd = load_state_dict(&fixture("seresnet_tiny.safetensors"), &Device::Cpu).unwrap();
     sd.remove("p_head.weight");
-    assert!(OracleNet::from_state_dict(sd, &Device::Cpu).is_err());
+    assert!(SeresNet::from_state_dict(sd, &Device::Cpu).is_err());
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn policy_load_reports_missing_file() {
 #[test]
 fn launched_batches_finish_with_predict_batch_results() {
     let mut nn = NeuralNetPolicy::new();
-    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+    nn.load(fixture("seresnet_tiny.safetensors").to_str().unwrap())
         .unwrap();
     let a: Vec<_> = [positions::STARTING, positions::CASTLING_BOTH]
         .iter()
@@ -169,7 +169,7 @@ fn launching_without_a_model_finishes_with_no_predictions() {
 #[test]
 fn predict_batch_matches_single_predictions() {
     let mut nn = NeuralNetPolicy::new();
-    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+    nn.load(fixture("seresnet_tiny.safetensors").to_str().unwrap())
         .unwrap();
     assert!(nn.is_available());
 
@@ -215,7 +215,7 @@ fn resolve_follows_symlinked_model_path() {
     // weights/latest.pt is a symlink to gen_N.pt, with no latest.pth beside it
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("gen_3.pt"), b"torchscript").unwrap();
-    std::fs::copy(fixture("oraclenet_tiny.pth"), dir.path().join("gen_3.pth")).unwrap();
+    std::fs::copy(fixture("seresnet_tiny.pth"), dir.path().join("gen_3.pth")).unwrap();
     let latest = dir.path().join("latest.pt");
     std::os::unix::fs::symlink(dir.path().join("gen_3.pt"), &latest).unwrap();
     assert_eq!(
@@ -231,7 +231,7 @@ fn resolve_pt_name_without_file_finds_symlinked_pth() {
     // name, and weights/latest.pth is a symlink to gen_N.pth.
     let dir = tempfile::tempdir().unwrap();
     let gen = dir.path().join("gen_5.pth");
-    std::fs::copy(fixture("oraclenet_tiny.pth"), &gen).unwrap();
+    std::fs::copy(fixture("seresnet_tiny.pth"), &gen).unwrap();
     let latest_pth = dir.path().join("latest.pth");
     std::os::unix::fs::symlink(&gen, &latest_pth).unwrap();
     assert_eq!(
@@ -245,7 +245,7 @@ fn resolve_pt_name_without_file_finds_symlinked_pth() {
 #[test]
 fn predict_batch_records_batch_sizes() {
     let mut nn = NeuralNetPolicy::new();
-    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+    nn.load(fixture("seresnet_tiny.safetensors").to_str().unwrap())
         .unwrap();
     let boards: Vec<_> = (0..4)
         .map(|_| board_from_fen(positions::STARTING))
@@ -285,7 +285,7 @@ fn legal_moves(board: &kingfisher::board::Board) -> Vec<kingfisher::move_types::
 #[test]
 fn priors_for_given_moves_match_renormalized_full_policy() {
     let mut nn = NeuralNetPolicy::new();
-    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+    nn.load(fixture("seresnet_tiny.safetensors").to_str().unwrap())
         .unwrap();
     let fens = [
         positions::STARTING,
@@ -344,8 +344,8 @@ fn precision_parses_its_names_and_rejects_others() {
 #[test]
 fn half_precision_net_on_cpu_is_an_error() {
     use kingfisher::nn::Precision;
-    let sd = load_state_dict(&fixture("oraclenet_tiny.safetensors"), &Device::Cpu).unwrap();
-    let err = OracleNet::from_state_dict_with_precision(sd, &Device::Cpu, Precision::F16)
+    let sd = load_state_dict(&fixture("seresnet_tiny.safetensors"), &Device::Cpu).unwrap();
+    let err = SeresNet::from_state_dict_with_precision(sd, &Device::Cpu, Precision::F16)
         .err()
         .expect("half precision on the CPU should fail")
         .to_string();
@@ -360,8 +360,8 @@ fn tiny_net_in_half_precision_matches_golden_outputs() {
     let dev = Device::new_cuda(0).expect("CUDA device");
     let io = io();
     for (p, tol) in [(Precision::F16, 2e-2), (Precision::Bf16, 5e-2)] {
-        let sd = load_state_dict(&fixture("oraclenet_tiny.safetensors"), &dev).unwrap();
-        let net = OracleNet::from_state_dict_with_precision(sd, &dev, p).unwrap();
+        let sd = load_state_dict(&fixture("seresnet_tiny.safetensors"), &dev).unwrap();
+        let net = SeresNet::from_state_dict_with_precision(sd, &dev, p).unwrap();
         let out = net
             .forward(
                 &io["input"].to_device(&dev).unwrap(),
@@ -455,7 +455,7 @@ fn trained_net_in_half_precision_keeps_priors_and_values_close() {
 #[test]
 fn predict_batch_records_wall_and_cpu_time_per_phase() {
     let mut nn = NeuralNetPolicy::with_device(Device::Cpu);
-    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+    nn.load(fixture("seresnet_tiny.safetensors").to_str().unwrap())
         .unwrap();
     let boards = vec![board_from_fen(positions::STARTING); 3];
     for _ in 0..2 {

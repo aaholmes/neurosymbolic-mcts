@@ -13,7 +13,7 @@ We run TWO calibration comparisons:
      even ideal evaluators can't be hybridized this way.
 
   B. Cross-model comparison: Stockfish (fast eval) vs our Caissawary
-     OracleNet (slow eval). This tests the actual proposed pairing, but
+     SeresNet (slow eval). This tests the actual proposed pairing, but
      conflates strength gap (Stockfish ~3500 Elo, Caissawary ~2500) with
      architectural calibration. Informative but should be read with caution.
 
@@ -328,7 +328,7 @@ def main():
     a_B, b_B, rmse_B, preds_B = fit_sigmoid_calibration(cps_slow, targets_B)
     abs_slow = np.abs(cps_slow)
 
-    print(f"\n=== Test B: Stockfish d{args.slow_depth} (cp) → Caissawary OracleNet (winprob) ===")
+    print(f"\n=== Test B: Stockfish d{args.slow_depth} (cp) → Caissawary SeresNet (winprob) ===")
     print(f"  (Caveat: Stockfish 17 ~3500 Elo, Caissawary v3 ~2500 Elo. Strength gap dominates.)")
     print(f"  Fit:   P_caissa ≈ sigmoid({a_B:.5f} * cp + {b_B:.4f})")
     print(f"  Overall RMSE: {rmse_B:.3f}")

@@ -14,7 +14,7 @@ import argparse
 from dataclasses import dataclass, field, asdict
 
 import torch
-from model import OracleNet, TransformerNet
+from model import SeresNet, TransformerNet
 from replay_buffer import ReplayBuffer
 
 
@@ -62,7 +62,7 @@ class TrainingConfig:
     single_variant: bool = True  # train "all" only; use --multi-variant for policy/value/all
 
     # Model architecture
-    arch: str = "oraclenet"  # "oraclenet" or "transformer"
+    arch: str = "seresnet"  # "seresnet" or "transformer"
     num_blocks: int = 6
     hidden_dim: int = 128
 
@@ -133,9 +133,9 @@ class TrainingConfig:
                             help="Skip self-play after gen 1 (eval games produce training data)")
         parser.add_argument("--multi-variant", action="store_true",
                             help="Train all 3 variants (policy-only, value-only, all) instead of just 'all'")
-        parser.add_argument("--arch", type=str, default="oraclenet",
-                            choices=["oraclenet", "transformer"],
-                            help="Network architecture (default: oraclenet)")
+        parser.add_argument("--arch", type=str, default="seresnet",
+                            choices=["seresnet", "oraclenet", "transformer"],  # oraclenet: earlier name of seresnet
+                            help="Network architecture (default: seresnet)")
         parser.add_argument("--num-blocks", type=int, default=6,
                             help="Number of residual/transformer blocks (default: 6)")
         parser.add_argument("--hidden-dim", type=int, default=128,
@@ -189,7 +189,7 @@ def create_model(config):
     if config.arch == "transformer":
         return TransformerNet(num_blocks=config.num_blocks, hidden_dim=config.hidden_dim)
     else:
-        return OracleNet(num_blocks=config.num_blocks, hidden_dim=config.hidden_dim)
+        return SeresNet(num_blocks=config.num_blocks, hidden_dim=config.hidden_dim)
 
 
 @dataclass

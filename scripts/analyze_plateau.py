@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 # Add python/ to path for model import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
-from model import OracleNet
+from model import SeresNet
 
 
 # --- Diverse test positions ---
@@ -151,8 +151,8 @@ def policy_entropy(log_probs: np.ndarray) -> float:
 
 
 def load_model(checkpoint_path, num_blocks=2, hidden_dim=64, device="cpu"):
-    """Load an OracleNet checkpoint."""
-    model = OracleNet(num_blocks=num_blocks, hidden_dim=hidden_dim)
+    """Load an SeresNet checkpoint."""
+    model = SeresNet(num_blocks=num_blocks, hidden_dim=hidden_dim)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
         model.load_state_dict(ckpt["model_state_dict"])
