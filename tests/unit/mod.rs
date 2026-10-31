@@ -14,6 +14,7 @@ mod experiment_metrics_tests;
 mod ext_qsearch_tests;
 mod fused_ops_tests;
 mod gives_check_tests;
+mod graph_cache_tests;
 mod graphviz_tests;
 mod hash_tests;
 mod history_tests;

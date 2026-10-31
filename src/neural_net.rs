@@ -122,6 +122,9 @@ mod candle_impl {
         pub batch_sizes: StatsAccumulator,
         /// Wall and CPU time per step of each batch.
         pub phases: super::InferencePhases,
+        /// Recorded forward passes, when enabled (`enable_cuda_graphs`).
+        #[cfg(feature = "cudnn")]
+        graphs: Option<crate::nn::graph_cache::GraphCache>,
     }
 
     impl Default for NeuralNetPolicy {
@@ -168,7 +171,20 @@ mod candle_impl {
                 transfer_from_gpu_timing: TimingAccumulator::default(),
                 batch_sizes: StatsAccumulator::default(),
                 phases: super::InferencePhases::default(),
+                #[cfg(feature = "cudnn")]
+                graphs: None,
             }
+        }
+
+        /// Replay the forward pass of batches of up to `cap` positions as CUDA graphs,
+        /// recorded on first use. Applies to the legal-move-prior path of a
+        /// channels-last (half-precision) network on CUDA; a no-op otherwise.
+        pub fn enable_cuda_graphs(&mut self, cap: usize) {
+            #[cfg(feature = "cudnn")]
+            {
+                self.graphs = Some(crate::nn::graph_cache::GraphCache::new(cap));
+            }
+            let _ = cap;
         }
 
         /// Load weights. `path` may be a `.safetensors` or `.pth` state dict, or a
@@ -350,6 +366,14 @@ mod candle_impl {
 
             let t1 = Instant::now();
             let clock = PhaseClock::start(c"kf.infer.launch");
+            #[cfg(feature = "cudnn")]
+            let (logits, v_logit) = match self.graphs.as_mut() {
+                Some(graphs) if model.channels_last() && self.device.is_cuda() => {
+                    graphs.forward(model, &planes, &scalars)?
+                }
+                _ => model.forward_logits(&planes, &scalars)?,
+            };
+            #[cfg(not(feature = "cudnn"))]
             let (logits, v_logit) = model.forward_logits(&planes, &scalars)?;
             let mut index: Vec<u32> = Vec::new();
             let mut lens = Vec::with_capacity(boards.len());
@@ -637,6 +661,7 @@ mod stub {
         pub fn is_finished(&self, _pending: &InFlight) -> bool {
             true
         }
+        pub fn enable_cuda_graphs(&mut self, _cap: usize) {}
         pub fn finish_batch(&mut self, pending: InFlight) -> Vec<Option<(Vec<f32>, f32, f32)>> {
             vec![None; pending.len]
         }

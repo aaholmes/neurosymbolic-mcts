@@ -62,6 +62,9 @@ pub struct ServerOptions {
     pub full_policy: bool,
     /// Logical CPUs to pin each worker thread to (None: leave it unpinned).
     pub inference_cpus: Option<Vec<usize>>,
+    /// Replay each batch's forward pass as a recorded CUDA graph (half precision
+    /// on CUDA, legal-move priors only).
+    pub cuda_graphs: bool,
 }
 
 impl Default for ServerOptions {
@@ -71,13 +74,14 @@ impl Default for ServerOptions {
             pipeline: true,
             full_policy: false,
             inference_cpus: None,
+            cuda_graphs: false,
         }
     }
 }
 
 impl ServerOptions {
-    /// Defaults, overridden by KF_PIPELINE=0|1, KF_FULL_POLICY=0|1 and
-    /// KF_INFER_CPUS=<cpu list> (e.g. "0,16").
+    /// Defaults, overridden by KF_PIPELINE=0|1, KF_FULL_POLICY=0|1,
+    /// KF_CUDA_GRAPHS=0|1 and KF_INFER_CPUS=<cpu list> (e.g. "0,16").
     pub fn from_env() -> Self {
         let flag = |name: &str, default: bool| match std::env::var(name).as_deref() {
             Ok("1") => true,
@@ -89,6 +93,7 @@ impl ServerOptions {
         Self {
             pipeline: flag("KF_PIPELINE", d.pipeline),
             full_policy: flag("KF_FULL_POLICY", d.full_policy),
+            cuda_graphs: flag("KF_CUDA_GRAPHS", d.cuda_graphs),
             inference_cpus: inference_cpus_from_env(),
             ..d
         }
@@ -345,6 +350,9 @@ fn run_worker(
     stats: Arc<Mutex<WorkerStats>>,
 ) {
     let idle_window = options.idle_window;
+    if options.cuda_graphs {
+        nn.enable_cuda_graphs(batch_size);
+    }
     if let Some(cpus) = &options.inference_cpus {
         #[cfg(target_os = "linux")]
         if let Err(e) = crate::threads::pin_current_thread(cpus) {

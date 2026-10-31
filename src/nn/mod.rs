@@ -6,6 +6,7 @@
 #[cfg(feature = "cudnn")]
 pub mod cudnn_conv;
 pub mod fused;
+pub mod graph_cache;
 pub mod seres_net;
 pub mod weights;
 
