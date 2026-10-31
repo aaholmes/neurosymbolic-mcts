@@ -70,6 +70,24 @@ fn test_mock_server_reports_no_worker_stats() {
     assert!(server.worker_stats().is_empty());
 }
 
+#[test]
+fn mock_returns_uniform_priors_over_given_moves() {
+    let server = InferenceServer::new_mock_uniform();
+    let board = Board::new();
+    let mg = kingfisher::move_generation::MoveGen::new();
+    let (c, q) = mg.gen_pseudo_legal_moves(&board);
+    let moves: Vec<_> = c.into_iter().chain(q).collect();
+    let (p, _, _) = server
+        .predict_legal_async(board, moves.clone(), true, 0.0)
+        .recv()
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.len(), moves.len());
+    assert!(p
+        .iter()
+        .all(|&x| (x - 1.0 / moves.len() as f32).abs() < 1e-6));
+}
+
 #[cfg(feature = "neural")]
 mod with_model {
     use kingfisher::board::Board;
@@ -269,6 +287,33 @@ mod with_model {
         };
         assert!(time(&slow) >= Duration::from_millis(300));
         assert!(time(&fast) < Duration::from_millis(150));
+    }
+
+    #[test]
+    fn legal_requests_get_priors_aligned_to_their_moves() {
+        let mut reference = tiny_policy();
+        let server = InferenceServer::new(tiny_policy(), 16);
+        let mg = kingfisher::move_generation::MoveGen::new();
+        for board in sample_boards() {
+            let (c, q) = mg.gen_pseudo_legal_moves(&board);
+            let moves: Vec<_> = c
+                .into_iter()
+                .chain(q)
+                .filter(|&m| board.apply_move_to_board(m).is_legal(&mg))
+                .collect();
+            let (full, v, _) = reference.predict(&board, true, 0.5).unwrap();
+            let expected = kingfisher::tensor::policy_to_move_priors(&full, &moves, &board);
+            let (p, vg, _) = server
+                .predict_legal_async(board.clone(), moves.clone(), true, 0.5)
+                .recv()
+                .unwrap()
+                .unwrap();
+            assert_eq!(p.len(), moves.len());
+            assert!((v - vg).abs() < 1e-5);
+            for ((_, pe), pg) in expected.iter().zip(&p) {
+                assert!((pe - pg).abs() < 1e-5);
+            }
+        }
     }
 
     #[test]

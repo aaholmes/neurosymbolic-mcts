@@ -231,8 +231,11 @@ fn softplus(x: f64) -> f64 {
     }
 }
 
-impl PolicyValueNet for OracleNet {
-    fn forward(&self, planes: &Tensor, scalars: &Tensor) -> Result<NetOutput> {
+impl OracleNet {
+    /// The trunk and both heads, with the policy left as raw logits in the
+    /// network's own layout: `[B, 4672]` indexed by `plane * 64 + square`.
+    /// Returns `(policy_logits, v_logit)`.
+    pub fn forward_logits(&self, planes: &Tensor, scalars: &Tensor) -> Result<(Tensor, Tensor)> {
         let b = planes.dim(0)?;
         let q_result = scalars.narrow(1, 0, 1)?;
 
@@ -241,20 +244,34 @@ impl PolicyValueNet for OracleNet {
             x = block.forward(&x)?;
         }
 
-        // Policy: [B, 73, 8, 8] -> [B, 8, 8, 73] -> [B, 4672] (AlphaZero move index order)
         let p = self.p_conv.forward(&x, true)?;
-        let p = self.p_head.forward(&p, false)?.permute((0, 2, 3, 1))?;
-        let p = p.contiguous()?.reshape((b, POLICY_SIZE))?;
-        let log_policy = candle_nn::ops::log_softmax(&p, D::Minus1)?;
+        let logits = self.p_head.forward(&p, false)?.reshape((b, POLICY_SIZE))?;
 
         // Value: 1x1 conv -> [B, 64], append q_result -> [B, 65] -> FC -> v_logit
         let v = self.v_conv.forward(&x, true)?.reshape((b, 64))?;
         let v = Tensor::cat(&[&v, &q_result], 1)?;
         let v = self.v_fc.forward(&v)?.relu()?;
-        let v_logit = self.v_out.forward(&v)?;
+        Ok((logits, self.v_out.forward(&v)?))
+    }
 
+    /// Material confidence scalar (position-independent).
+    pub fn k(&self) -> f32 {
+        self.k
+    }
+}
+
+impl PolicyValueNet for OracleNet {
+    fn forward(&self, planes: &Tensor, scalars: &Tensor) -> Result<NetOutput> {
+        let b = planes.dim(0)?;
+        let (logits, v_logit) = self.forward_logits(planes, scalars)?;
+        // [B, 73, 8, 8] -> [B, 8, 8, 73] -> [B, 4672] (AlphaZero move index order)
+        let p = logits
+            .reshape((b, POLICY_PLANES, 8, 8))?
+            .permute((0, 2, 3, 1))?
+            .contiguous()?
+            .reshape((b, POLICY_SIZE))?;
         Ok(NetOutput {
-            log_policy,
+            log_policy: candle_nn::ops::log_softmax(&p, D::Minus1)?,
             v_logit,
             k: self.k,
         })

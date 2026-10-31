@@ -268,3 +268,64 @@ fn own_stream_policy_turns_off_event_tracking() {
     };
     assert!(!dev.is_event_tracking());
 }
+
+fn legal_moves(board: &kingfisher::board::Board) -> Vec<kingfisher::move_types::Move> {
+    let mg = kingfisher::move_generation::MoveGen::new();
+    let (captures, quiet) = mg.gen_pseudo_legal_moves(board);
+    captures
+        .into_iter()
+        .chain(quiet)
+        .filter(|&m| board.apply_move_to_board(m).is_legal(&mg))
+        .collect()
+}
+
+/// Priors computed for the legal moves only (gathered on the device, softmax on
+/// the CPU) equal the full policy renormalized over those moves, and a request
+/// without moves in the same batch still gets the full 4672-slot policy.
+#[test]
+fn priors_for_given_moves_match_renormalized_full_policy() {
+    let mut nn = NeuralNetPolicy::new();
+    nn.load(fixture("oraclenet_tiny.safetensors").to_str().unwrap())
+        .unwrap();
+    let fens = [
+        positions::STARTING,
+        positions::CASTLING_BOTH,
+        positions::EN_PASSANT,
+        positions::PROMOTION,
+        "4k3/8/8/8/8/8/1p6/4K2R b K - 0 1", // Black to move, promotions on b1
+        "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 2 2",
+    ];
+    let boards: Vec<_> = fens.iter().map(|f| board_from_fen(f)).collect();
+    let flags: Vec<bool> = (0..boards.len()).map(|i| i % 2 == 0).collect();
+    let qs: Vec<f32> = (0..boards.len()).map(|i| i as f32 - 2.0).collect();
+    let full = nn.predict_batch(&boards, &flags, &qs);
+
+    let mut moves: Vec<Option<Vec<_>>> = boards.iter().map(|b| Some(legal_moves(b))).collect();
+    moves[2] = None;
+    let pending = nn.launch_batch_with_moves(&boards, &flags, &qs, &moves);
+    let got = nn.finish_batch(pending);
+
+    for (i, b) in boards.iter().enumerate() {
+        let (pf, vf, kf) = full[i].clone().unwrap();
+        let (pg, vg, kg) = got[i].clone().unwrap();
+        assert!((vf - vg).abs() < 1e-5 && kf == kg, "board {i}: value");
+        match &moves[i] {
+            Some(mv) => {
+                assert_eq!(pg.len(), mv.len(), "board {i}");
+                let expected = kingfisher::tensor::policy_to_move_priors(&pf, mv, b);
+                for ((m, pe), p) in expected.iter().zip(&pg) {
+                    assert!((pe - p).abs() < 1e-5, "board {i} move {m:?}: {pe} vs {p}");
+                }
+            }
+            None => {
+                assert_eq!(pg.len(), 4672);
+                let d = pf
+                    .iter()
+                    .zip(&pg)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(d < 1e-5, "board {i}: full policy diff {d}");
+            }
+        }
+    }
+}

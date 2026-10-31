@@ -17,12 +17,13 @@ mod candle_impl {
     use crate::nn::oracle_net::OracleNet;
     use crate::nn::weights::load_state_dict;
     use crate::nn::PolicyValueNet;
-    use crate::tensor::{board_to_planes, policy_to_move_priors};
+    use crate::tensor::{board_to_planes, move_to_index, policy_to_move_priors};
     use candle_core::{Device, Tensor};
     use std::path::Path;
     use std::time::Instant;
 
     const PLANES: usize = 17 * 8 * 8;
+    const POLICY_SIZE: usize = 4672;
 
     type Prediction = Option<(Vec<f32>, f32, f32)>;
 
@@ -33,12 +34,42 @@ mod candle_impl {
     }
 
     struct Launched {
-        policy: Tensor,
+        policy: Policy,
         v_logit: Tensor,
         k: f32,
         /// Recorded after the forward pass; complete once the GPU has run it.
         #[cfg(feature = "cuda")]
         done: Option<candle_core::cuda::cudarc::driver::CudaEvent>,
+    }
+
+    /// The policy part of a launched batch.
+    enum Policy {
+        /// Probabilities over all 4672 slots, `[B, 4672]`.
+        Full(Tensor),
+        /// Raw logits gathered for each position's requested slots, concatenated;
+        /// `lens[i]` of them belong to position `i`.
+        Gathered { logits: Tensor, lens: Vec<usize> },
+    }
+
+    /// AlphaZero policy index (`square * 73 + plane`) to the network's own
+    /// output layout (`plane * 64 + square`).
+    fn network_index(az: usize) -> u32 {
+        ((az % 73) * 64 + az / 73) as u32
+    }
+
+    /// Softmax of one row of logits, in place.
+    fn softmax_in_place(row: &mut [f32]) {
+        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0;
+        for x in row.iter_mut() {
+            *x = (*x - max).exp();
+            sum += *x;
+        }
+        if sum > 0.0 {
+            for x in row.iter_mut() {
+                *x /= sum;
+            }
+        }
     }
 
     impl Launched {
@@ -195,6 +226,33 @@ mod candle_impl {
             }
         }
 
+        /// As `launch_batch`, but for position `i` with `moves[i] = Some(list)` the
+        /// result's policy holds one prior per listed move (softmax over just those
+        /// moves, in list order), and only those logits leave the device. Positions
+        /// with `None` get the full 4672-slot policy.
+        pub fn launch_batch_with_moves(
+            &mut self,
+            boards: &[Board],
+            qsearch_flags: &[bool],
+            q_results: &[f32],
+            moves: &[Option<Vec<Move>>],
+        ) -> InFlight {
+            let len = boards.len();
+            if self.model.is_none() || len == 0 {
+                return InFlight { inner: None, len };
+            }
+            match self.try_launch_gathered(boards, qsearch_flags, q_results, moves) {
+                Ok(inner) => InFlight {
+                    inner: Some(inner),
+                    len,
+                },
+                Err(e) => {
+                    report_error(&e);
+                    InFlight { inner: None, len }
+                }
+            }
+        }
+
         /// Whether the GPU has finished a launched batch (always true on the CPU).
         pub fn is_finished(&self, pending: &InFlight) -> bool {
             pending.inner.as_ref().is_none_or(|i| i.is_complete())
@@ -220,11 +278,97 @@ mod candle_impl {
             qsearch_flags: &[bool],
             q_results: &[f32],
         ) -> candle_core::Result<Launched> {
+            let (planes, scalars) = self.upload_inputs(boards, qsearch_flags, q_results)?;
             let model = self.model.as_ref().expect("checked by caller");
+
+            // Queue the forward pass (timed up to the last kernel launch, not its completion)
+            let t1 = Instant::now();
+            let out = model.forward(&planes, &scalars)?;
+            let launched = Launched {
+                policy: Policy::Full(out.log_policy.exp()?),
+                v_logit: out.v_logit,
+                k: out.k,
+                #[cfg(feature = "cuda")]
+                done: self.record_done()?,
+            };
+            self.forward_timing.record(t1.elapsed());
+            Ok(launched)
+        }
+
+        fn try_launch_gathered(
+            &mut self,
+            boards: &[Board],
+            qsearch_flags: &[bool],
+            q_results: &[f32],
+            moves: &[Option<Vec<Move>>],
+        ) -> candle_core::Result<Launched> {
+            let (planes, scalars) = self.upload_inputs(boards, qsearch_flags, q_results)?;
+            let model = self.model.as_ref().expect("checked by caller");
+
+            let t1 = Instant::now();
+            let (logits, v_logit) = model.forward_logits(&planes, &scalars)?;
+            let mut index: Vec<u32> = Vec::new();
+            let mut lens = Vec::with_capacity(boards.len());
+            for (i, (board, mv)) in boards.iter().zip(moves).enumerate() {
+                let base = (i * POLICY_SIZE) as u32;
+                match mv {
+                    Some(mv) => {
+                        for &m in mv {
+                            let rel = if board.w_to_move {
+                                m
+                            } else {
+                                m.flip_vertical()
+                            };
+                            index.push(base + network_index(move_to_index(rel)));
+                        }
+                        lens.push(mv.len());
+                    }
+                    None => {
+                        index.extend((0..POLICY_SIZE).map(|az| base + network_index(az)));
+                        lens.push(POLICY_SIZE);
+                    }
+                }
+            }
+            let n = index.len();
+            let index = Tensor::from_vec(index, n, &self.device)?;
+            let launched = Launched {
+                policy: Policy::Gathered {
+                    logits: logits.flatten_all()?.index_select(&index, 0)?,
+                    lens,
+                },
+                v_logit,
+                k: model.k(),
+                #[cfg(feature = "cuda")]
+                done: self.record_done()?,
+            };
+            self.forward_timing.record(t1.elapsed());
+            Ok(launched)
+        }
+
+        /// An event marking the end of the work queued so far on this device's stream.
+        #[cfg(feature = "cuda")]
+        fn record_done(
+            &self,
+        ) -> candle_core::Result<Option<candle_core::cuda::cudarc::driver::CudaEvent>> {
+            match &self.device {
+                Device::Cuda(dev) => dev
+                    .cuda_stream()
+                    .record_event(None)
+                    .map(Some)
+                    .map_err(candle_core::Error::wrap),
+                _ => Ok(None),
+            }
+        }
+
+        /// Build the input planes and scalars and copy them to the device.
+        fn upload_inputs(
+            &mut self,
+            boards: &[Board],
+            qsearch_flags: &[bool],
+            q_results: &[f32],
+        ) -> candle_core::Result<(Tensor, Tensor)> {
             let b = boards.len();
             self.batch_sizes.record(b as f64);
-
-            // Build inputs and copy them to the device
             let t0 = Instant::now();
             let mut planes = Vec::with_capacity(b * PLANES);
             for board in boards {
@@ -236,27 +380,7 @@ mod candle_impl {
             let planes = Tensor::from_vec(planes, (b, 17, 8, 8), &self.device)?;
             let scalars = Tensor::from_vec(scalars, (b, 2), &self.device)?;
             self.transfer_to_gpu_timing.record(t0.elapsed());
-
-            // Queue the forward pass (timed up to the last kernel launch, not its completion)
-            let t1 = Instant::now();
-            let out = model.forward(&planes, &scalars)?;
-            let policy = out.log_policy.exp()?;
-            let launched = Launched {
-                policy,
-                v_logit: out.v_logit,
-                k: out.k,
-                #[cfg(feature = "cuda")]
-                done: match &self.device {
-                    Device::Cuda(dev) => Some(
-                        dev.cuda_stream()
-                            .record_event(None)
-                            .map_err(candle_core::Error::wrap)?,
-                    ),
-                    _ => None,
-                },
-            };
-            self.forward_timing.record(t1.elapsed());
-            Ok(launched)
+            Ok((planes, scalars))
         }
 
         fn try_finish(
@@ -265,7 +389,21 @@ mod candle_impl {
         ) -> candle_core::Result<Vec<(Vec<f32>, f32, f32)>> {
             // Waits for the GPU, then copies the results back
             let t2 = Instant::now();
-            let policy: Vec<Vec<f32>> = launched.policy.to_vec2()?;
+            let policy: Vec<Vec<f32>> = match launched.policy {
+                Policy::Full(p) => p.to_vec2()?,
+                Policy::Gathered { logits, lens } => {
+                    let flat: Vec<f32> = logits.to_vec1()?;
+                    let mut rows = Vec::with_capacity(lens.len());
+                    let mut start = 0;
+                    for len in lens {
+                        let mut row = flat[start..start + len].to_vec();
+                        softmax_in_place(&mut row);
+                        rows.push(row);
+                        start += len;
+                    }
+                    rows
+                }
+            };
             let v_logit: Vec<f32> = launched.v_logit.flatten_all()?.to_vec1()?;
             self.transfer_from_gpu_timing.record(t2.elapsed());
             Ok(policy
@@ -406,6 +544,15 @@ mod stub {
             boards: &[Board],
             _qsearch_flags: &[bool],
             _q_results: &[f32],
+        ) -> InFlight {
+            InFlight { len: boards.len() }
+        }
+        pub fn launch_batch_with_moves(
+            &mut self,
+            boards: &[Board],
+            _qsearch_flags: &[bool],
+            _q_results: &[f32],
+            _moves: &[Option<Vec<Move>>],
         ) -> InFlight {
             InFlight { len: boards.len() }
         }

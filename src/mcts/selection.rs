@@ -12,6 +12,7 @@ use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use rand::seq::SliceRandom;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -280,7 +281,7 @@ pub fn calculate_ucb_value(
 
 /// Ensure neural network policy has been evaluated for the node.
 ///
-/// Uses the cached `raw_nn_policy` on the node (populated by `evaluate_leaf_node`
+/// Uses the cached `nn_priors` on the node (populated by `evaluate_leaf_node`
 /// from the InferenceServer). Falls back to a synchronous InferenceServer call
 /// if the node has no cached policy but a server is available. Otherwise uses
 /// uniform priors (classical fallback).
@@ -305,9 +306,8 @@ fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &TacticalMctsCon
     }
 
     // 1. If we have a cached NN policy (from evaluate_leaf_node), use it
-    if let Some(ref policy) = node_ref.raw_nn_policy {
-        let priors =
-            crate::tensor::policy_to_move_priors(policy, &moves_to_prioritize, &node_ref.state);
+    if let Some(ref stored) = node_ref.nn_priors {
+        let priors = priors_for_moves(stored, &moves_to_prioritize);
         for (mv, prob) in priors {
             node_ref.move_priorities.insert(mv, prob as f64);
         }
@@ -320,18 +320,21 @@ fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &TacticalMctsCon
     //    head is independent of q_result (which only enters the value path via v_fc).
     if config.enable_tier3_neural {
         if let Some(ref server) = config.inference_server {
-            let receiver = server.predict_async(node_ref.state.clone(), true, 0.0);
+            let receiver = server.predict_legal_async(
+                node_ref.state.clone(),
+                moves_to_prioritize.clone(),
+                true,
+                0.0,
+            );
             if let Ok(Some((policy, _v_logit, k))) = receiver.recv() {
-                let priors = crate::tensor::policy_to_move_priors(
-                    &policy,
-                    &moves_to_prioritize,
-                    &node_ref.state,
-                );
+                let stored: Vec<(Move, f32)> =
+                    moves_to_prioritize.iter().copied().zip(policy).collect();
+                let priors = priors_for_moves(&stored, &moves_to_prioritize);
                 for (mv, prob) in &priors {
                     node_ref.move_priorities.insert(*mv, *prob as f64);
                 }
                 node_ref.k_val = k;
-                node_ref.raw_nn_policy = Some(policy);
+                node_ref.nn_priors = Some(stored);
                 node_ref.policy_evaluated = true;
                 return;
             }
@@ -339,9 +342,9 @@ fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &TacticalMctsCon
     }
 
     // 3. No uniform fallback — if we reach here, something is wrong
-    eprintln!("[BUG] ensure_policy_evaluated: NO POLICY AVAILABLE! tier3={}, server={}, neural_policy={}, raw_nn_policy={}, children={}",
+    eprintln!("[BUG] ensure_policy_evaluated: NO POLICY AVAILABLE! tier3={}, server={}, neural_policy={}, nn_priors={}, children={}",
         config.enable_tier3_neural, config.inference_server.is_some(), config.use_neural_policy,
-        node_ref.raw_nn_policy.is_some(), moves_to_prioritize.len());
+        node_ref.nn_priors.is_some(), moves_to_prioritize.len());
     // Still set uniform so we don't crash, but the eprintln above flags the issue
     let uniform_prior = 1.0 / moves_to_prioritize.len() as f64;
     for mv in moves_to_prioritize {
@@ -492,4 +495,26 @@ mod tests {
         assert!(!ucb.is_infinite()); // Unvisited nodes now get finite UCB based on Q-init + Prior
         assert!(ucb > 0.0);
     }
+}
+
+/// The stored network priors for `moves`, renormalized over them (uniform if
+/// they sum to zero).
+fn priors_for_moves(stored: &[(Move, f32)], moves: &[Move]) -> Vec<(Move, f32)> {
+    let lookup: HashMap<Move, f32> = stored.iter().copied().collect();
+    let mut priors: Vec<(Move, f32)> = moves
+        .iter()
+        .map(|m| (*m, lookup.get(m).copied().unwrap_or(0.0)))
+        .collect();
+    let total: f32 = priors.iter().map(|(_, p)| p).sum();
+    if total > 0.0 {
+        for (_, p) in priors.iter_mut() {
+            *p /= total;
+        }
+    } else {
+        let uniform = 1.0 / moves.len().max(1) as f32;
+        for (_, p) in priors.iter_mut() {
+            *p = uniform;
+        }
+    }
+    priors
 }

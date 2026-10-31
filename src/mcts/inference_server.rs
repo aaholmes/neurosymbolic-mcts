@@ -5,6 +5,7 @@
 
 use crate::board::Board;
 use crate::mcts::tactical_mcts::TimingAccumulator;
+use crate::move_types::Move;
 use crate::neural_net::NeuralNetPolicy;
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use rand::Rng;
@@ -15,6 +16,9 @@ use std::time::{Duration, Instant};
 /// Request for a single board evaluation
 pub struct PredictRequest {
     pub board: Board,
+    /// The moves to return priors for, in this order; `None` for the full
+    /// 4672-slot policy.
+    pub moves: Option<Vec<Move>>,
     pub qsearch_completed: bool,
     pub q_result: f32,
     pub response_sender: Sender<Option<(Vec<f32>, f32, f32)>>,
@@ -147,10 +151,11 @@ impl InferenceServer {
                     Ok(req) => {
                         let mut rng = rand::thread_rng();
                         // Random policy
-                        let mut policy = vec![0.0; 4672];
+                        let slots = req.moves.as_ref().map_or(4672, |m| m.len());
+                        let mut policy = vec![0.0; slots];
                         // Set a few random moves to non-zero
-                        for _ in 0..5 {
-                            let idx = rng.gen_range(0..4672);
+                        for _ in 0..5.min(slots) {
+                            let idx = rng.gen_range(0..slots);
                             policy[idx] = rng.gen_range(0.0..1.0);
                         }
                         let v_logit: f32 = rng.gen_range(-2.0..2.0);
@@ -175,7 +180,10 @@ impl InferenceServer {
         thread::spawn(move || loop {
             match request_receiver.recv() {
                 Ok(req) => {
-                    let policy = vec![0.0; 4672];
+                    let policy = match &req.moves {
+                        Some(m) => vec![1.0 / m.len().max(1) as f32; m.len()],
+                        None => vec![0.0; 4672],
+                    };
                     let k: f32 = 0.5;
                     let _ = req.response_sender.send(Some((policy, v_logit, k)));
                 }
@@ -205,6 +213,27 @@ impl InferenceServer {
         let (response_sender, response_receiver) = crossbeam_channel::bounded(1);
         let _ = self.request_sender.send(PredictRequest {
             board,
+            moves: None,
+            qsearch_completed,
+            q_result,
+            response_sender,
+        });
+        response_receiver
+    }
+
+    /// As `predict_async`, but the returned policy holds one prior per move in
+    /// `moves` (a softmax over just those moves, in the same order).
+    pub fn predict_legal_async(
+        &self,
+        board: Board,
+        moves: Vec<Move>,
+        qsearch_completed: bool,
+        q_result: f32,
+    ) -> Receiver<Option<(Vec<f32>, f32, f32)>> {
+        let (response_sender, response_receiver) = crossbeam_channel::bounded(1);
+        let _ = self.request_sender.send(PredictRequest {
+            board,
+            moves: Some(moves),
             qsearch_completed,
             q_result,
             response_sender,
@@ -263,12 +292,13 @@ fn run_worker(
 
         // 2. Launch the batch without waiting for the GPU
         let gpu_idle = last_finish.map(|t| t.elapsed());
-        let requests = std::mem::replace(&mut next, Vec::with_capacity(batch_size));
+        let mut requests = std::mem::replace(&mut next, Vec::with_capacity(batch_size));
         let t_process = Instant::now();
         let boards: Vec<Board> = requests.iter().map(|r| r.board.clone()).collect();
         let qsearch_flags: Vec<bool> = requests.iter().map(|r| r.qsearch_completed).collect();
         let q_results: Vec<f32> = requests.iter().map(|r| r.q_result).collect();
-        let pending = nn.launch_batch(&boards, &qsearch_flags, &q_results);
+        let moves: Vec<Option<Vec<Move>>> = requests.iter_mut().map(|r| r.moves.take()).collect();
+        let pending = nn.launch_batch_with_moves(&boards, &qsearch_flags, &q_results, &moves);
 
         // 3. Collect the next batch while this one runs
         while !closed && next.len() < batch_size && !nn.is_finished(&pending) {

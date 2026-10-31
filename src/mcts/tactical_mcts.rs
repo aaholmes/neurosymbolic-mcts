@@ -703,6 +703,8 @@ enum LeafEval {
 
 struct PendingNn {
     receiver: Receiver<Option<(Vec<f32>, f32, f32)>>,
+    /// The legal moves sent with the request; the answer's priors follow this order.
+    moves: Vec<Move>,
     q_result: f32,
     started: Instant,
 }
@@ -878,10 +880,16 @@ fn begin_leaf_evaluation(
             if let Some(server) = &config.inference_server {
                 if config.use_neural_policy {
                     let started = Instant::now();
-                    let receiver =
-                        server.predict_async(node_ref.state.clone(), qsearch_completed, q_result);
+                    let moves = legal_moves(&node_ref.state, move_gen);
+                    let receiver = server.predict_legal_async(
+                        node_ref.state.clone(),
+                        moves.clone(),
+                        qsearch_completed,
+                        q_result,
+                    );
                     return LeafEval::Pending(PendingNn {
                         receiver,
+                        moves,
                         q_result,
                         started,
                     });
@@ -916,7 +924,9 @@ fn finish_leaf_evaluation(
     if let Ok(Some((policy, nn_v_logit, k))) = pending.receiver.recv() {
         v_logit = nn_v_logit as f64;
         k_val = k;
-        node_ref.raw_nn_policy = Some(policy);
+        if policy.len() == pending.moves.len() {
+            node_ref.nn_priors = Some(pending.moves.into_iter().zip(policy).collect());
+        }
     }
     stats.nn_timing.record(pending.started.elapsed());
     set_leaf_value(
@@ -1005,16 +1015,23 @@ fn evaluate_and_expand_node(
         return;
     }
 
-    let (captures, non_captures) = move_gen.gen_pseudo_legal_moves(&node_ref.state);
-
-    for mv in captures.iter().chain(non_captures.iter()) {
-        let new_board = node_ref.state.apply_move_to_board(*mv);
-        if new_board.is_legal(move_gen) {
-            let child_node = MctsNode::new_child(Rc::downgrade(&node), *mv, new_board, move_gen);
-            node_ref.children.push(child_node);
-            stats.nodes_expanded += 1;
-        }
+    for mv in legal_moves(&node_ref.state, move_gen) {
+        let new_board = node_ref.state.apply_move_to_board(mv);
+        let child_node = MctsNode::new_child(Rc::downgrade(&node), mv, new_board, move_gen);
+        node_ref.children.push(child_node);
+        stats.nodes_expanded += 1;
     }
+}
+
+/// Legal moves of `board`: captures first, then quiet moves, each in move
+/// generator order (the order children are created in).
+fn legal_moves(board: &Board, move_gen: &MoveGen) -> Vec<Move> {
+    let (captures, non_captures) = move_gen.gen_pseudo_legal_moves(board);
+    captures
+        .into_iter()
+        .chain(non_captures)
+        .filter(|mv| board.apply_move_to_board(*mv).is_legal(move_gen))
+        .collect()
 }
 
 pub fn select_best_move_from_root(root: Rc<RefCell<MctsNode>>, move_gen: &MoveGen) -> Option<Move> {
