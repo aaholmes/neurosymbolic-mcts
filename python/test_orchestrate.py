@@ -984,8 +984,24 @@ class TestSPRT:
         cmd = mock_run.call_args[0][0]
         assert cmd[cmd.index("--inference-workers") + 1] == "2"
 
+    def test_inference_defaults_match_the_fastest_self_play_setup(self):
+        assert TrainingConfig().inference_batch_size == 128
+        assert TrainingConfig().inference_workers == 4
+
+    def test_self_play_runs_one_thread_per_game_by_default(self, tmp_workspace):
+        orch = self._make_orch(tmp_workspace, games_per_generation=37)
+        orch.state.current_best_pt = "current.pt"
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            orch.run_self_play(1)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--threads") + 1] == "37"
+
     def test_inference_workers_default_and_flag(self):
-        assert TrainingConfig().inference_workers == 1
+        assert TrainingConfig().inference_workers == 4
         with patch("sys.argv", ["orchestrate.py", "--inference-workers", "3"]):
             assert TrainingConfig.from_args().inference_workers == 3
 

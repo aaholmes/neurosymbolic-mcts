@@ -68,14 +68,14 @@ fn main() {
         .position(|a| a == "--batch-size")
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse().ok())
-        .unwrap_or(16);
+        .unwrap_or(128);
     // Inference workers sharing the request queue, each on its own CUDA stream
     let inference_workers: usize = args
         .iter()
         .position(|a| a == "--inference-workers")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+        .unwrap_or(4);
     // How long an idle inference worker waits for a batch to fill (microseconds)
     let idle_window = args
         .iter()
@@ -93,11 +93,18 @@ fn main() {
         .unwrap_or(1);
     LEAVES_PER_GAME.store(leaves_per_game.max(1), Ordering::Relaxed);
 
+    // One search thread per game unless --threads or RAYON_NUM_THREADS says otherwise:
+    // each game has one position waiting for the network, so threads bound the batch.
     let num_threads: Option<usize> = args
         .iter()
         .position(|a| a == "--threads")
         .and_then(|i| args.get(i + 1))
-        .and_then(|v| v.parse().ok());
+        .and_then(|v| v.parse().ok())
+        .or_else(|| {
+            std::env::var("RAYON_NUM_THREADS")
+                .is_err()
+                .then_some(num_games)
+        });
 
     let seed_offset: u64 = args
         .iter()

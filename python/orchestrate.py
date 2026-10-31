@@ -54,9 +54,9 @@ class TrainingConfig:
     sprt_beta: float = 0.05
 
     # Parallelism
-    inference_batch_size: int = 16
-    inference_workers: int = 1  # inference threads per model, each on its own CUDA stream
-    game_threads: int = 0  # 0 = auto (RAYON_NUM_THREADS or rayon default)
+    inference_batch_size: int = 128
+    inference_workers: int = 4  # inference threads per model, each on its own CUDA stream
+    game_threads: int = 0  # 0 = auto: one thread per self-play game; RAYON_NUM_THREADS for evaluation
 
     # Training variants
     single_variant: bool = True  # train "all" only; use --multi-variant for policy/value/all
@@ -123,12 +123,12 @@ class TrainingConfig:
         parser.add_argument("--log-games", type=str, default="first",
                             choices=["all", "first", "none"],
                             help="Which self-play games to log (default: first)")
-        parser.add_argument("--inference-batch-size", type=int, default=16,
-                            help="Batch size for GPU inference server (default: 16)")
-        parser.add_argument("--inference-workers", type=int, default=1,
-                            help="Inference threads per model, each on its own CUDA stream (default: 1)")
+        parser.add_argument("--inference-batch-size", type=int, default=128,
+                            help="Batch size for GPU inference server (default: 128)")
+        parser.add_argument("--inference-workers", type=int, default=4,
+                            help="Inference threads per model, each on its own CUDA stream (default: 4)")
         parser.add_argument("--game-threads", type=int, default=0,
-                            help="Parallel game threads for self-play/eval (0 = auto)")
+                            help="Parallel game threads for self-play/eval (0 = one per self-play game)")
         parser.add_argument("--skip-self-play", action="store_true",
                             help="Skip self-play after gen 1 (eval games produce training data)")
         parser.add_argument("--multi-variant", action="store_true",
@@ -420,8 +420,9 @@ class Orchestrator:
                 "--inference-workers", str(self.config.inference_workers),
                 "--seed-offset", str(seed_offset),
             ]
-            if self.config.game_threads > 0:
-                cmd.extend(["--threads", str(self.config.game_threads)])
+            # One thread per game by default: threads bound the batch size
+            threads = self.config.game_threads or self.config.games_per_generation
+            cmd.extend(["--threads", str(threads)])
             cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
             if self.config.qsearch_variant != "extended":
                 cmd.extend(["--qsearch", self.config.qsearch_variant])

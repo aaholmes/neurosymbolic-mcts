@@ -118,7 +118,7 @@ $N \geq 1$ the two rules are identical.
 | Component | Language | Role |
 |---|---|---|
 | Search engine (`src/`) | Rust | Board representation, move generation, the three tiers, MCTS, self-play and evaluation binaries |
-| Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle), CUDA | Runs the network on CPU or GPU, called from a server thread that batches requests from all search threads |
+| Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle), CUDA | Runs the network on CPU or GPU, called from batching threads that collect requests from all search threads |
 | Training (`python/`) | Python, PyTorch | Defines the network, trains it on self-play data, and runs the whole loop (`orchestrate.py`) |
 | GPU search (`cuda/`) | CUDA C++ | An alternative in which the entire search runs on the GPU (see below) |
 
@@ -177,52 +177,62 @@ and picks the top move of f32 on 64 of 64 test positions. Time per network call 
 
 Self-play speed decides how much training data each hour of compute buys. It was measured in
 standard chess with the classical tiers off and a randomly initialized network, so that every run
-does identical work per move and only speed differs; with the tiers on, chess self-play is limited
-by the CPU cost of quiescence search instead (see "Current state"). All runs use 200 simulations
-per move, a batch cap of 128, an RTX 5060 Ti and a 16-core Ryzen 9 7950X.
+does identical work per move and only speed differs. All runs use 200 simulations per move, f16, an
+RTX 5060 Ti and a 16-core Ryzen 9 7950X, with one game per search thread.
 
-Each search thread plays one game, and each game has one position waiting for the network at a
-time, so batches can be no larger than the number of threads. Moves per second for successive
-versions of the engine, 60 threads and 240 games, two runs each:
+The fastest configuration measured makes **453 moves per second** (five runs, 450.6–454.1): four
+batching threads, each with its own copy of the network on its own CUDA stream, serve 1,920 search
+threads with a batch cap of 128 (built with `--features cudnn`). These are the defaults of
+`self_play` and `orchestrate.py`, apart from f16, which is opt-in:
 
-| Version (each includes the ones above) | Mean batch | Moves per second |
-|---|---|---|
-| LibTorch | — | 64.8, 65.3 |
-| candle | 47 | 67.6, 67.6 |
-| Fused kernels for bias, ReLU and squeeze-and-excitation | 47 | 80.4, 80.0 |
-| No cross-stream event tracking in candle | 47 | 79.8, 80.6 |
-| Next batch collected while the GPU runs the current one | 24 | 78.2, 77.1 |
-| Network priors computed for legal moves only | 24 | 71.9, 72.2 |
+```bash
+KF_PRECISION=f16 ./target/release/self_play 1920 200 out/ model.pt false false false none
+```
 
-- **Fused kernels (adopted).** A GPU profile showed candle's broadcast kernels for bias adds, ReLU
-  and the squeeze-and-excitation channel scaling taking about 40% of GPU time, 18–30 µs each on
-  tensors that need about 2 µs. Three custom CUDA kernels, compiled when the model loads, do that
-  arithmetic in one pass each and match the unfused operations to 1e-5.
-- **Overlapping collection with GPU work, and legal-move priors (slower in these runs).** Launching
-  each batch as soon as the previous one returned halved the mean batch, and the per-request move
-  lists of the second change added allocator traffic (below). Both measurements predate the
-  allocator change and have not been repeated since; `KF_PIPELINE=0 KF_FULL_POLICY=1` turns both
-  off, and is used for the runs below.
+How each setting contributes (two runs each unless noted):
 
-More threads give larger batches: 60, 120, 240 and 480 threads gave 72, 89, 114 and 132 moves per
-second (one run each above 60 threads). At 480 threads the bottleneck moved from the GPU to the
-CPU. CPU profiles showed the search threads spending 34–52% of their samples in the C library's memory
-allocator, mostly waiting on its shared locks, and the single thread that batches network requests
-took 0.86 ms rather than 0.08 ms to build each batch's input. Replacing the allocator with
-mimalloc, which keeps a separate heap per thread, removed the contention (480 threads, 480 games,
-`KF_PIPELINE=0 KF_FULL_POLICY=1`):
-
-| Allocator | Precision | Moves per second | Kernel time of search threads |
+| Configuration | Batching threads | Search threads | Moves per second |
 |---|---|---|---|
-| glibc | f32 | 115.9, 120.3 | 2.8–3.1 cores |
-| glibc | f16 | 160.1 | 3.8 cores |
-| mimalloc | f32 | 159.4, 159.7 | 0.4 cores |
-| mimalloc | f16 | 228.5 | 0.5 cores |
+| Full policy read back, batches launched one after another | 1 | 480 | 249.5, 236.7, 249.4 |
+| Priors gathered on the GPU for legal moves only | 1 | 480 | 310.0, 310.2 |
+| Also collecting the next batch while the GPU runs the current one | 1 | 480 | 298.0, 298.0 |
+| As above | 2 | 480 | 376.2, 375.5 |
+| As above | 2 | 960 | 422.6, 427.0 |
+| As above | 3 | 1,440 | 448.8 (one run) |
+| As above | 4 | 1,920 | 453.1 mean of five, 450.6–454.1 |
+| Four batching threads, next batch not collected early | 4 | 1,920 | 456.9, 456.9 |
 
-At 228.5 moves per second the batching thread is busy all the time, about 2.2 ms per batch of
-121 positions: 0.94 ms to launch the network's kernels, 0.68 ms waiting for the GPU, 0.38 ms
-copying results back and 0.40 ms waking the waiting search threads. The GPU is busy 61% of the
-time. The next gains are in that thread's CPU work.
+- **Legal-move priors (adopted, +26%).** Gathering just the legal moves' policy logits on the GPU
+  cuts the copy back to the CPU from 0.36 ms to 0.04 ms per batch.
+- **Collecting the next batch during GPU work (on by default, no measurable gain).** It costs 4%
+  with one batching thread and changes throughput by +0.9% with four; `KF_PIPELINE=0` turns it off.
+- **Several batching threads (adopted, +52% from one to four).** A batch of about 120 positions
+  launches only 64 thread blocks in the main convolution kernel, too few to fill the GPU. With four
+  streams, kernels from different batches run concurrently (1.42 on average while the GPU is busy),
+  and the GPU is busy 84% of the time instead of 70%. Larger batches from a single thread gain less:
+  326 moves per second at cap 256 with 960 threads, and 334 and 329 at cap 512 with 1,920.
+- **mimalloc as the memory allocator (adopted).** With 480 search threads, glibc's allocator spent
+  most of its time on shared locks: in f32 it gave 115.9 and 120.3 moves per second, compared with
+  159.4 and 159.7 for mimalloc, which keeps a separate heap per thread.
+- **Fused kernels for bias, ReLU and squeeze-and-excitation (adopted).** Candle's broadcast kernels
+  for these took about 40% of GPU time, 18–30 µs each on tensors that need about 2 µs. Three custom
+  CUDA kernels, compiled when the model loads, do each in one pass and match the unfused operations
+  to 1e-5; at 60 threads they raised self-play from 67.6 to 80.2 moves per second.
+- **f32 instead of f16:** 189.0 moves per second with one batching thread and 480 search threads,
+  0.63× f16.
+
+**What limits it now.** Each batching thread spends about 2.6 ms of every batch launching kernels:
+a batch makes about 117 kernel launches and 160 GPU memory allocations and frees, and with four
+threads each launch call takes 9 µs. On the GPU, the convolutions take 53% of kernel time,
+converting tensors between the NCHW layout the network uses and the NHWC layout cuDNN's tensor-core
+kernels need takes 15%, squeeze-and-excitation 13%, and bias with activation 9%. Replaying the
+forward pass as a recorded CUDA graph, keeping tensors in NHWC throughout, and folding bias and
+activation into the convolution each address one of these.
+
+With the tiers on, self-play is limited by the CPU instead: 72.4 and 72.3 moves per second with 480
+search threads, 30 of the 32 logical CPUs busy and the GPU busy 19% of the time. Nearly all of that
+CPU time goes to the classical search's move handling: move generation 28%, making and undoing
+moves 30% (each move copies the board), and check detection 12%.
 
 Changes measured and not adopted:
 
@@ -231,12 +241,10 @@ Changes measured and not adopted:
   the Hill, K = 4 raised throughput 58% at 60 threads, but at equal simulations it plays weaker: in
   200 games of the generation-34 model playing itself, K = 4 scored 0.435, or −45 Elo [−92, +2]
   relative to K = 1 (`--leaves-per-game`). More threads raise batch sizes without this cost.
-- **Several inference threads.** With 1, 2 and 3 threads, each on its own CUDA stream, self-play ran
-  at 60.5, 55.2 and 36.8 moves per second, because each batch took longer when two ran concurrently.
-- **CUDA graphs.** Replaying a recorded forward pass saved a fixed ~0.29 ms per call, 7% at batch
-  128, and would need one recording per batch size.
-- **Reserving CPU cores for the batching thread** (`KF_INFER_CPUS`). Before the allocator change, the
-  thread waited for a free core only 1–5% of the time, which bounds what reserving cores can gain.
+- **Reserving CPU cores for the batching thread** (`KF_INFER_CPUS`). With the tiers off, the thread
+  waited for a free core only 1–5% of the time, which bounds what reserving cores can gain.
+- **A shorter wait for a batch to fill.** An idle batching thread waits up to 500 µs for more
+  requests; 0 µs gave 244 moves per second and 2,000 µs gave 287, compared with 298.
 
 ## Training
 
@@ -288,9 +296,9 @@ Open directions:
 - **Quiescence search in chess:** bound its cost without losing its accuracy, for example with a
   node cap combined with better move ordering in check, and then measure whether it helps training
   in standard chess at all.
-- **Self-play speed:** remeasure the overlapped collection and legal-move priors with the new
-  allocator, and cut the batching thread's CPU cost per batch (kernel launches and waking search
-  threads).
+- **Self-play speed:** with the tiers on, make quiescence search cheaper per position (moves made in
+  place instead of copying the board, and generating only the moves it searches); with the tiers
+  off, record the forward pass as a CUDA graph and keep tensors in NHWC layout.
 - **The Elo gap:** compute a bootstrap interval on the Elo difference between the final models.
 - **Networks built around piece moves:** layers that pass information between squares a knight or
   queen move apart, rather than only between neighbours as a 3×3 convolution does. Each new
@@ -316,6 +324,9 @@ KF_PRECISION=f16        # f32 (default), f16 or bf16 network on the GPU
 KF_PIPELINE=0           # launch a batch only after the previous one returns
 KF_FULL_POLICY=1        # read back the full policy and compute legal-move priors on the CPU
 KF_INFER_CPUS=0,16      # pin the batching thread to these CPUs, and search threads to the others
+KF_RESERVE_MOVES=1      # start each move list with room for 256 moves (5.8% slower in self-play)
+# self_play flags: --batch-size N (cap, default 128), --inference-workers N (batching threads,
+# default 4), --threads N (default: one per game)
 
 cd cuda && mkdir -p build && cd build && cmake .. -DCMAKE_CUDA_ARCHITECTURES=89 && make
 ```
