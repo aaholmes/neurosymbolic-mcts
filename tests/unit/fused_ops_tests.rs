@@ -138,3 +138,57 @@ fn tiny_net_on_gpu_matches_pytorch_golden_outputs() {
     assert!(max_abs_diff(&out.log_policy, &io["log_policy"]) < 1e-4);
     assert!(max_abs_diff(&out.v_logit, &io["v_logit"]) < 1e-4);
 }
+
+/// Largest |a - b| relative to the largest |b| (at least 1).
+#[cfg(feature = "cuda")]
+fn rel_diff(a: &Tensor, b: &Tensor) -> f32 {
+    let b32 = b.to_dtype(candle_core::DType::F32).unwrap();
+    let scale = b32
+        .abs()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .max(0)
+        .unwrap()
+        .to_device(&Device::Cpu)
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap()
+        .max(1.0);
+    max_abs_diff(&a.to_dtype(candle_core::DType::F32).unwrap(), &b32) / scale
+}
+
+/// The half-precision kernels compute in f32 and round once on output, so they
+/// match the f32 kernels to within the rounding of their inputs and outputs.
+#[cfg(feature = "cuda")]
+#[test]
+fn fused_ops_in_half_precision_match_f32_on_gpu() {
+    use candle_core::DType;
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    let (x, bias, gate, res) = inputs(&dev);
+    for (dtype, tol) in [(DType::F16, 2e-3), (DType::BF16, 2e-2)] {
+        let h = |t: &Tensor| t.to_dtype(dtype).unwrap();
+        for relu in [false, true] {
+            let got = bias_act(&h(&x), &h(&bias), relu).unwrap();
+            assert_eq!(got.dtype(), dtype);
+            let d = rel_diff(&got, &bias_act(&x, &bias, relu).unwrap());
+            assert!(d <= tol, "{dtype:?} bias_act relu={relu}: {d}");
+        }
+        let got = channel_mean_bias(&h(&x), &h(&bias)).unwrap();
+        assert_eq!(got.dtype(), dtype);
+        let d = rel_diff(&got, &channel_mean_bias(&x, &bias).unwrap());
+        assert!(d <= tol, "{dtype:?} channel_mean_bias: {d}");
+        let got = se_tail(&h(&x), &h(&bias), &h(&gate), &h(&res)).unwrap();
+        assert_eq!(got.dtype(), dtype);
+        let d = rel_diff(&got, &se_tail(&x, &bias, &gate, &res).unwrap());
+        assert!(d <= tol, "{dtype:?} se_tail: {d}");
+    }
+}
+
+#[test]
+fn fused_ops_reject_half_precision_on_cpu() {
+    let (x, bias, _, _) = inputs(&Device::Cpu);
+    let h = |t: &Tensor| t.to_dtype(candle_core::DType::F16).unwrap();
+    let err = bias_act(&h(&x), &h(&bias), true).unwrap_err().to_string();
+    assert!(err.contains("CUDA"), "unexpected error: {err}");
+}

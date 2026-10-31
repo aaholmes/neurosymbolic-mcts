@@ -329,3 +329,123 @@ fn priors_for_given_moves_match_renormalized_full_policy() {
         }
     }
 }
+
+#[test]
+fn precision_parses_its_names_and_rejects_others() {
+    use kingfisher::nn::Precision;
+    for p in [Precision::F32, Precision::F16, Precision::Bf16] {
+        assert_eq!(Precision::parse(p.name()), Some(p));
+    }
+    assert_eq!(Precision::parse("bf16"), Some(Precision::Bf16));
+    assert_eq!(Precision::parse("fp8"), None);
+    assert_eq!(Precision::default(), Precision::F32);
+}
+
+#[test]
+fn half_precision_net_on_cpu_is_an_error() {
+    use kingfisher::nn::Precision;
+    let sd = load_state_dict(&fixture("oraclenet_tiny.safetensors"), &Device::Cpu).unwrap();
+    let err = OracleNet::from_state_dict_with_precision(sd, &Device::Cpu, Precision::F16)
+        .err()
+        .expect("half precision on the CPU should fail")
+        .to_string();
+    assert!(err.contains("CUDA"), "unexpected error: {err}");
+}
+
+/// The tiny fixture in f16 and bf16 stays close to the PyTorch (f32) golden outputs.
+#[cfg(feature = "cuda")]
+#[test]
+fn tiny_net_in_half_precision_matches_golden_outputs() {
+    use kingfisher::nn::Precision;
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    let io = io();
+    for (p, tol) in [(Precision::F16, 2e-2), (Precision::Bf16, 5e-2)] {
+        let sd = load_state_dict(&fixture("oraclenet_tiny.safetensors"), &dev).unwrap();
+        let net = OracleNet::from_state_dict_with_precision(sd, &dev, p).unwrap();
+        let out = net
+            .forward(
+                &io["input"].to_device(&dev).unwrap(),
+                &io["scalars"].to_device(&dev).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(out.log_policy.dtype(), candle_core::DType::F32);
+        let lp = out.log_policy.to_device(&Device::Cpu).unwrap();
+        let v = out.v_logit.to_device(&Device::Cpu).unwrap();
+        let dp = max_abs_diff(&lp, &io["log_policy"]);
+        let dv = max_abs_diff(&v, &io["v_logit"]);
+        println!("{p:?}: log-policy max diff {dp}, v_logit max diff {dv}");
+        assert!(dp < tol, "{p:?} log-policy diff {dp}");
+        assert!(dv < tol, "{p:?} v_logit diff {dv}");
+    }
+}
+
+/// 64 positions from seeded random playouts (both sides to move, varied phases).
+#[cfg(feature = "cuda")]
+fn playout_positions() -> Vec<kingfisher::board::Board> {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    let mut out = Vec::new();
+    while out.len() < 64 {
+        let mut b = kingfisher::board::Board::new();
+        let plies = rng.gen_range(0..80);
+        for _ in 0..plies {
+            let moves = legal_moves(&b);
+            if moves.is_empty() {
+                break;
+            }
+            b = b.apply_move_to_board(moves[rng.gen_range(0..moves.len())]);
+        }
+        if !legal_moves(&b).is_empty() {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// On a trained network (gen_34), half precision changes the move priors and the
+/// value logit only slightly. Skipped when the weights are not present.
+#[cfg(feature = "cuda")]
+#[test]
+fn trained_net_in_half_precision_keeps_priors_and_values_close() {
+    use kingfisher::nn::Precision;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("weights/gen_34.pth");
+    if !path.exists() {
+        eprintln!("skipping: {} not found", path.display());
+        return;
+    }
+    let boards = playout_positions();
+    let flags: Vec<bool> = (0..boards.len()).map(|i| i % 3 != 0).collect();
+    let qs: Vec<f32> = (0..boards.len()).map(|i| (i % 7) as f32 - 3.0).collect();
+    let run = |p: Precision| {
+        let mut nn = NeuralNetPolicy::new();
+        nn.load_with_precision(path.to_str().unwrap(), p).unwrap();
+        nn.predict_batch(&boards, &flags, &qs)
+    };
+    let reference = run(Precision::F32);
+    for (p, prior_tol, v_tol) in [(Precision::F16, 1e-2, 0.05), (Precision::Bf16, 3e-2, 0.15)] {
+        let got = run(p);
+        let (mut dp, mut dv, mut same_top) = (0.0f32, 0.0f32, 0);
+        for (i, b) in boards.iter().enumerate() {
+            let (pf, vf, _) = reference[i].clone().unwrap();
+            let (ph, vh, _) = got[i].clone().unwrap();
+            let mv = legal_moves(b);
+            let ef = kingfisher::tensor::policy_to_move_priors(&pf, &mv, b);
+            let eh = kingfisher::tensor::policy_to_move_priors(&ph, &mv, b);
+            for ((_, a), (_, c)) in ef.iter().zip(&eh) {
+                dp = dp.max((a - c).abs());
+            }
+            dv = dv.max((vf - vh).abs());
+            let top = |e: &[(kingfisher::move_types::Move, f32)]| {
+                e.iter()
+                    .enumerate()
+                    .max_by(|x, y| x.1 .1.total_cmp(&y.1 .1))
+                    .map(|(j, _)| j)
+            };
+            same_top += (top(&ef) == top(&eh)) as usize;
+        }
+        println!("{p:?}: max |Δprior| {dp}, max |Δv_logit| {dv}, top move agrees {same_top}/64");
+        assert!(dp <= prior_tol, "{p:?} prior diff {dp}");
+        assert!(dv <= v_tol, "{p:?} v_logit diff {dv}");
+        assert!(same_top >= 60, "{p:?} top move agrees in {same_top}/64");
+    }
+}

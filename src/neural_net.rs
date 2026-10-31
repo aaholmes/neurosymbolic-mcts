@@ -16,7 +16,7 @@ mod candle_impl {
     use crate::move_types::Move;
     use crate::nn::oracle_net::OracleNet;
     use crate::nn::weights::load_state_dict;
-    use crate::nn::PolicyValueNet;
+    use crate::nn::{PolicyValueNet, Precision};
     use crate::tensor::{board_to_planes, move_to_index, policy_to_move_priors};
     use candle_core::{Device, Tensor};
     use std::path::Path;
@@ -146,14 +146,28 @@ mod candle_impl {
 
         /// Load weights. `path` may be a `.safetensors` or `.pth` state dict, or a
         /// TorchScript `.pt` with one of those next to it.
+        /// Computes in the precision named by KF_PRECISION (f32 when unset).
         pub fn load(&mut self, path: &str) -> Result<(), String> {
+            self.load_with_precision(path, Precision::from_env())
+        }
+
+        /// As `load`, computing in `precision` (f16 and bf16 need CUDA).
+        pub fn load_with_precision(
+            &mut self,
+            path: &str,
+            precision: Precision,
+        ) -> Result<(), String> {
             let state_dict = load_state_dict(Path::new(path), &self.device)?;
-            let model = OracleNet::from_state_dict(state_dict, &self.device)
-                .map_err(|e| format!("Failed to build OracleNet from {}: {}", path, e))?;
+            let model =
+                OracleNet::from_state_dict_with_precision(state_dict, &self.device, precision)
+                    .map_err(|e| format!("Failed to build OracleNet from {}: {}", path, e))?;
             let cfg = model.config();
             println!(
-                "✅ Neural network loaded ({} blocks x {} channels) on {:?}",
-                cfg.num_blocks, cfg.hidden_dim, self.device
+                "✅ Neural network loaded ({} blocks x {} channels, {}) on {:?}",
+                cfg.num_blocks,
+                cfg.hidden_dim,
+                precision.name(),
+                self.device
             );
             self.model = Some(model);
             Ok(())

@@ -68,7 +68,7 @@ impl Dims {
 fn cpu_f32<'a>(s: &'a CpuStorage, l: &Layout) -> Result<&'a [f32]> {
     match s {
         CpuStorage::F32(v) => Ok(&v[l.start_offset()..l.start_offset() + l.shape().elem_count()]),
-        _ => candle_core::bail!("fused ops support f32 only"),
+        _ => candle_core::bail!("fused ops on the CPU support f32 only; half precision needs CUDA"),
     }
 }
 
@@ -116,14 +116,18 @@ impl CustomOp2 for BiasAct {
     ) -> Result<(candle_core::CudaStorage, Shape)> {
         let Dims { c, hw, .. } = self.dims;
         let n = self.dims.n();
-        let out = gpu::launch_elementwise(
-            "kf_bias_act",
-            &s1.device,
-            n,
-            &[gpu::view(s1, l1)?, gpu::view(s2, l2)?],
-            &[n as u32, c as u32, hw as u32, self.relu as u32],
-        )?;
-        Ok((gpu::wrap(out, s1), l1.shape().clone()))
+        let params = [n as u32, c as u32, hw as u32, self.relu as u32];
+        let out = gpu::dispatch!(s1, T, suffix => {
+            let out = gpu::launch_elementwise::<T>(
+                &format!("kf_bias_act{suffix}"),
+                &s1.device,
+                n,
+                &[gpu::view::<T>(s1, l1)?, gpu::view::<T>(s2, l2)?],
+                &params,
+            )?;
+            gpu::wrap(out, s1)
+        });
+        Ok((out, l1.shape().clone()))
     }
 }
 
@@ -162,14 +166,18 @@ impl CustomOp2 for ChannelMeanBias {
         l2: &Layout,
     ) -> Result<(candle_core::CudaStorage, Shape)> {
         let Dims { b, c, hw } = self.dims;
-        let out = gpu::launch_rows(
-            "kf_channel_mean_bias",
-            &s1.device,
-            b * c,
-            &[gpu::view(s1, l1)?, gpu::view(s2, l2)?],
-            &[(b * c) as u32, c as u32, hw as u32],
-        )?;
-        Ok((gpu::wrap(out, s1), Shape::from((b, c))))
+        let params = [(b * c) as u32, c as u32, hw as u32];
+        let out = gpu::dispatch!(s1, T, suffix => {
+            let out = gpu::launch_rows::<T>(
+                &format!("kf_channel_mean_bias{suffix}"),
+                &s1.device,
+                b * c,
+                &[gpu::view::<T>(s1, l1)?, gpu::view::<T>(s2, l2)?],
+                &params,
+            )?;
+            gpu::wrap(out, s1)
+        });
+        Ok((out, Shape::from((b, c))))
     }
 }
 
@@ -227,67 +235,145 @@ impl CustomOp3 for SeTail {
         };
         let Dims { c, hw, .. } = self.dims;
         let n = self.dims.n();
-        let out = gpu::launch_elementwise(
-            "kf_se_tail",
-            &s1.device,
-            n,
-            &[
-                gpu::view(s1, l1)?,
-                gpu::view(bias_storage, bias_layout)?,
-                gpu::view(s2, l2)?,
-                gpu::view(s3, l3)?,
-            ],
-            &[n as u32, c as u32, hw as u32],
-        )?;
-        Ok((gpu::wrap(out, s1), l1.shape().clone()))
+        let params = [n as u32, c as u32, hw as u32];
+        let out = gpu::dispatch!(s1, T, suffix => {
+            let out = gpu::launch_elementwise::<T>(
+                &format!("kf_se_tail{suffix}"),
+                &s1.device,
+                n,
+                &[
+                    gpu::view::<T>(s1, l1)?,
+                    gpu::view::<T>(bias_storage, bias_layout)?,
+                    gpu::view::<T>(s2, l2)?,
+                    gpu::view::<T>(s3, l3)?,
+                ],
+                &params,
+            )?;
+            gpu::wrap(out, s1)
+        });
+        Ok((out, l1.shape().clone()))
     }
 }
 
 #[cfg(feature = "cuda")]
 mod gpu {
     use candle_core::cuda_backend::cudarc::driver::{
-        CudaSlice, CudaView, LaunchConfig, PushKernelArg,
+        CudaSlice, CudaView, DeviceRepr, LaunchConfig, PushKernelArg, ValidAsZeroBits,
     };
     use candle_core::cuda_backend::cudarc::nvrtc;
-    use candle_core::cuda_backend::WrapErr;
+    use candle_core::cuda_backend::{CudaDType, WrapErr};
     use candle_core::{CudaDevice, CudaStorage, Layout, Result};
     use std::sync::OnceLock;
 
     const MODULE: &str = "kingfisher_fused";
 
+    /// Element types the kernels are compiled for.
+    pub(super) trait Elem: CudaDType + DeviceRepr + ValidAsZeroBits + Copy {}
+    impl Elem for f32 {}
+    impl Elem for half::f16 {}
+    impl Elem for half::bf16 {}
+
+    /// Run `$body` with `$t` bound to the element type of `$storage` and `$suffix`
+    /// to its kernel-name suffix ("", "_f16" or "_bf16").
+    macro_rules! dispatch {
+        ($storage:expr, $t:ident, $suffix:ident => $body:block) => {{
+            use candle_core::backend::BackendStorage;
+            match $storage.dtype() {
+                candle_core::DType::F32 => {
+                    type $t = f32;
+                    let $suffix = "";
+                    $body
+                }
+                candle_core::DType::F16 => {
+                    type $t = half::f16;
+                    let $suffix = "_f16";
+                    $body
+                }
+                candle_core::DType::BF16 => {
+                    type $t = half::bf16;
+                    let $suffix = "_bf16";
+                    $body
+                }
+                d => candle_core::bail!("fused ops do not support {d:?}"),
+            }
+        }};
+    }
+    pub(super) use dispatch;
+
+    // Each kernel is written once as a template computing in f32, and compiled for
+    // f32, f16 and bf16 storage. Half values are converted with plain PTX and bit
+    // operations, so NVRTC needs no CUDA headers.
     const SOURCE: &str = r#"
-extern "C" __global__ void kf_bias_act(const float* x, const float* b, float* y,
-                                       unsigned int n, unsigned int c, unsigned int hw,
-                                       unsigned int relu) {
+struct h16 { unsigned short x; };
+struct b16 { unsigned short x; };
+
+__device__ __forceinline__ float tof(float v) { return v; }
+__device__ __forceinline__ float tof(h16 v) {
+    float f; asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(v.x)); return f;
+}
+__device__ __forceinline__ float tof(b16 v) { return __int_as_float(((unsigned int)v.x) << 16); }
+
+__device__ __forceinline__ void put(float* p, float f) { *p = f; }
+__device__ __forceinline__ void put(h16* p, float f) {
+    unsigned short r; asm("cvt.rn.f16.f32 %0, %1;" : "=h"(r) : "f"(f)); p->x = r;
+}
+__device__ __forceinline__ void put(b16* p, float f) {
+    unsigned int u = __float_as_uint(f);
+    if ((u & 0x7fffffffu) > 0x7f800000u) { p->x = 0x7fc0; return; }  // NaN
+    u += 0x7fffu + ((u >> 16) & 1u);  // round to nearest, ties to even
+    p->x = (unsigned short)(u >> 16);
+}
+
+template <typename T>
+__device__ void bias_act(const T* x, const T* b, T* y, unsigned int n, unsigned int c,
+                         unsigned int hw, unsigned int relu) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    float v = x[i] + b[(i / hw) % c];
-    y[i] = (relu && v < 0.0f) ? 0.0f : v;
+    float v = tof(x[i]) + tof(b[(i / hw) % c]);
+    put(&y[i], (relu && v < 0.0f) ? 0.0f : v);
 }
 
 // One warp per (batch, channel) row of hw contiguous values.
-extern "C" __global__ void kf_channel_mean_bias(const float* x, const float* b, float* m,
-                                                unsigned int rows, unsigned int c,
-                                                unsigned int hw) {
+template <typename T>
+__device__ void channel_mean_bias(const T* x, const T* b, T* m, unsigned int rows,
+                                  unsigned int c, unsigned int hw) {
     unsigned int row = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
     unsigned int lane = threadIdx.x % 32;
     if (row >= rows) return;
-    const float* p = x + (size_t)row * hw;
+    const T* p = x + (size_t)row * hw;
     float s = 0.0f;
-    for (unsigned int j = lane; j < hw; j += 32) s += p[j];
+    for (unsigned int j = lane; j < hw; j += 32) s += tof(p[j]);
     for (int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);
-    if (lane == 0) m[row] = s / (float)hw + b[row % c];
+    if (lane == 0) put(&m[row], s / (float)hw + tof(b[row % c]));
 }
 
-extern "C" __global__ void kf_se_tail(const float* x, const float* b, const float* g,
-                                      const float* r, float* y, unsigned int n,
-                                      unsigned int c, unsigned int hw) {
+template <typename T>
+__device__ void se_tail(const T* x, const T* b, const T* g, const T* r, T* y, unsigned int n,
+                        unsigned int c, unsigned int hw) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     unsigned int row = i / hw;
-    float v = (x[i] + b[row % c]) * g[row] + r[i];
-    y[i] = v < 0.0f ? 0.0f : v;
+    float v = (tof(x[i]) + tof(b[row % c])) * tof(g[row]) + tof(r[i]);
+    put(&y[i], v < 0.0f ? 0.0f : v);
 }
+
+#define KF_KERNELS(T, SUFFIX)                                                              \
+extern "C" __global__ void kf_bias_act##SUFFIX(const T* x, const T* b, T* y,               \
+        unsigned int n, unsigned int c, unsigned int hw, unsigned int relu) {               \
+    bias_act<T>(x, b, y, n, c, hw, relu);                                                   \
+}                                                                                           \
+extern "C" __global__ void kf_channel_mean_bias##SUFFIX(const T* x, const T* b, T* m,      \
+        unsigned int rows, unsigned int c, unsigned int hw) {                               \
+    channel_mean_bias<T>(x, b, m, rows, c, hw);                                             \
+}                                                                                           \
+extern "C" __global__ void kf_se_tail##SUFFIX(const T* x, const T* b, const T* g,          \
+        const T* r, T* y, unsigned int n, unsigned int c, unsigned int hw) {                \
+    se_tail<T>(x, b, g, r, y, n, c, hw);                                                    \
+}
+
+KF_KERNELS(float, )
+KF_KERNELS(h16, _f16)
+KF_KERNELS(b16, _bf16)
 "#;
 
     fn ptx() -> Result<&'static str> {
@@ -301,27 +387,27 @@ extern "C" __global__ void kf_se_tail(const float* x, const float* b, const floa
         .map_err(|e| candle_core::Error::Msg(format!("compiling fused kernels: {e}")))
     }
 
-    pub(super) fn view<'a>(s: &'a CudaStorage, l: &Layout) -> Result<CudaView<'a, f32>> {
+    pub(super) fn view<'a, T: Elem>(s: &'a CudaStorage, l: &Layout) -> Result<CudaView<'a, T>> {
         let start = l.start_offset();
-        Ok(s.as_cuda_slice::<f32>()?
+        Ok(s.as_cuda_slice::<T>()?
             .slice(start..start + l.shape().elem_count()))
     }
 
-    pub(super) fn wrap(out: CudaSlice<f32>, like: &CudaStorage) -> CudaStorage {
+    pub(super) fn wrap<T: Elem>(out: CudaSlice<T>, like: &CudaStorage) -> CudaStorage {
         CudaStorage::wrap_cuda_slice(out, like.device.clone())
     }
 
-    fn launch(
+    fn launch<T: Elem>(
         name: &str,
         dev: &CudaDevice,
         out_len: usize,
         cfg: LaunchConfig,
-        inputs: &[CudaView<'_, f32>],
+        inputs: &[CudaView<'_, T>],
         params: &[u32],
-    ) -> Result<CudaSlice<f32>> {
+    ) -> Result<CudaSlice<T>> {
         let func = dev.get_or_load_custom_func(name, MODULE, ptx()?)?;
         // SAFETY: every element is written by the kernel.
-        let out = unsafe { dev.alloc::<f32>(out_len)? };
+        let out = unsafe { dev.alloc::<T>(out_len)? };
         let mut builder = func.builder();
         for input in inputs {
             builder.arg(input);
@@ -336,13 +422,13 @@ extern "C" __global__ void kf_se_tail(const float* x, const float* b, const floa
     }
 
     /// One thread per output element.
-    pub(super) fn launch_elementwise(
+    pub(super) fn launch_elementwise<T: Elem>(
         name: &str,
         dev: &CudaDevice,
         n: usize,
-        inputs: &[CudaView<'_, f32>],
+        inputs: &[CudaView<'_, T>],
         params: &[u32],
-    ) -> Result<CudaSlice<f32>> {
+    ) -> Result<CudaSlice<T>> {
         launch(
             name,
             dev,
@@ -354,13 +440,13 @@ extern "C" __global__ void kf_se_tail(const float* x, const float* b, const floa
     }
 
     /// One warp per output row.
-    pub(super) fn launch_rows(
+    pub(super) fn launch_rows<T: Elem>(
         name: &str,
         dev: &CudaDevice,
         rows: usize,
-        inputs: &[CudaView<'_, f32>],
+        inputs: &[CudaView<'_, T>],
         params: &[u32],
-    ) -> Result<CudaSlice<f32>> {
+    ) -> Result<CudaSlice<T>> {
         const THREADS: u32 = 256;
         let blocks = (rows as u32 * 32).div_ceil(THREADS);
         let cfg = LaunchConfig {

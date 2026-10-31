@@ -1,7 +1,7 @@
 //! OracleNet (SE-ResNet) inference, a layer-for-layer port of
 //! `python/model.py::OracleNet` in eval mode.
 
-use super::{fused, NetOutput, PolicyValueNet};
+use super::{fused, NetOutput, PolicyValueNet, Precision};
 use candle_core::conv::CudnnFwdAlgo;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::{linear, linear_no_bias, Linear, VarBuilder};
@@ -56,6 +56,13 @@ fn fwd_algo(batch: usize) -> Option<CudnnFwdAlgo> {
     }
 }
 
+/// KF_CANDLE_CONV=1 uses candle's own cuDNN convolution in half precision too.
+#[cfg(feature = "cudnn")]
+fn candle_conv() -> bool {
+    static CANDLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CANDLE.get_or_init(|| std::env::var("KF_CANDLE_CONV").as_deref() == Ok("1"))
+}
+
 /// A square, stride-1, "same"-padded convolution with bias.
 struct Conv {
     weight: Tensor,
@@ -64,6 +71,14 @@ struct Conv {
 }
 
 impl Conv {
+    fn to_dtype(&self, dtype: DType) -> Result<Self> {
+        Ok(Self {
+            weight: self.weight.to_dtype(dtype)?,
+            bias: self.bias.to_dtype(dtype)?,
+            padding: self.padding,
+        })
+    }
+
     fn plain(in_c: usize, out_c: usize, kernel: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             weight: vb.get((out_c, in_c, kernel, kernel), "weight")?,
@@ -104,6 +119,12 @@ impl Conv {
 
     /// The convolution without its bias.
     fn conv(&self, x: &Tensor) -> Result<Tensor> {
+        // Half precision uses the cached convolution; f32 keeps candle's, whose
+        // numerics and speed are the reference.
+        #[cfg(feature = "cudnn")]
+        if x.device().is_cuda() && x.dtype() != DType::F32 && !candle_conv() {
+            return super::cudnn_conv::conv2d(x, &self.weight, self.padding);
+        }
         let algo = fwd_algo(x.dim(0)?);
         x.conv2d_with_algo(&self.weight, self.padding, 1, 1, 1, algo)
     }
@@ -121,7 +142,21 @@ struct SeBlock {
     fc2: Linear,
 }
 
+fn linear_to_dtype(l: &Linear, dtype: DType) -> Result<Linear> {
+    Ok(Linear::new(
+        l.weight().to_dtype(dtype)?,
+        l.bias().map(|b| b.to_dtype(dtype)).transpose()?,
+    ))
+}
+
 impl SeBlock {
+    fn to_dtype(&self, dtype: DType) -> Result<Self> {
+        Ok(Self {
+            fc1: linear_to_dtype(&self.fc1, dtype)?,
+            fc2: linear_to_dtype(&self.fc2, dtype)?,
+        })
+    }
+
     fn new(channels: usize, vb: VarBuilder) -> Result<Self> {
         let inner = channels / SE_REDUCTION;
         Ok(Self {
@@ -151,6 +186,14 @@ struct ResBlock {
 }
 
 impl ResBlock {
+    fn to_dtype(&self, dtype: DType) -> Result<Self> {
+        Ok(Self {
+            conv1: self.conv1.to_dtype(dtype)?,
+            conv2: self.conv2.to_dtype(dtype)?,
+            se: self.se.to_dtype(dtype)?,
+        })
+    }
+
     fn new(hidden: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             conv1: Conv::with_bn(hidden, hidden, 3, false, vb.pp("conv1"), vb.pp("bn1"))?,
@@ -176,11 +219,52 @@ pub struct OracleNet {
     v_fc: Linear,
     v_out: Linear,
     k: f32,
+    dtype: DType,
 }
 
 impl OracleNet {
     /// Build the network from a PyTorch state dict (names as in `model.state_dict()`).
     pub fn from_state_dict(state_dict: HashMap<String, Tensor>, device: &Device) -> Result<Self> {
+        Self::from_state_dict_with_precision(state_dict, device, Precision::F32)
+    }
+
+    /// As `from_state_dict`, computing in `precision`. The net is built in f32
+    /// (so BatchNorm folds exactly) and then cast; inputs and outputs stay f32.
+    pub fn from_state_dict_with_precision(
+        state_dict: HashMap<String, Tensor>,
+        device: &Device,
+        precision: Precision,
+    ) -> Result<Self> {
+        if precision != Precision::F32 && !device.is_cuda() {
+            candle_core::bail!("{} inference needs CUDA", precision.name());
+        }
+        let net = Self::build_f32(state_dict, device)?;
+        if precision == Precision::F32 {
+            return Ok(net);
+        }
+        net.to_dtype(precision.dtype())
+    }
+
+    fn to_dtype(&self, dtype: DType) -> Result<Self> {
+        Ok(Self {
+            config: self.config,
+            start_conv: self.start_conv.to_dtype(dtype)?,
+            blocks: self
+                .blocks
+                .iter()
+                .map(|b| b.to_dtype(dtype))
+                .collect::<Result<Vec<_>>>()?,
+            p_conv: self.p_conv.to_dtype(dtype)?,
+            p_head: self.p_head.to_dtype(dtype)?,
+            v_conv: self.v_conv.to_dtype(dtype)?,
+            v_fc: linear_to_dtype(&self.v_fc, dtype)?,
+            v_out: linear_to_dtype(&self.v_out, dtype)?,
+            k: self.k,
+            dtype,
+        })
+    }
+
+    fn build_f32(state_dict: HashMap<String, Tensor>, device: &Device) -> Result<Self> {
         let config = OracleNetConfig::infer(&state_dict)?;
         let k_logit = state_dict
             .get("k_logit")
@@ -214,6 +298,7 @@ impl OracleNet {
             v_fc: linear(65, VALUE_HIDDEN, vb.pp("v_fc"))?,
             v_out: linear(VALUE_HIDDEN, 1, vb.pp("v_out"))?,
             k: (0.47 * softplus(k_logit)) as f32,
+            dtype: DType::F32,
         })
     }
 
@@ -237,7 +322,8 @@ impl OracleNet {
     /// Returns `(policy_logits, v_logit)`.
     pub fn forward_logits(&self, planes: &Tensor, scalars: &Tensor) -> Result<(Tensor, Tensor)> {
         let b = planes.dim(0)?;
-        let q_result = scalars.narrow(1, 0, 1)?;
+        let planes = &planes.to_dtype(self.dtype)?;
+        let q_result = scalars.narrow(1, 0, 1)?.to_dtype(self.dtype)?;
 
         let mut x = self.start_conv.forward(planes, true)?;
         for block in &self.blocks {
@@ -251,7 +337,8 @@ impl OracleNet {
         let v = self.v_conv.forward(&x, true)?.reshape((b, 64))?;
         let v = Tensor::cat(&[&v, &q_result], 1)?;
         let v = self.v_fc.forward(&v)?.relu()?;
-        Ok((logits, self.v_out.forward(&v)?))
+        let v_logit = self.v_out.forward(&v)?;
+        Ok((logits.to_dtype(DType::F32)?, v_logit.to_dtype(DType::F32)?))
     }
 
     /// Material confidence scalar (position-independent).

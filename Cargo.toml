@@ -45,6 +45,7 @@ rayon = "1.7"
 crossbeam-channel = "0.5"
 candle-core = { version = "0.11.0", optional = true }
 candle-nn = { version = "0.11.0", optional = true }
+half = { version = "2.7", optional = true }  # f16/bf16 element types for the fused CUDA kernels
 rustc-hash = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -55,7 +56,7 @@ noru = "2.2"   # NNUE inference (game-agnostic). Planned HalfKP eval for Q-searc
 [features]
 default = []
 neural = ["dep:candle-core", "dep:candle-nn"]  # candle inference on CPU
-cuda = ["neural", "candle-core/cuda", "candle-nn/cuda"]  # needs nvcc >= 12.8 for sm_120 GPUs
+cuda = ["neural", "candle-core/cuda", "candle-nn/cuda", "dep:half"]  # needs nvcc >= 12.8 for sm_120 GPUs
 cudnn = ["cuda", "candle-core/cudnn", "candle-nn/cudnn"]  # cuDNN convolutions (libcudnn must be on the library path)
 slow-tests = []
 

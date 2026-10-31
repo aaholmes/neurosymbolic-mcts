@@ -349,4 +349,103 @@ mod with_model {
     fn load_reports_a_missing_model() {
         assert!(InferenceServer::load("/nonexistent/model.pt", 2, 8).is_err());
     }
+
+    fn server_with(options: kingfisher::mcts::inference_server::ServerOptions) -> InferenceServer {
+        InferenceServer::with_options(vec![tiny_policy()], 16, options)
+    }
+
+    #[test]
+    fn server_options_default_to_pipelining_with_gathered_priors() {
+        let o = kingfisher::mcts::inference_server::ServerOptions::default();
+        assert_eq!(
+            o.idle_window,
+            kingfisher::mcts::inference_server::DEFAULT_IDLE_WINDOW
+        );
+        assert!(o.pipeline);
+        assert!(!o.full_policy);
+    }
+
+    #[test]
+    fn server_without_pipelining_answers_each_request_with_its_own_result() {
+        let boards = sample_boards();
+        let mut reference = tiny_policy();
+        let expected: Vec<_> = (0..200)
+            .map(|i| {
+                let b = &boards[i % boards.len()];
+                reference.predict(b, i % 2 == 0, i as f32 * 0.01).unwrap()
+            })
+            .collect();
+        let server = std::sync::Arc::new(server_with(
+            kingfisher::mcts::inference_server::ServerOptions {
+                pipeline: false,
+                ..Default::default()
+            },
+        ));
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let server = server.clone();
+                let boards = boards.clone();
+                std::thread::spawn(move || {
+                    (t..200)
+                        .step_by(8)
+                        .map(|i| {
+                            let b = boards[i % boards.len()].clone();
+                            let r = server
+                                .predict_async(b, i % 2 == 0, i as f32 * 0.01)
+                                .recv()
+                                .unwrap()
+                                .unwrap();
+                            (i, r)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for h in handles {
+            for (i, (p, v, k)) in h.join().unwrap() {
+                let (pe, ve, ke) = &expected[i];
+                let dp = p
+                    .iter()
+                    .zip(pe)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+                assert!(
+                    dp < 1e-5 && (v - ve).abs() < 1e-5 && k == *ke,
+                    "request {i}"
+                );
+            }
+        }
+        let stats = std::sync::Arc::try_unwrap(server).unwrap().shutdown();
+        assert_eq!(stats[0].positions, 200);
+    }
+
+    #[test]
+    fn full_policy_option_gives_priors_aligned_to_moves() {
+        let mut reference = tiny_policy();
+        let server = server_with(kingfisher::mcts::inference_server::ServerOptions {
+            full_policy: true,
+            ..Default::default()
+        });
+        let mg = kingfisher::move_generation::MoveGen::new();
+        for board in sample_boards() {
+            let (c, q) = mg.gen_pseudo_legal_moves(&board);
+            let moves: Vec<_> = c
+                .into_iter()
+                .chain(q)
+                .filter(|&m| board.apply_move_to_board(m).is_legal(&mg))
+                .collect();
+            let (full, v, _) = reference.predict(&board, true, 0.5).unwrap();
+            let expected = kingfisher::tensor::policy_to_move_priors(&full, &moves, &board);
+            let (p, vg, _) = server
+                .predict_legal_async(board.clone(), moves.clone(), true, 0.5)
+                .recv()
+                .unwrap()
+                .unwrap();
+            assert_eq!(p.len(), moves.len());
+            assert!((v - vg).abs() < 1e-5);
+            for ((_, pe), pg) in expected.iter().zip(&p) {
+                assert!((pe - pg).abs() < 1e-5);
+            }
+        }
+    }
 }

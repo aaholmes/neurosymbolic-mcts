@@ -6,6 +6,7 @@ mod board_tests;
 mod board_utils_tests;
 mod boardstack_tests;
 mod candle_net_tests;
+mod cudnn_conv_tests;
 mod eval_tests;
 mod evaluate_models_tests;
 mod experiment_config_tests;
