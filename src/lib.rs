@@ -40,6 +40,12 @@
 //! - **`move_types`**, **`piece_types`** - Core chess types
 //! - **`bits`**, **`hash`**, **`utils`** - Utility functions
 
+/// glibc's allocator shares its arenas among hundreds of self-play threads, whose
+/// lock contention cut self-play throughput by 26-30% at 480 threads; mimalloc keeps
+/// per-thread heaps.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod agent;
 pub mod benchmarks;
 pub mod bits;

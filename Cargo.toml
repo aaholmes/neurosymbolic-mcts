@@ -54,6 +54,7 @@ serde_json = "1.0"
 chrono = "0.4"
 tiny_http = "0.12"
 noru = "2.2"   # NNUE inference (game-agnostic). Planned HalfKP eval for Q-search; src/nnue.rs is currently a PeSTO-delegating stub, not yet wired to noru.
+mimalloc = "0.1"
 
 [features]
 default = []
