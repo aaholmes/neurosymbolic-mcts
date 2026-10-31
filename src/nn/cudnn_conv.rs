@@ -28,9 +28,14 @@ use std::sync::Arc;
 /// `conv2d(x, w)` with stride 1 and `padding` on each side, for `x: [B, Cin, H, W]`
 /// and `w: [Cout, Cin, K, K]` on a CUDA device, in f32, f16 or bf16.
 pub fn conv2d(x: &Tensor, w: &Tensor, padding: usize) -> Result<Tensor> {
-    let (_, cin, _, _) = x.dims4()?;
-    let (_, cin_w, kh, kw) = w.dims4()?;
-    if cin != cin_w || kh != kw {
+    conv_with(x, w, padding, false)
+}
+
+fn conv_with(x: &Tensor, w: &Tensor, padding: usize, nhwc: bool) -> Result<Tensor> {
+    let Geometry {
+        cin, cin_w, k, kw, ..
+    } = Geometry::of(x, w, nhwc)?;
+    if cin != cin_w || k != kw {
         candle_core::bail!(
             "conv2d: input {:?} does not fit filter {:?}",
             x.dims(),
@@ -38,7 +43,71 @@ pub fn conv2d(x: &Tensor, w: &Tensor, padding: usize) -> Result<Tensor> {
         );
     }
     x.contiguous()?
-        .apply_op2_no_bwd(&w.contiguous()?, &Conv { padding })
+        .apply_op2_no_bwd(&w.contiguous()?, &Conv { padding, nhwc })
+}
+
+/// Sizes read from the input and filter shapes in either layout.
+struct Geometry {
+    b: usize,
+    cin: usize,
+    h: usize,
+    w: usize,
+    cout: usize,
+    cin_w: usize,
+    k: usize,
+    kw: usize,
+}
+
+impl Geometry {
+    fn of(x: &Tensor, w: &Tensor, nhwc: bool) -> Result<Self> {
+        Self::of_dims(x.dims(), w.dims(), nhwc)
+    }
+
+    fn of_dims(x: &[usize], w: &[usize], nhwc: bool) -> Result<Self> {
+        if x.len() != 4 || w.len() != 4 {
+            candle_core::bail!("conv2d: input {x:?} and filter {w:?} must be 4-D");
+        }
+        Ok(if nhwc {
+            Self {
+                b: x[0],
+                h: x[1],
+                w: x[2],
+                cin: x[3],
+                cout: w[0],
+                k: w[1],
+                kw: w[2],
+                cin_w: w[3],
+            }
+        } else {
+            Self {
+                b: x[0],
+                cin: x[1],
+                h: x[2],
+                w: x[3],
+                cout: w[0],
+                cin_w: w[1],
+                k: w[2],
+                kw: w[3],
+            }
+        })
+    }
+
+    fn out_shape(&self, pad: usize, nhwc: bool) -> Shape {
+        let (ho, wo) = (self.h + 2 * pad + 1 - self.k, self.w + 2 * pad + 1 - self.k);
+        if nhwc {
+            Shape::from((self.b, ho, wo, self.cout))
+        } else {
+            Shape::from((self.b, self.cout, ho, wo))
+        }
+    }
+}
+
+fn format(nhwc: bool) -> sys::cudnnTensorFormat_t {
+    if nhwc {
+        sys::cudnnTensorFormat_t::CUDNN_TENSOR_NHWC
+    } else {
+        sys::cudnnTensorFormat_t::CUDNN_TENSOR_NCHW
+    }
 }
 
 /// `relu?(conv2d(x, w) + bias)` in one cuDNN call, for `bias: [Cout]` in the dtype
@@ -51,9 +120,26 @@ pub fn conv2d_bias_act(
     padding: usize,
     relu: bool,
 ) -> Result<Tensor> {
-    let (_, cin, _, _) = x.dims4()?;
-    let (cout, cin_w, kh, kw) = w.dims4()?;
-    if cin != cin_w || kh != kw || bias.dims() != [cout] {
+    conv_bias_act_with(x, w, bias, padding, relu, false)
+}
+
+fn conv_bias_act_with(
+    x: &Tensor,
+    w: &Tensor,
+    bias: &Tensor,
+    padding: usize,
+    relu: bool,
+    nhwc: bool,
+) -> Result<Tensor> {
+    let Geometry {
+        cin,
+        cin_w,
+        k,
+        kw,
+        cout,
+        ..
+    } = Geometry::of(x, w, nhwc)?;
+    if cin != cin_w || k != kw || bias.dims() != [cout] {
         candle_core::bail!(
             "conv2d_bias_act: input {:?}, filter {:?} and bias {:?} do not fit",
             x.dims(),
@@ -64,13 +150,35 @@ pub fn conv2d_bias_act(
     x.contiguous()?.apply_op3_no_bwd(
         &w.contiguous()?,
         &bias.contiguous()?,
-        &FusedConv { padding, relu },
+        &FusedConv {
+            padding,
+            relu,
+            nhwc,
+        },
     )
+}
+
+/// As [`conv2d`], for channels-last `x: [B, H, W, Cin]` and `w: [Cout, K, K, Cin]`,
+/// giving `[B, H', W', Cout]`.
+pub fn conv2d_nhwc(x: &Tensor, w: &Tensor, padding: usize) -> Result<Tensor> {
+    conv_with(x, w, padding, true)
+}
+
+/// As [`conv2d_bias_act`], in the channels-last layout of [`conv2d_nhwc`].
+pub fn conv2d_bias_act_nhwc(
+    x: &Tensor,
+    w: &Tensor,
+    bias: &Tensor,
+    padding: usize,
+    relu: bool,
+) -> Result<Tensor> {
+    conv_bias_act_with(x, w, bias, padding, relu, true)
 }
 
 struct FusedConv {
     padding: usize,
     relu: bool,
+    nhwc: bool,
 }
 
 impl CustomOp3 for FusedConv {
@@ -146,7 +254,7 @@ impl Drop for RawHandle {
     }
 }
 
-type FusedKey = (usize, DType, [usize; 8]);
+type FusedKey = (usize, DType, [usize; 9]);
 
 thread_local! {
     static RAW_HANDLES: RefCell<HashMap<usize, RawHandle>> = RefCell::new(HashMap::new());
@@ -169,9 +277,10 @@ fn raw_handle(sid: usize, stream: &CudaStream) -> Result<sys::cudnnHandle_t> {
 fn make_fused_plan(
     handle: sys::cudnnHandle_t,
     dtype: sys::cudnnDataType_t,
-    [b, cin, h, w, cout, k, pad, relu]: [usize; 8],
+    [b, cin, h, w, cout, k, pad, relu, nhwc]: [usize; 9],
 ) -> Result<FusedPlan> {
     let i = |v: usize| v as i32;
+    let fmt = format(nhwc == 1);
     let nchw = sys::cudnnTensorFormat_t::CUDNN_TENSOR_NCHW;
     let (ho, wo) = (h + 2 * pad + 1 - k, w + 2 * pad + 1 - k);
     // SAFETY: every descriptor is freshly created before it is set, and owned by the plan.
@@ -185,9 +294,9 @@ fn make_fused_plan(
             act: result::create_activation_descriptor()?,
             workspace: 0,
         };
-        result::set_tensor4d_descriptor(plan.x, nchw, dtype, [i(b), i(cin), i(h), i(w)])?;
-        result::set_filter4d_descriptor(plan.w, dtype, nchw, [i(cout), i(cin), i(k), i(k)])?;
-        result::set_tensor4d_descriptor(plan.y, nchw, dtype, [i(b), i(cout), i(ho), i(wo)])?;
+        result::set_tensor4d_descriptor(plan.x, fmt, dtype, [i(b), i(cin), i(h), i(w)])?;
+        result::set_filter4d_descriptor(plan.w, dtype, fmt, [i(cout), i(cin), i(k), i(k)])?;
+        result::set_tensor4d_descriptor(plan.y, fmt, dtype, [i(b), i(cout), i(ho), i(wo)])?;
         result::set_tensor4d_descriptor(plan.bias, nchw, dtype, [1, i(cout), 1, 1])?;
         result::set_convolution2d_descriptor(
             plan.conv,
@@ -238,14 +347,32 @@ impl FusedConv {
     where
         T: CudnnDataType + CudaDType + DeviceRepr + ValidAsZeroBits + WithDType,
     {
-        let (b, cin, h, w) = xl.shape().dims4()?;
-        let (cout, _, k, _) = wl.shape().dims4()?;
+        let g = Geometry::of_dims(xl.shape().dims(), wl.shape().dims(), self.nhwc)?;
+        let Geometry {
+            b,
+            cin,
+            h,
+            w,
+            cout,
+            k,
+            ..
+        } = g;
         let p = self.padding;
-        let (ho, wo) = (h + 2 * p + 1 - k, w + 2 * p + 1 - k);
+        let out_shape = g.out_shape(p, self.nhwc);
         let stream: Arc<CudaStream> = xs.device.cuda_stream();
         let sid = Arc::as_ptr(&stream) as usize;
         let handle = raw_handle(sid, &stream)?;
-        let dims = [b, cin, h, w, cout, k, p, self.relu as usize];
+        let dims = [
+            b,
+            cin,
+            h,
+            w,
+            cout,
+            k,
+            p,
+            self.relu as usize,
+            self.nhwc as usize,
+        ];
         let key: FusedKey = (sid, T::DTYPE, dims);
 
         let x = xs.as_cuda_slice::<T>()?;
@@ -255,7 +382,7 @@ impl FusedConv {
         let bias = bs.as_cuda_slice::<T>()?;
         let bias = bias.slice(bl.start_offset()..bl.start_offset() + bl.shape().elem_count());
         // SAFETY: cuDNN writes every output element (alpha2 = 0, so `z` is not used).
-        let mut out = unsafe { stream.alloc::<T>(b * cout * ho * wo) }.w()?;
+        let mut out = unsafe { stream.alloc::<T>(out_shape.elem_count()) }.w()?;
 
         FUSED_PLANS.with(|plans| -> Result<()> {
             let mut plans = plans.borrow_mut();
@@ -309,13 +436,14 @@ impl FusedConv {
 
         Ok((
             CudaStorage::wrap_cuda_slice(out, xs.device.clone()),
-            Shape::from((b, cout, ho, wo)),
+            out_shape,
         ))
     }
 }
 
 struct Conv {
     padding: usize,
+    nhwc: bool,
 }
 
 impl CustomOp2 for Conv {
@@ -359,7 +487,7 @@ struct Plan<T: CudnnDataType> {
     workspace: usize,
 }
 
-type Key = (usize, DType, [usize; 6]);
+type Key = (usize, DType, [usize; 7]);
 
 thread_local! {
     static HANDLES: RefCell<HashMap<usize, Arc<Cudnn>>> = RefCell::new(HashMap::new());
@@ -378,13 +506,22 @@ impl Conv {
     where
         T: CudnnDataType + CudaDType + DeviceRepr + ValidAsZeroBits + WithDType,
     {
-        let (b, cin, h, w) = xl.shape().dims4()?;
-        let (cout, _, k, _) = wl.shape().dims4()?;
+        let g = Geometry::of_dims(xl.shape().dims(), wl.shape().dims(), self.nhwc)?;
+        let Geometry {
+            b,
+            cin,
+            h,
+            w,
+            cout,
+            k,
+            ..
+        } = g;
         let p = self.padding;
+        let out_shape = g.out_shape(p, self.nhwc);
         let (ho, wo) = (h + 2 * p + 1 - k, w + 2 * p + 1 - k);
         let stream: Arc<CudaStream> = xs.device.cuda_stream();
         let sid = Arc::as_ptr(&stream) as usize;
-        let key: Key = (sid, T::DTYPE, [b, cin, h, w, cout, k]);
+        let key: Key = (sid, T::DTYPE, [b, cin, h, w, cout, k, self.nhwc as usize]);
 
         let cudnn = HANDLES.with(|m| -> Result<Arc<Cudnn>> {
             if let Some(c) = m.borrow().get(&sid) {
@@ -408,7 +545,7 @@ impl Conv {
                 match plans.entry(key) {
                     std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::hash_map::Entry::Vacant(e) => e.insert(Box::new(
-                        make_plan::<T>(&cudnn, [b, cin, h, w], [cout, k], p, [ho, wo])?,
+                        make_plan::<T>(&cudnn, [b, cin, h, w], [cout, k], p, [ho, wo], self.nhwc)?,
                     )),
                 };
             let plan = plan
@@ -439,7 +576,7 @@ impl Conv {
 
         Ok((
             CudaStorage::wrap_cuda_slice(out, xs.device.clone()),
-            Shape::from((b, cout, ho, wo)),
+            out_shape,
         ))
     }
 }
@@ -450,9 +587,10 @@ fn make_plan<T: CudnnDataType>(
     [cout, k]: [usize; 2],
     pad: usize,
     [ho, wo]: [usize; 2],
+    nhwc: bool,
 ) -> Result<Plan<T>> {
     let i = |v: usize| v as i32;
-    let nchw = sys::cudnnTensorFormat_t::CUDNN_TENSOR_NCHW;
+    let nchw = format(nhwc);
     let mut conv = cudnn.create_conv2d::<f32>(
         [i(pad), i(pad)],
         [1, 1],

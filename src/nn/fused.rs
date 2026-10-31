@@ -25,7 +25,16 @@ pub fn channel_mean_bias(x: &Tensor, bias: &Tensor) -> Result<Tensor> {
 /// Squeeze-and-excitation tail: `relu((x + bias[c]) * gate[b, c] + residual)`,
 /// for `x, residual: [B, C, H, W]` and `gate: [B, C]`.
 pub fn se_tail(x: &Tensor, bias: &Tensor, gate: &Tensor, residual: &Tensor) -> Result<Tensor> {
-    let dims = Dims::of(x, bias)?;
+    se_tail_with(Dims::of(x, bias)?, x, bias, gate, residual)
+}
+
+fn se_tail_with(
+    dims: Dims,
+    x: &Tensor,
+    bias: &Tensor,
+    gate: &Tensor,
+    residual: &Tensor,
+) -> Result<Tensor> {
     if gate.dims() != [dims.b, dims.c] || residual.dims() != x.dims() {
         candle_core::bail!(
             "se_tail: gate {:?} / residual {:?} do not fit x {:?}",
@@ -44,11 +53,32 @@ pub fn se_tail(x: &Tensor, bias: &Tensor, gate: &Tensor, residual: &Tensor) -> R
     )
 }
 
+/// As [`bias_act`], for channels-last `x: [B, H, W, C]`.
+pub fn bias_act_nhwc(x: &Tensor, bias: &Tensor, relu: bool) -> Result<Tensor> {
+    let dims = Dims::of_nhwc(x, bias)?;
+    x.contiguous()?
+        .apply_op2_no_bwd(&bias.contiguous()?, &BiasAct { dims, relu })
+}
+
+/// As [`channel_mean_bias`], for channels-last `x: [B, H, W, C]`, giving `[B, C]`.
+pub fn channel_mean_bias_nhwc(x: &Tensor, bias: &Tensor) -> Result<Tensor> {
+    let dims = Dims::of_nhwc(x, bias)?;
+    x.contiguous()?
+        .apply_op2_no_bwd(&bias.contiguous()?, &ChannelMeanBias { dims })
+}
+
+/// As [`se_tail`], for channels-last `x, residual: [B, H, W, C]`.
+pub fn se_tail_nhwc(x: &Tensor, bias: &Tensor, gate: &Tensor, residual: &Tensor) -> Result<Tensor> {
+    se_tail_with(Dims::of_nhwc(x, bias)?, x, bias, gate, residual)
+}
+
 #[derive(Clone, Copy)]
 struct Dims {
     b: usize,
     c: usize,
     hw: usize,
+    /// `[B, H, W, C]` rather than `[B, C, H, W]`.
+    channels_last: bool,
 }
 
 impl Dims {
@@ -57,7 +87,40 @@ impl Dims {
         if bias.dims() != [c] {
             candle_core::bail!("bias {:?} does not match {c} channels", bias.dims());
         }
-        Ok(Self { b, c, hw: h * w })
+        Ok(Self {
+            b,
+            c,
+            hw: h * w,
+            channels_last: false,
+        })
+    }
+    fn of_nhwc(x: &Tensor, bias: &Tensor) -> Result<Self> {
+        let (b, h, w, c) = x.dims4()?;
+        if bias.dims() != [c] {
+            candle_core::bail!("bias {:?} does not match {c} channels", bias.dims());
+        }
+        Ok(Self {
+            b,
+            c,
+            hw: h * w,
+            channels_last: true,
+        })
+    }
+    /// Channel of flat element `i`.
+    fn channel(&self, i: usize) -> usize {
+        if self.channels_last {
+            i % self.c
+        } else {
+            (i / self.hw) % self.c
+        }
+    }
+    /// (batch, channel) row of flat element `i`, as `b * C + c`.
+    fn row(&self, i: usize) -> usize {
+        if self.channels_last {
+            (i / (self.hw * self.c)) * self.c + i % self.c
+        } else {
+            i / self.hw
+        }
     }
     #[cfg(feature = "cuda")]
     fn n(&self) -> usize {
@@ -90,12 +153,11 @@ impl CustomOp2 for BiasAct {
         l2: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
         let (x, bias) = (cpu_f32(s1, l1)?, cpu_f32(s2, l2)?);
-        let Dims { c, hw, .. } = self.dims;
         let y = x
             .iter()
             .enumerate()
             .map(|(i, &v)| {
-                let v = v + bias[(i / hw) % c];
+                let v = v + bias[self.dims.channel(i)];
                 if self.relu {
                     v.max(0.0)
                 } else {
@@ -116,7 +178,8 @@ impl CustomOp2 for BiasAct {
     ) -> Result<(candle_core::CudaStorage, Shape)> {
         let Dims { c, hw, .. } = self.dims;
         let n = self.dims.n();
-        let params = [n as u32, c as u32, hw as u32, self.relu as u32];
+        let cl = self.dims.channels_last as u32;
+        let params = [n as u32, c as u32, hw as u32, self.relu as u32, cl];
         let out = gpu::dispatch!(s1, T, suffix => {
             let out = gpu::launch_elementwise::<T>(
                 &format!("kf_bias_act{suffix}"),
@@ -148,12 +211,14 @@ impl CustomOp2 for ChannelMeanBias {
         l2: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
         let (x, bias) = (cpu_f32(s1, l1)?, cpu_f32(s2, l2)?);
-        let Dims { b, c, hw } = self.dims;
-        let m = x
-            .chunks_exact(hw)
-            .enumerate()
-            .map(|(row, chunk)| chunk.iter().sum::<f32>() / hw as f32 + bias[row % c])
-            .collect();
+        let Dims { b, c, hw, .. } = self.dims;
+        let mut m = vec![0f32; b * c];
+        for (i, &v) in x.iter().enumerate() {
+            m[self.dims.row(i)] += v;
+        }
+        for (row, v) in m.iter_mut().enumerate() {
+            *v = *v / hw as f32 + bias[row % c];
+        }
         Ok((CpuStorage::F32(m), Shape::from((b, c))))
     }
 
@@ -165,16 +230,29 @@ impl CustomOp2 for ChannelMeanBias {
         s2: &candle_core::CudaStorage,
         l2: &Layout,
     ) -> Result<(candle_core::CudaStorage, Shape)> {
-        let Dims { b, c, hw } = self.dims;
+        let Dims { b, c, hw, .. } = self.dims;
         let params = [(b * c) as u32, c as u32, hw as u32];
         let out = gpu::dispatch!(s1, T, suffix => {
-            let out = gpu::launch_rows::<T>(
-                &format!("kf_channel_mean_bias{suffix}"),
-                &s1.device,
-                b * c,
-                &[gpu::view::<T>(s1, l1)?, gpu::view::<T>(s2, l2)?],
-                &params,
-            )?;
+            let inputs = [gpu::view::<T>(s1, l1)?, gpu::view::<T>(s2, l2)?];
+            // Channels-last: one thread per (batch, channel), so neighbouring threads
+            // read neighbouring channels.
+            let out = if self.dims.channels_last {
+                gpu::launch_elementwise::<T>(
+                    &format!("kf_channel_mean_bias_cl{suffix}"),
+                    &s1.device,
+                    b * c,
+                    &inputs,
+                    &params,
+                )?
+            } else {
+                gpu::launch_rows::<T>(
+                    &format!("kf_channel_mean_bias{suffix}"),
+                    &s1.device,
+                    b * c,
+                    &inputs,
+                    &params,
+                )?
+            };
             gpu::wrap(out, s1)
         });
         Ok((out, Shape::from((b, c))))
@@ -206,14 +284,13 @@ impl CustomOp3 for SeTail {
             candle_core::bail!("se_tail: bias is not on the CPU");
         };
         let bias = cpu_f32(bias_storage, bias_layout)?;
-        let Dims { c, hw, .. } = self.dims;
         let y = x
             .iter()
             .zip(res)
             .enumerate()
             .map(|(i, (&v, &r))| {
-                let row = i / hw;
-                ((v + bias[row % c]) * gate[row] + r).max(0.0)
+                let row = self.dims.row(i);
+                ((v + bias[self.dims.channel(i)]) * gate[row] + r).max(0.0)
             })
             .collect();
         Ok((CpuStorage::F32(y), l1.shape().clone()))
@@ -235,7 +312,12 @@ impl CustomOp3 for SeTail {
         };
         let Dims { c, hw, .. } = self.dims;
         let n = self.dims.n();
-        let params = [n as u32, c as u32, hw as u32];
+        let params = [
+            n as u32,
+            c as u32,
+            hw as u32,
+            self.dims.channels_last as u32,
+        ];
         let out = gpu::dispatch!(s1, T, suffix => {
             let out = gpu::launch_elementwise::<T>(
                 &format!("kf_se_tail{suffix}"),
@@ -324,12 +406,13 @@ __device__ __forceinline__ void put(b16* p, float f) {
     p->x = (unsigned short)(u >> 16);
 }
 
+// `cl`: channels-last ([B, H, W, C]) rather than [B, C, H, W].
 template <typename T>
 __device__ void bias_act(const T* x, const T* b, T* y, unsigned int n, unsigned int c,
-                         unsigned int hw, unsigned int relu) {
+                         unsigned int hw, unsigned int relu, unsigned int cl) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    float v = tof(x[i]) + tof(b[(i / hw) % c]);
+    float v = tof(x[i]) + tof(b[cl ? i % c : (i / hw) % c]);
     put(&y[i], (relu && v < 0.0f) ? 0.0f : v);
 }
 
@@ -347,28 +430,46 @@ __device__ void channel_mean_bias(const T* x, const T* b, T* m, unsigned int row
     if (lane == 0) put(&m[row], s / (float)hw + tof(b[row % c]));
 }
 
+// Channels-last: one thread per (batch, channel), summing that channel's hw values.
+template <typename T>
+__device__ void channel_mean_bias_cl(const T* x, const T* b, T* m, unsigned int rows,
+                                     unsigned int c, unsigned int hw) {
+    unsigned int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    unsigned int ch = row % c;
+    const T* p = x + (size_t)(row / c) * hw * c + ch;
+    float s = 0.0f;
+    for (unsigned int j = 0; j < hw; ++j) s += tof(p[(size_t)j * c]);
+    put(&m[row], s / (float)hw + tof(b[ch]));
+}
+
 template <typename T>
 __device__ void se_tail(const T* x, const T* b, const T* g, const T* r, T* y, unsigned int n,
-                        unsigned int c, unsigned int hw) {
+                        unsigned int c, unsigned int hw, unsigned int cl) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    unsigned int row = i / hw;
-    float v = (tof(x[i]) + tof(b[row % c])) * tof(g[row]) + tof(r[i]);
+    unsigned int ch = cl ? i % c : (i / hw) % c;
+    unsigned int row = cl ? (i / (hw * c)) * c + ch : i / hw;
+    float v = (tof(x[i]) + tof(b[ch])) * tof(g[row]) + tof(r[i]);
     put(&y[i], v < 0.0f ? 0.0f : v);
 }
 
 #define KF_KERNELS(T, SUFFIX)                                                              \
 extern "C" __global__ void kf_bias_act##SUFFIX(const T* x, const T* b, T* y,               \
-        unsigned int n, unsigned int c, unsigned int hw, unsigned int relu) {               \
-    bias_act<T>(x, b, y, n, c, hw, relu);                                                   \
+        unsigned int n, unsigned int c, unsigned int hw, unsigned int relu, unsigned int cl) {\
+    bias_act<T>(x, b, y, n, c, hw, relu, cl);                                               \
+}                                                                                           \
+extern "C" __global__ void kf_channel_mean_bias_cl##SUFFIX(const T* x, const T* b, T* m,   \
+        unsigned int rows, unsigned int c, unsigned int hw) {                               \
+    channel_mean_bias_cl<T>(x, b, m, rows, c, hw);                                          \
 }                                                                                           \
 extern "C" __global__ void kf_channel_mean_bias##SUFFIX(const T* x, const T* b, T* m,      \
         unsigned int rows, unsigned int c, unsigned int hw) {                               \
     channel_mean_bias<T>(x, b, m, rows, c, hw);                                             \
 }                                                                                           \
 extern "C" __global__ void kf_se_tail##SUFFIX(const T* x, const T* b, const T* g,          \
-        const T* r, T* y, unsigned int n, unsigned int c, unsigned int hw) {                \
-    se_tail<T>(x, b, g, r, y, n, c, hw);                                                    \
+        const T* r, T* y, unsigned int n, unsigned int c, unsigned int hw, unsigned int cl) {\
+    se_tail<T>(x, b, g, r, y, n, c, hw, cl);                                                \
 }
 
 KF_KERNELS(float, )

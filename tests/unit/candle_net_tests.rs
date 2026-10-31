@@ -472,3 +472,122 @@ fn predict_batch_records_wall_and_cpu_time_per_phase() {
         );
     }
 }
+
+/// Half precision on the GPU computes in channels-last layout; f32 stays
+/// channels-first, as the reference.
+#[cfg(feature = "cudnn")]
+#[test]
+fn half_precision_net_on_gpu_is_channels_last() {
+    use kingfisher::nn::Precision;
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    let sd = || load_state_dict(&fixture("seresnet_tiny.safetensors"), &dev).unwrap();
+    assert!(
+        SeresNet::from_state_dict_with_precision(sd(), &dev, Precision::F16)
+            .unwrap()
+            .channels_last()
+    );
+    assert!(
+        !SeresNet::from_state_dict_with_precision(sd(), &dev, Precision::F32)
+            .unwrap()
+            .channels_last()
+    );
+}
+
+/// A channels-last net gives the same outputs for `[B, 17, 8, 8]` planes and for
+/// the same planes as `[B, 8, 8, 24]`.
+#[cfg(feature = "cudnn")]
+#[test]
+fn channels_last_net_accepts_both_input_layouts() {
+    use kingfisher::nn::Precision;
+    use kingfisher::tensor::{planes_to_nhwc, NHWC_CHANNELS};
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    let sd = load_state_dict(&fixture("seresnet_tiny.safetensors"), &dev).unwrap();
+    let net = SeresNet::from_state_dict_with_precision(sd, &dev, Precision::F16).unwrap();
+    let io = io();
+    let input = io["input"].to_device(&Device::Cpu).unwrap();
+    let b = input.dim(0).unwrap();
+    let flat: Vec<f32> = input.flatten_all().unwrap().to_vec1().unwrap();
+    let nhwc: Vec<f32> = flat.chunks(17 * 64).flat_map(planes_to_nhwc).collect();
+    let nhwc = Tensor::from_vec(nhwc, (b, 8, 8, NHWC_CHANNELS), &dev).unwrap();
+    let scalars = io["scalars"].to_device(&dev).unwrap();
+    let (p1, v1) = net
+        .forward_logits(&input.to_device(&dev).unwrap(), &scalars)
+        .unwrap();
+    let (p2, v2) = net.forward_logits(&nhwc, &scalars).unwrap();
+    assert!(max_abs_diff(&p1, &p2) < 1e-6 && max_abs_diff(&v1, &v2) < 1e-6);
+}
+
+/// `policy_index` maps each AlphaZero move index to its column of
+/// `forward_logits`, in both layouts: a log-softmax over the mapped columns is the
+/// full log-policy.
+#[cfg(feature = "cudnn")]
+#[test]
+fn policy_index_maps_every_move_index_to_its_logit() {
+    use kingfisher::nn::Precision;
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    let io = io();
+    let (input, scalars) = (
+        io["input"].to_device(&dev).unwrap(),
+        io["scalars"].to_device(&dev).unwrap(),
+    );
+    for p in [Precision::F32, Precision::F16] {
+        let sd = load_state_dict(&fixture("seresnet_tiny.safetensors"), &dev).unwrap();
+        let net = SeresNet::from_state_dict_with_precision(sd, &dev, p).unwrap();
+        let (logits, _) = net.forward_logits(&input, &scalars).unwrap();
+        let log_policy = net.forward(&input, &scalars).unwrap().log_policy;
+        let logits: Vec<Vec<f32>> = logits.to_device(&Device::Cpu).unwrap().to_vec2().unwrap();
+        let log_policy: Vec<Vec<f32>> = log_policy
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .to_vec2()
+            .unwrap();
+        for (row, want) in logits.iter().zip(&log_policy) {
+            let mapped: Vec<f32> = (0..4672).map(|az| row[net.policy_index(az)]).collect();
+            let max = mapped.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let lse = max + mapped.iter().map(|x| (x - max).exp()).sum::<f32>().ln();
+            for (az, (m, w)) in mapped.iter().zip(want).enumerate() {
+                assert!(
+                    (m - lse - w).abs() < 1e-3,
+                    "{p:?} move index {az}: {} vs {w}",
+                    m - lse
+                );
+            }
+        }
+    }
+}
+
+/// In half precision on the GPU, priors gathered for the given moves still equal
+/// the renormalized full policy.
+#[cfg(feature = "cudnn")]
+#[test]
+fn half_precision_priors_for_given_moves_match_renormalized_full_policy() {
+    use kingfisher::nn::Precision;
+    let mut nn = NeuralNetPolicy::new();
+    nn.load_with_precision(
+        fixture("seresnet_tiny.safetensors").to_str().unwrap(),
+        Precision::F16,
+    )
+    .unwrap();
+    let fens = [
+        positions::STARTING,
+        positions::CASTLING_BOTH,
+        positions::PROMOTION,
+        "4k3/8/8/8/8/8/1p6/4K2R b K - 0 1",
+    ];
+    let boards: Vec<_> = fens.iter().map(|f| board_from_fen(f)).collect();
+    let flags = vec![false; boards.len()];
+    let qs = vec![0.5; boards.len()];
+    let full = nn.predict_batch(&boards, &flags, &qs);
+    let moves: Vec<Option<Vec<_>>> = boards.iter().map(|b| Some(legal_moves(b))).collect();
+    let pending = nn.launch_batch_with_moves(&boards, &flags, &qs, &moves);
+    let got = nn.finish_batch(pending);
+    for (i, b) in boards.iter().enumerate() {
+        let (pf, _, _) = full[i].clone().unwrap();
+        let (pg, _, _) = got[i].clone().unwrap();
+        let mv = moves[i].as_ref().unwrap();
+        let expected = kingfisher::tensor::policy_to_move_priors(&pf, mv, b);
+        for ((m, pe), p) in expected.iter().zip(&pg) {
+            assert!((pe - p).abs() < 2e-3, "board {i} move {m:?}: {pe} vs {p}");
+        }
+    }
+}

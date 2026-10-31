@@ -12,6 +12,9 @@ const POLICY_PLANES: usize = 73;
 const POLICY_SIZE: usize = 64 * POLICY_PLANES;
 const SE_REDUCTION: usize = 16;
 const VALUE_HIDDEN: usize = 256;
+/// Policy-head outputs in the channels-last net: the 73 planes padded with zero
+/// filters to a multiple of 8, which tensor-core convolutions need.
+const POLICY_PLANES_PADDED: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeresNetConfig {
@@ -65,9 +68,11 @@ fn candle_conv() -> bool {
 
 /// A square, stride-1, "same"-padded convolution with bias.
 struct Conv {
+    /// `[Cout, Cin, K, K]`, or `[Cout, K, K, Cin]` when `channels_last`.
     weight: Tensor,
     bias: Tensor,
     padding: usize,
+    channels_last: bool,
 }
 
 impl Conv {
@@ -76,7 +81,35 @@ impl Conv {
             weight: self.weight.to_dtype(dtype)?,
             bias: self.bias.to_dtype(dtype)?,
             padding: self.padding,
+            channels_last: self.channels_last,
         })
+    }
+
+    /// The same convolution for channels-last tensors, with its input channels
+    /// padded with zero weights to `cin` and its outputs padded with zero filters
+    /// (and zero bias) to `cout`.
+    fn to_channels_last(&self, cin: usize, cout: usize) -> Result<Self> {
+        let pad = |t: &Tensor, dim: usize, to: usize| -> Result<Tensor> {
+            let have = t.dim(dim)?;
+            if have >= to {
+                return Ok(t.clone());
+            }
+            let mut shape = t.dims().to_vec();
+            shape[dim] = to - have;
+            Tensor::cat(&[t, &Tensor::zeros(shape, t.dtype(), t.device())?], dim)
+        };
+        let w = pad(&pad(&self.weight, 1, cin)?, 0, cout)?;
+        Ok(Self {
+            weight: w.permute((0, 2, 3, 1))?.contiguous()?,
+            bias: pad(&self.bias, 0, cout)?,
+            padding: self.padding,
+            channels_last: true,
+        })
+    }
+
+    fn channels_last_as_is(&self) -> Result<Self> {
+        let (cout, cin, _, _) = self.weight.dims4()?;
+        self.to_channels_last(cin, cout)
     }
 
     fn plain(in_c: usize, out_c: usize, kernel: usize, vb: VarBuilder) -> Result<Self> {
@@ -84,6 +117,7 @@ impl Conv {
             weight: vb.get((out_c, in_c, kernel, kernel), "weight")?,
             bias: vb.get(out_c, "bias")?,
             padding: kernel / 2,
+            channels_last: false,
         })
     }
 
@@ -114,11 +148,16 @@ impl Conv {
             weight: w.broadcast_mul(&scale.reshape((out_c, 1, 1, 1))?)?,
             bias: b.mul(&scale)?.add(&beta)?,
             padding: kernel / 2,
+            channels_last: false,
         })
     }
 
     /// The convolution without its bias.
     fn conv(&self, x: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "cudnn")]
+        if self.channels_last {
+            return super::cudnn_conv::conv2d_nhwc(x, &self.weight, self.padding);
+        }
         // Half precision uses the cached convolution; f32 keeps candle's, whose
         // numerics and speed are the reference.
         #[cfg(feature = "cudnn")]
@@ -132,6 +171,16 @@ impl Conv {
     /// Convolution plus bias, optionally followed by ReLU: one fused cuDNN call in
     /// half precision, a separate bias kernel otherwise.
     fn forward(&self, x: &Tensor, relu: bool) -> Result<Tensor> {
+        #[cfg(feature = "cudnn")]
+        if self.channels_last {
+            return super::cudnn_conv::conv2d_bias_act_nhwc(
+                x,
+                &self.weight,
+                &self.bias,
+                self.padding,
+                relu,
+            );
+        }
         #[cfg(feature = "cudnn")]
         if x.device().is_cuda() && x.dtype() != DType::F32 && !candle_conv() {
             return super::cudnn_conv::conv2d_bias_act(
@@ -182,11 +231,20 @@ impl SeBlock {
         conv: &Tensor,
         bias: &Tensor,
         residual: &Tensor,
+        channels_last: bool,
     ) -> Result<Tensor> {
-        let y = fused::channel_mean_bias(conv, bias)?;
+        let y = if channels_last {
+            fused::channel_mean_bias_nhwc(conv, bias)?
+        } else {
+            fused::channel_mean_bias(conv, bias)?
+        };
         let y = self.fc1.forward(&y)?.relu()?;
         let gate = candle_nn::ops::sigmoid(&self.fc2.forward(&y)?)?;
-        fused::se_tail(conv, bias, &gate, residual)
+        if channels_last {
+            fused::se_tail_nhwc(conv, bias, &gate, residual)
+        } else {
+            fused::se_tail(conv, bias, &gate, residual)
+        }
     }
 }
 
@@ -216,7 +274,19 @@ impl ResBlock {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let out = self.conv1.forward(x, true)?;
         let out = self.conv2.conv(&out)?;
-        self.se.forward_with_residual(&out, &self.conv2.bias, x)
+        self.se
+            .forward_with_residual(&out, &self.conv2.bias, x, self.conv2.channels_last)
+    }
+
+    fn to_channels_last(&self) -> Result<Self> {
+        Ok(Self {
+            conv1: self.conv1.channels_last_as_is()?,
+            conv2: self.conv2.channels_last_as_is()?,
+            se: SeBlock {
+                fc1: self.se.fc1.clone(),
+                fc2: self.se.fc2.clone(),
+            },
+        })
     }
 }
 
@@ -231,6 +301,8 @@ pub struct SeresNet {
     v_out: Linear,
     k: f32,
     dtype: DType,
+    /// Activations are `[B, H, W, C]` (half precision on CUDA with cuDNN).
+    channels_last: bool,
 }
 
 impl SeresNet {
@@ -253,7 +325,38 @@ impl SeresNet {
         if precision == Precision::F32 {
             return Ok(net);
         }
-        net.to_dtype(precision.dtype())
+        let net = net.to_dtype(precision.dtype())?;
+        #[cfg(feature = "cudnn")]
+        if device.is_cuda() && !candle_conv() {
+            return net.to_channels_last();
+        }
+        Ok(net)
+    }
+
+    /// The same network computing in channels-last layout, with the start conv's
+    /// input padded to `NHWC_CHANNELS` and the policy head to
+    /// `POLICY_PLANES_PADDED` outputs.
+    fn to_channels_last(&self) -> Result<Self> {
+        let h = self.config.hidden_dim;
+        Ok(Self {
+            config: self.config,
+            start_conv: self
+                .start_conv
+                .to_channels_last(crate::tensor::NHWC_CHANNELS, h)?,
+            blocks: self
+                .blocks
+                .iter()
+                .map(|b| b.to_channels_last())
+                .collect::<Result<Vec<_>>>()?,
+            p_conv: self.p_conv.channels_last_as_is()?,
+            p_head: self.p_head.to_channels_last(h, POLICY_PLANES_PADDED)?,
+            v_conv: self.v_conv.channels_last_as_is()?,
+            v_fc: self.v_fc.clone(),
+            v_out: self.v_out.clone(),
+            k: self.k,
+            dtype: self.dtype,
+            channels_last: true,
+        })
     }
 
     fn to_dtype(&self, dtype: DType) -> Result<Self> {
@@ -272,6 +375,7 @@ impl SeresNet {
             v_out: linear_to_dtype(&self.v_out, dtype)?,
             k: self.k,
             dtype,
+            channels_last: self.channels_last,
         })
     }
 
@@ -310,6 +414,7 @@ impl SeresNet {
             v_out: linear(VALUE_HIDDEN, 1, vb.pp("v_out"))?,
             k: (0.47 * softplus(k_logit)) as f32,
             dtype: DType::F32,
+            channels_last: false,
         })
     }
 
@@ -329,11 +434,12 @@ fn softplus(x: f64) -> f64 {
 
 impl SeresNet {
     /// The trunk and both heads, with the policy left as raw logits in the
-    /// network's own layout: `[B, 4672]` indexed by `plane * 64 + square`.
-    /// Returns `(policy_logits, v_logit)`.
+    /// network's own layout, `[B, policy_width()]`; `policy_index` finds a move's
+    /// column. `planes` is `[B, 17, 8, 8]`, or `[B, 8, 8, NHWC_CHANNELS]` for a
+    /// channels-last net. Returns `(policy_logits, v_logit)`.
     pub fn forward_logits(&self, planes: &Tensor, scalars: &Tensor) -> Result<(Tensor, Tensor)> {
         let b = planes.dim(0)?;
-        let planes = &planes.to_dtype(self.dtype)?;
+        let planes = &self.input_planes(planes)?.to_dtype(self.dtype)?;
         let q_result = scalars.narrow(1, 0, 1)?.to_dtype(self.dtype)?;
 
         let mut x = self.start_conv.forward(planes, true)?;
@@ -342,7 +448,10 @@ impl SeresNet {
         }
 
         let p = self.p_conv.forward(&x, true)?;
-        let logits = self.p_head.forward(&p, false)?.reshape((b, POLICY_SIZE))?;
+        let logits = self
+            .p_head
+            .forward(&p, false)?
+            .reshape((b, self.policy_width()))?;
 
         // Value: 1x1 conv -> [B, 64], append q_result -> [B, 65] -> FC -> v_logit
         let v = self.v_conv.forward(&x, true)?.reshape((b, 64))?;
@@ -356,18 +465,67 @@ impl SeresNet {
     pub fn k(&self) -> f32 {
         self.k
     }
+
+    /// Whether the network computes in channels-last layout (half precision on CUDA).
+    pub fn channels_last(&self) -> bool {
+        self.channels_last
+    }
+
+    /// Width of the `forward_logits` policy: 4672, or 64 squares of
+    /// `POLICY_PLANES_PADDED` when channels-last.
+    pub fn policy_width(&self) -> usize {
+        if self.channels_last {
+            64 * POLICY_PLANES_PADDED
+        } else {
+            POLICY_SIZE
+        }
+    }
+
+    /// Column of `forward_logits` holding the logit of AlphaZero move index `az`
+    /// (`square * 73 + plane`).
+    pub fn policy_index(&self, az: usize) -> usize {
+        let (square, plane) = (az / POLICY_PLANES, az % POLICY_PLANES);
+        if self.channels_last {
+            square * POLICY_PLANES_PADDED + plane
+        } else {
+            plane * 64 + square
+        }
+    }
+
+    /// The planes in the layout the network computes in: channels-first input to
+    /// a channels-last net is transposed and padded with zero planes.
+    fn input_planes(&self, planes: &Tensor) -> Result<Tensor> {
+        if !self.channels_last || planes.dim(3)? == crate::tensor::NHWC_CHANNELS {
+            return Ok(planes.clone());
+        }
+        let (b, c, h, w) = planes.dims4()?;
+        let pad = Tensor::zeros(
+            (b, h, w, crate::tensor::NHWC_CHANNELS - c),
+            planes.dtype(),
+            planes.device(),
+        )?;
+        Tensor::cat(&[&planes.permute((0, 2, 3, 1))?, &pad], 3)?.contiguous()
+    }
 }
 
 impl PolicyValueNet for SeresNet {
     fn forward(&self, planes: &Tensor, scalars: &Tensor) -> Result<NetOutput> {
         let b = planes.dim(0)?;
         let (logits, v_logit) = self.forward_logits(planes, scalars)?;
-        // [B, 73, 8, 8] -> [B, 8, 8, 73] -> [B, 4672] (AlphaZero move index order)
-        let p = logits
-            .reshape((b, POLICY_PLANES, 8, 8))?
-            .permute((0, 2, 3, 1))?
-            .contiguous()?
-            .reshape((b, POLICY_SIZE))?;
+        // To [B, 4672] in AlphaZero move index order (square * 73 + plane).
+        let p = if self.channels_last {
+            logits
+                .reshape((b, 64, POLICY_PLANES_PADDED))?
+                .narrow(2, 0, POLICY_PLANES)?
+                .contiguous()?
+                .reshape((b, POLICY_SIZE))?
+        } else {
+            logits
+                .reshape((b, POLICY_PLANES, 8, 8))?
+                .permute((0, 2, 3, 1))?
+                .contiguous()?
+                .reshape((b, POLICY_SIZE))?
+        };
         Ok(NetOutput {
             log_policy: candle_nn::ops::log_softmax(&p, D::Minus1)?,
             v_logit,

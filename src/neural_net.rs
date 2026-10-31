@@ -81,12 +81,6 @@ mod candle_impl {
         Gathered { logits: Tensor, lens: Vec<usize> },
     }
 
-    /// AlphaZero policy index (`square * 73 + plane`) to the network's own
-    /// output layout (`plane * 64 + square`).
-    fn network_index(az: usize) -> u32 {
-        ((az % 73) * 64 + az / 73) as u32
-    }
-
     /// Softmax of one row of logits, in place.
     fn softmax_in_place(row: &mut [f32]) {
         let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -359,8 +353,10 @@ mod candle_impl {
             let (logits, v_logit) = model.forward_logits(&planes, &scalars)?;
             let mut index: Vec<u32> = Vec::new();
             let mut lens = Vec::with_capacity(boards.len());
+            let width = model.policy_width();
+            let column = |az: usize| model.policy_index(az) as u32;
             for (i, (board, mv)) in boards.iter().zip(moves).enumerate() {
-                let base = (i * POLICY_SIZE) as u32;
+                let base = (i * width) as u32;
                 match mv {
                     Some(mv) => {
                         for &m in mv {
@@ -369,12 +365,12 @@ mod candle_impl {
                             } else {
                                 m.flip_vertical()
                             };
-                            index.push(base + network_index(move_to_index(rel)));
+                            index.push(base + column(move_to_index(rel)));
                         }
                         lens.push(mv.len());
                     }
                     None => {
-                        index.extend((0..POLICY_SIZE).map(|az| base + network_index(az)));
+                        index.extend((0..POLICY_SIZE).map(|az| base + column(az)));
                         lens.push(POLICY_SIZE);
                     }
                 }
@@ -422,16 +418,36 @@ mod candle_impl {
             self.batch_sizes.record(b as f64);
             let t0 = Instant::now();
             let clock = PhaseClock::start(c"kf.infer.build");
-            let mut planes = Vec::with_capacity(b * PLANES);
+            // A channels-last net takes each square's planes together, padded.
+            let channels_last = self.model.as_ref().is_some_and(|m| m.channels_last());
+            let per_board = if channels_last {
+                64 * crate::tensor::NHWC_CHANNELS
+            } else {
+                PLANES
+            };
+            let mut planes = Vec::with_capacity(b * per_board);
             for board in boards {
-                planes.extend(board_to_planes(board));
+                let p = board_to_planes(board);
+                if channels_last {
+                    planes.extend(crate::tensor::planes_to_nhwc(&p));
+                } else {
+                    planes.extend(p);
+                }
             }
             let scalars: Vec<f32> = (0..b)
                 .flat_map(|i| [q_results[i], if qsearch_flags[i] { 1.0 } else { 0.0 }])
                 .collect();
             clock.stop(&mut self.phases.build);
             let clock = PhaseClock::start(c"kf.infer.upload");
-            let planes = Tensor::from_vec(planes, (b, 17, 8, 8), &self.device)?;
+            let planes = if channels_last {
+                Tensor::from_vec(
+                    planes,
+                    (b, 8, 8, crate::tensor::NHWC_CHANNELS),
+                    &self.device,
+                )?
+            } else {
+                Tensor::from_vec(planes, (b, 17, 8, 8), &self.device)?
+            };
             let scalars = Tensor::from_vec(scalars, (b, 2), &self.device)?;
             clock.stop(&mut self.phases.upload);
             self.transfer_to_gpu_timing.record(t0.elapsed());

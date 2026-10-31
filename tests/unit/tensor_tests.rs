@@ -121,3 +121,31 @@ fn extract_plane(tensor: &Tensor, plane: usize) -> Vec<f32> {
         .to_vec1()
         .unwrap()
 }
+
+/// The channels-last input holds each square's 17 planes, padded with zeros to
+/// `NHWC_CHANNELS`, square by square.
+#[test]
+fn channels_last_planes_are_the_planes_square_by_square_padded_with_zeros() {
+    use kingfisher::tensor::{board_to_planes, planes_to_nhwc, NHWC_CHANNELS};
+    assert_eq!(NHWC_CHANNELS, 24);
+    for fen in [
+        crate::common::positions::STARTING,
+        crate::common::positions::EN_PASSANT,
+        crate::common::positions::CASTLING_BOTH,
+        "4k3/8/8/8/8/8/1p6/4K2R b K - 0 1",
+    ] {
+        let planes = board_to_planes(&crate::common::board_from_fen(fen));
+        let nhwc = planes_to_nhwc(&planes);
+        assert_eq!(nhwc.len(), 64 * NHWC_CHANNELS);
+        for sq in 0..64 {
+            for c in 0..NHWC_CHANNELS {
+                let want = if c < 17 { planes[c * 64 + sq] } else { 0.0 };
+                assert_eq!(
+                    nhwc[sq * NHWC_CHANNELS + c],
+                    want,
+                    "{fen} square {sq} channel {c}"
+                );
+            }
+        }
+    }
+}

@@ -192,3 +192,39 @@ fn fused_ops_reject_half_precision_on_cpu() {
     let err = bias_act(&h(&x), &h(&bias), true).unwrap_err().to_string();
     assert!(err.contains("CUDA"), "unexpected error: {err}");
 }
+
+/// The channels-last kernels give the channels-first results, laid out as
+/// `[B, H, W, C]`, for widths that do and do not fill a warp.
+#[cfg(feature = "cuda")]
+#[test]
+fn channels_last_kernels_match_channels_first_on_permuted_input() {
+    use candle_core::DType;
+    use kingfisher::nn::fused::{bias_act_nhwc, channel_mean_bias_nhwc, se_tail_nhwc};
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    let nhwc = |t: &Tensor| t.permute((0, 2, 3, 1)).unwrap().contiguous().unwrap();
+    for c in [20, 128] {
+        let x = Tensor::randn(0f32, 1., (3, c, 8, 8), &dev).unwrap();
+        let bias = Tensor::randn(0f32, 1., c, &dev).unwrap();
+        let gate = Tensor::rand(0f32, 1., (3, c), &dev).unwrap();
+        let res = Tensor::randn(0f32, 1., (3, c, 8, 8), &dev).unwrap();
+        for (dtype, tol) in [(DType::F32, 1e-5), (DType::F16, 2e-3), (DType::BF16, 1e-2)] {
+            let h = |t: &Tensor| t.to_dtype(dtype).unwrap();
+            for relu in [false, true] {
+                let want = nhwc(&bias_act(&h(&x), &h(&bias), relu).unwrap());
+                let got = bias_act_nhwc(&nhwc(&h(&x)), &h(&bias), relu).unwrap();
+                assert_eq!(got.dims(), [3, 8, 8, c]);
+                let d = rel_diff(&got, &want);
+                assert!(d <= tol, "{dtype:?} c {c} bias_act relu={relu}: {d}");
+            }
+            let want = channel_mean_bias(&h(&x), &h(&bias)).unwrap();
+            let got = channel_mean_bias_nhwc(&nhwc(&h(&x)), &h(&bias)).unwrap();
+            assert_eq!(got.dims(), [3, c]);
+            let d = rel_diff(&got, &want);
+            assert!(d <= tol, "{dtype:?} c {c} channel_mean_bias: {d}");
+            let want = nhwc(&se_tail(&h(&x), &h(&bias), &h(&gate), &h(&res)).unwrap());
+            let got = se_tail_nhwc(&nhwc(&h(&x)), &h(&bias), &h(&gate), &nhwc(&h(&res))).unwrap();
+            let d = rel_diff(&got, &want);
+            assert!(d <= tol, "{dtype:?} c {c} se_tail: {d}");
+        }
+    }
+}

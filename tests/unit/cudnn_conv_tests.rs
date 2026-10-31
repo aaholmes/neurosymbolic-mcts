@@ -4,7 +4,7 @@
 #![cfg(feature = "cudnn")]
 
 use candle_core::{DType, Device, Tensor};
-use kingfisher::nn::cudnn_conv::{conv2d, conv2d_bias_act};
+use kingfisher::nn::cudnn_conv::{conv2d, conv2d_bias_act, conv2d_bias_act_nhwc, conv2d_nhwc};
 use kingfisher::nn::fused::bias_act;
 
 /// Largest |a - b| relative to the largest |b| (at least 1).
@@ -108,4 +108,49 @@ fn fused_conv_rejects_a_bias_of_the_wrong_length() {
     let w = Tensor::zeros((8, 16, 3, 3), DType::F16, &dev).unwrap();
     let bias = Tensor::zeros(7, DType::F16, &dev).unwrap();
     assert!(conv2d_bias_act(&x, &w, &bias, 1, true).is_err());
+}
+
+/// `[B, C, H, W]` to `[B, H, W, C]`; for a filter, `[K, C, R, S]` to `[K, R, S, C]`.
+fn channels_last(t: &Tensor) -> Tensor {
+    t.permute((0, 2, 3, 1)).unwrap().contiguous().unwrap()
+}
+
+#[test]
+fn channels_last_convolutions_match_channels_first() {
+    let dev = Device::new_cuda(0).expect("CUDA device");
+    // Plus the start conv with its input padded to 24 channels and the policy head
+    // padded to 80 outputs, as the channels-last network uses them.
+    let shapes = SHAPES.iter().copied().chain([(24, 128, 3), (128, 80, 1)]);
+    for (cin, cout, k) in shapes {
+        let w = Tensor::randn(0f32, 0.1, (cout, cin, k, k), &dev).unwrap();
+        let bias = Tensor::randn(0f32, 0.5, cout, &dev).unwrap();
+        for b in [1, 7, 64, 130] {
+            let x = Tensor::randn(0f32, 1., (b, cin, 8, 8), &dev).unwrap();
+            for (dtype, tol) in [(DType::F16, 5e-3), (DType::BF16, 3e-2)] {
+                let (x, w, bias) = (
+                    x.to_dtype(dtype).unwrap(),
+                    w.to_dtype(dtype).unwrap(),
+                    bias.to_dtype(dtype).unwrap(),
+                );
+                let (xl, wl) = (channels_last(&x), channels_last(&w));
+                let want = channels_last(&conv2d(&x, &w, k / 2).unwrap());
+                let got = conv2d_nhwc(&xl, &wl, k / 2).unwrap();
+                assert_eq!(got.dims(), [b, 8, 8, cout]);
+                let d = rel_diff(&got, &want);
+                assert!(
+                    d <= tol,
+                    "{dtype:?} conv cin {cin} cout {cout} batch {b}: {d}"
+                );
+                for relu in [true, false] {
+                    let want = channels_last(&conv2d_bias_act(&x, &w, &bias, k / 2, relu).unwrap());
+                    let got = conv2d_bias_act_nhwc(&xl, &wl, &bias, k / 2, relu).unwrap();
+                    let d = rel_diff(&got, &want);
+                    assert!(
+                        d <= tol,
+                        "{dtype:?} fused cin {cin} cout {cout} batch {b} relu {relu}: {d}"
+                    );
+                }
+            }
+        }
+    }
 }

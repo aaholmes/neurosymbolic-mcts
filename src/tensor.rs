@@ -7,6 +7,22 @@ use crate::board::Board;
 use crate::move_types::Move;
 use crate::piece_types::{BISHOP, BLACK, KNIGHT, QUEEN, ROOK, WHITE};
 
+/// Channels per square in the channels-last input: the 17 planes padded with zeros
+/// to a multiple of 8, which tensor-core convolutions need.
+pub const NHWC_CHANNELS: usize = 24;
+
+/// One position's planes from `board_to_planes` (17 planes of 64 squares) as 64
+/// squares of `NHWC_CHANNELS` channels.
+pub fn planes_to_nhwc(planes: &[f32]) -> Vec<f32> {
+    let mut out = vec![0.0f32; 64 * NHWC_CHANNELS];
+    for (plane, squares) in planes.chunks_exact(64).enumerate() {
+        for (sq, &v) in squares.iter().enumerate() {
+            out[sq * NHWC_CHANNELS + plane] = v;
+        }
+    }
+    out
+}
+
 /// Encode a board into 17×8×8 planes from STM's perspective.
 /// Returns Vec<f32> of length 1088 (17 * 64).
 ///
