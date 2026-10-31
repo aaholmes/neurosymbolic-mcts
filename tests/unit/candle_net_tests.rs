@@ -215,3 +215,16 @@ fn predict_batch_records_batch_sizes() {
     assert_eq!(nn.batch_sizes.count, 2);
     assert!((nn.batch_sizes.mean_val() - 3.0).abs() < 1e-12);
 }
+
+/// Each inference worker owns its stream and never shares a tensor with another
+/// stream, so candle's cross-stream event tracking is pure overhead (hundreds of
+/// CUDA event calls per batch) and must be off.
+#[cfg(feature = "cuda")]
+#[test]
+fn own_stream_policy_turns_off_event_tracking() {
+    let nn = NeuralNetPolicy::new_on_own_stream();
+    let Device::Cuda(dev) = nn.device() else {
+        panic!("expected a CUDA device")
+    };
+    assert!(!dev.is_event_tracking());
+}

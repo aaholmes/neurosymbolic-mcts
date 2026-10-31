@@ -55,7 +55,19 @@ mod candle_impl {
             } else {
                 Device::Cpu
             };
+            if let Device::Cuda(dev) = &device {
+                // A second stream switches candle to recording and waiting on CUDA
+                // events around every tensor access (hundreds of calls per batch).
+                // Each worker keeps all its tensors on its own stream, so none are
+                // needed. The setting is per CUDA context, i.e. process-wide.
+                // SAFETY: no tensor is shared between streams.
+                unsafe { dev.disable_event_tracking() };
+            }
             Self::with_device(device)
+        }
+
+        pub fn device(&self) -> &Device {
+            &self.device
         }
 
         pub fn with_device(device: Device) -> Self {
