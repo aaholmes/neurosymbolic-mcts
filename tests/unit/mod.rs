@@ -27,6 +27,7 @@ mod magic_bitboard_tests;
 mod make_move_tests;
 mod mate_search_tests;
 mod move_generation_tests;
+mod movegen_order_tests;
 mod neural_mcts_tests;
 mod nn_counter_tests;
 mod node_tests;

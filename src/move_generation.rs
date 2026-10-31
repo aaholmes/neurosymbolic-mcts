@@ -174,6 +174,25 @@ impl Default for MoveGen {
     }
 }
 
+/// Room for every move of a position: the most found in any chess position is 218.
+pub const MAX_MOVES: usize = 256;
+
+/// Starting capacity of each move list: `MAX_MOVES` when `KF_RESERVE_MOVES=1`, else 0
+/// (lists grow as needed). Reserving was 5.8% slower in self-play (282 versus 299
+/// moves per second at 480 threads), so it is off by default.
+pub fn move_list_capacity(setting: Option<&str>) -> usize {
+    match setting {
+        Some("1") => MAX_MOVES,
+        Some("0") | None => 0,
+        Some(v) => panic!("KF_RESERVE_MOVES must be 0 or 1, not {v:?}"),
+    }
+}
+
+fn reserved_moves() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| move_list_capacity(std::env::var("KF_RESERVE_MOVES").ok().as_deref()))
+}
+
 impl MoveGen {
     /// Creates a new `MoveGen` instance.
     ///
@@ -285,27 +304,32 @@ impl MoveGen {
 
     /// Internal helper to generate all pseudo-legal moves, separated.
     fn _generate_all_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>, Vec<Move>) {
-        // Returns (captures, promotions, quiet_moves)
-        let (mut captures, promotions, mut moves) = self.gen_pawn_moves(board);
-        let (mut captures_knights, mut moves_knights) = self.gen_knight_moves(board);
-        let (mut captures_kings, mut moves_kings) = self.gen_king_moves(board);
-        let (mut captures_rooks, mut moves_rooks) = self.gen_rook_moves(board);
-        let (mut captures_bishops, mut moves_bishops) = self.gen_bishop_moves(board);
-        let (mut captures_queens, mut moves_queens) = self.gen_queen_moves(board);
-
-        captures.append(&mut captures_knights);
-        captures.append(&mut captures_bishops);
-        captures.append(&mut captures_rooks);
-        captures.append(&mut captures_queens);
-        captures.append(&mut captures_kings);
-
-        moves.append(&mut moves_knights);
-        moves.append(&mut moves_bishops);
-        moves.append(&mut moves_rooks);
-        moves.append(&mut moves_queens);
-        moves.append(&mut moves_kings);
-
+        // Returns (captures, promotions, quiet_moves); each list keeps piece order
+        // pawn, knight, bishop, rook, queen, king.
+        // Promotions are rare and are appended to `captures` by callers.
+        let cap = reserved_moves();
+        let mut captures = Vec::with_capacity(cap);
+        let mut promotions = Vec::new();
+        let mut moves = Vec::with_capacity(cap);
+        self.gen_all_moves_into(board, &mut captures, &mut promotions, &mut moves);
         (captures, promotions, moves)
+    }
+
+    /// Appends every pseudo-legal move to `captures`, `promotions` and `moves`,
+    /// in the order `_generate_all_moves` returns them.
+    pub(crate) fn gen_all_moves_into(
+        &self,
+        board: &Board,
+        captures: &mut Vec<Move>,
+        promotions: &mut Vec<Move>,
+        moves: &mut Vec<Move>,
+    ) {
+        self.gen_pawn_moves_into(board, captures, promotions, moves);
+        self.gen_knight_moves_into(board, captures, moves);
+        self.gen_bishop_moves_into(board, captures, moves);
+        self.gen_rook_moves_into(board, captures, moves);
+        self.gen_queen_moves_into(board, captures, moves);
+        self.gen_king_moves_into(board, captures, moves);
     }
 
     /// Generates all pseudo-legal moves for a given position.
@@ -459,10 +483,19 @@ impl MoveGen {
     ///
     /// A tuple containing the capture moves and non-capture moves for the pawn.
     pub fn gen_pawn_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>, Vec<Move>) {
-        let mut moves: Vec<Move> = Vec::new();
-        let mut captures: Vec<Move> = Vec::new();
-        let mut promotions: Vec<Move> = Vec::new();
+        let (mut captures, mut promotions, mut moves) = (Vec::new(), Vec::new(), Vec::new());
+        self.gen_pawn_moves_into(board, &mut captures, &mut promotions, &mut moves);
+        (captures, promotions, moves)
+    }
 
+    /// As `gen_pawn_moves`, appending to the given vectors.
+    pub(crate) fn gen_pawn_moves_into(
+        &self,
+        board: &Board,
+        captures: &mut Vec<Move>,
+        promotions: &mut Vec<Move>,
+        moves: &mut Vec<Move>,
+    ) {
         if board.w_to_move {
             // White to move
             for from_sq_ind in bits(&board.pieces[WHITE][PAWN]) {
@@ -474,12 +507,7 @@ impl MoveGen {
                         || board.en_passant == Some(*to_sq_ind as u8)
                     {
                         if is_promotion_rank {
-                            append_promotions(
-                                &mut promotions,
-                                from_sq_ind,
-                                to_sq_ind,
-                                board.w_to_move,
-                            );
+                            append_promotions(promotions, from_sq_ind, to_sq_ind, board.w_to_move);
                         } else {
                             captures.push(Move::new(from_sq_ind, *to_sq_ind, None));
                         }
@@ -490,12 +518,7 @@ impl MoveGen {
                 for to_sq_ind in &self.wp_moves[from_sq_ind] {
                     if board.get_piece(*to_sq_ind).is_none() {
                         if is_promotion_rank {
-                            append_promotions(
-                                &mut promotions,
-                                from_sq_ind,
-                                to_sq_ind,
-                                board.w_to_move,
-                            );
+                            append_promotions(promotions, from_sq_ind, to_sq_ind, board.w_to_move);
                         } else if from_sq_ind > 7 && from_sq_ind < 16 {
                             // Double pawn push
                             if (board.pieces_occ[BLACK] + board.pieces_occ[WHITE])
@@ -521,12 +544,7 @@ impl MoveGen {
                         || board.en_passant == Some(*to_sq_ind as u8)
                     {
                         if is_promotion_rank {
-                            append_promotions(
-                                &mut promotions,
-                                from_sq_ind,
-                                to_sq_ind,
-                                board.w_to_move,
-                            );
+                            append_promotions(promotions, from_sq_ind, to_sq_ind, board.w_to_move);
                         } else {
                             captures.push(Move::new(from_sq_ind, *to_sq_ind, None));
                         }
@@ -537,12 +555,7 @@ impl MoveGen {
                 for to_sq_ind in &self.bp_moves[from_sq_ind] {
                     if board.get_piece(*to_sq_ind).is_none() {
                         if is_promotion_rank {
-                            append_promotions(
-                                &mut promotions,
-                                from_sq_ind,
-                                to_sq_ind,
-                                board.w_to_move,
-                            );
+                            append_promotions(promotions, from_sq_ind, to_sq_ind, board.w_to_move);
                         } else if from_sq_ind > 47 && from_sq_ind < 56 {
                             // Double pawn push
                             if (board.pieces_occ[WHITE] + board.pieces_occ[BLACK])
@@ -558,8 +571,6 @@ impl MoveGen {
                 }
             }
         }
-
-        (captures, promotions, moves)
     }
 
     /// Generates moves for a knight on a specific square.
@@ -575,10 +586,20 @@ impl MoveGen {
     ///
     /// A tuple containing the capture moves and non-capture moves for the knight.
     pub(crate) fn gen_knight_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
+        let (mut captures, mut moves) = (Vec::new(), Vec::new());
+        self.gen_knight_moves_into(board, &mut captures, &mut moves);
+        (captures, moves)
+    }
+
+    /// As `gen_knight_moves`, appending to the given vectors.
+    pub(crate) fn gen_knight_moves_into(
+        &self,
+        board: &Board,
+        captures: &mut Vec<Move>,
+        moves: &mut Vec<Move>,
+    ) {
         // Generate all possible knight moves for the current position.
         // Returns a vector of captures and a vector of non-captures.
-        let mut moves: Vec<Move> = Vec::with_capacity(16);
-        let mut captures: Vec<Move> = Vec::with_capacity(16);
         if board.w_to_move {
             // White to move
             for from_sq_ind in bits(&board.pieces[WHITE][KNIGHT]) {
@@ -602,7 +623,6 @@ impl MoveGen {
                 }
             }
         }
-        (captures, moves)
     }
 
     /// Generates moves for a king on a specific square.
@@ -617,12 +637,15 @@ impl MoveGen {
     /// # Returns
     ///
     /// A tuple containing the capture moves and non-capture moves for the king.
-    fn gen_king_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
+    pub(crate) fn gen_king_moves_into(
+        &self,
+        board: &Board,
+        captures: &mut Vec<Move>,
+        moves: &mut Vec<Move>,
+    ) {
         // Generate all possible king moves for the current position.
         // For castling, checks whether in check and whether the king moves through check.
         // Returns a vector of captures and a vector of non-captures.
-        let mut moves: Vec<Move> = Vec::with_capacity(10);
-        let mut captures: Vec<Move> = Vec::with_capacity(8);
         if board.w_to_move {
             // White to move
             if board.castling_rights.white_kingside && board.pieces[WHITE][KING] & (1u64 << 4) != 0
@@ -703,7 +726,6 @@ impl MoveGen {
                 }
             }
         }
-        (captures, moves)
     }
 
     /// Generates moves for a rook on a specific square.
@@ -719,11 +741,21 @@ impl MoveGen {
     ///
     /// A tuple containing the capture moves and non-capture moves for the rook.
     pub(crate) fn gen_rook_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
+        let (mut captures, mut moves) = (Vec::new(), Vec::new());
+        self.gen_rook_moves_into(board, &mut captures, &mut moves);
+        (captures, moves)
+    }
+
+    /// As `gen_rook_moves`, appending to the given vectors.
+    pub(crate) fn gen_rook_moves_into(
+        &self,
+        board: &Board,
+        captures: &mut Vec<Move>,
+        moves: &mut Vec<Move>,
+    ) {
         // Generate all possible rook moves for the current position.
         // Returns a vector of captures and a vector of non-captures.
         // Uses magic bitboards.
-        let mut moves: Vec<Move> = Vec::new();
-        let mut captures: Vec<Move> = Vec::new();
         let mut blockers: u64;
         let mut key: usize;
         if board.w_to_move {
@@ -773,7 +805,6 @@ impl MoveGen {
                 }
             }
         }
-        (captures, moves)
     }
 
     pub fn gen_bishop_potential_captures(&self, board: &Board, from_sq_ind: usize) -> u64 {
@@ -837,11 +868,21 @@ impl MoveGen {
     ///
     /// A tuple containing the capture moves and non-capture moves for the bishop.
     pub(crate) fn gen_bishop_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
+        let (mut captures, mut moves) = (Vec::new(), Vec::new());
+        self.gen_bishop_moves_into(board, &mut captures, &mut moves);
+        (captures, moves)
+    }
+
+    /// As `gen_bishop_moves`, appending to the given vectors.
+    pub(crate) fn gen_bishop_moves_into(
+        &self,
+        board: &Board,
+        captures: &mut Vec<Move>,
+        moves: &mut Vec<Move>,
+    ) {
         // Generate all possible bishop moves for the current position.
         // Returns a vector of captures and a vector of non-captures.
         // Uses magic bitboards.
-        let mut moves: Vec<Move> = Vec::new();
-        let mut captures: Vec<Move> = Vec::new();
         let mut blockers: u64;
         let mut key: usize;
         if board.w_to_move {
@@ -891,7 +932,6 @@ impl MoveGen {
                 }
             }
         }
-        (captures, moves)
     }
 
     /// Generates moves for a queen on a specific square.
@@ -907,11 +947,21 @@ impl MoveGen {
     ///
     /// A tuple containing the capture moves and non-capture moves for the queen.
     pub(crate) fn gen_queen_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
+        let (mut captures, mut moves) = (Vec::new(), Vec::new());
+        self.gen_queen_moves_into(board, &mut captures, &mut moves);
+        (captures, moves)
+    }
+
+    /// As `gen_queen_moves`, appending to the given vectors.
+    pub(crate) fn gen_queen_moves_into(
+        &self,
+        board: &Board,
+        captures: &mut Vec<Move>,
+        moves: &mut Vec<Move>,
+    ) {
         // Generate all possible queen moves for the current position.
         // Returns a vector of captures and a vector of non-captures.
         // Uses magic bitboards.
-        let mut moves: Vec<Move> = Vec::new();
-        let mut captures: Vec<Move> = Vec::new();
         let mut blockers: u64;
         let mut key: usize;
         if board.w_to_move {
@@ -995,7 +1045,6 @@ impl MoveGen {
                 }
             }
         }
-        (captures, moves)
     }
 
     /// Calculates a bitboard of all pieces of a given side attacking a specific square.

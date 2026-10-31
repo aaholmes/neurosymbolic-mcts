@@ -387,14 +387,31 @@ impl Board {
     /// - The first boolean is true if the position is checkmate, false otherwise.
     /// - The second boolean is true if the position is stalemate, false otherwise.
     pub fn is_checkmate_or_stalemate(&self, move_gen: &MoveGen) -> (bool, bool) {
-        // Generate all pseudo-legal moves
-        let (captures, moves) = move_gen.gen_pseudo_legal_moves(self);
-
-        // Check if any move is legal using lightweight legality check
-        for mv in captures.iter().chain(moves.iter()) {
-            if self.is_legal_after_move(*mv, move_gen) {
-                return (false, false);
-            }
+        // Called once per new search node: generate into reused per-thread
+        // buffers rather than allocating fresh move lists.
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<[Vec<Move>; 3]> =
+                const { std::cell::RefCell::new([Vec::new(), Vec::new(), Vec::new()]) };
+        }
+        let any_legal = SCRATCH.with(|cell| {
+            let mut fresh: [Vec<Move>; 3] = Default::default();
+            let mut guard = cell.try_borrow_mut();
+            let [captures, promotions, moves] = match guard.as_deref_mut() {
+                Ok(buffers) => buffers,
+                Err(_) => &mut fresh,
+            };
+            captures.clear();
+            promotions.clear();
+            moves.clear();
+            move_gen.gen_all_moves_into(self, captures, promotions, moves);
+            captures
+                .iter()
+                .chain(promotions.iter())
+                .chain(moves.iter())
+                .any(|mv| self.is_legal_after_move(*mv, move_gen))
+        });
+        if any_legal {
+            return (false, false);
         }
 
         // If we get here, there are no legal moves.

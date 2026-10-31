@@ -1031,11 +1031,14 @@ fn evaluate_and_expand_node(
 /// generator order (the order children are created in).
 fn legal_moves(board: &Board, move_gen: &MoveGen) -> Vec<Move> {
     let (captures, non_captures) = move_gen.gen_pseudo_legal_moves(board);
-    captures
-        .into_iter()
-        .chain(non_captures)
-        .filter(|mv| board.apply_move_to_board(*mv).is_legal(move_gen))
-        .collect()
+    let mut legal = Vec::with_capacity(captures.len() + non_captures.len());
+    legal.extend(
+        captures
+            .into_iter()
+            .chain(non_captures)
+            .filter(|mv| board.apply_move_to_board(*mv).is_legal(move_gen)),
+    );
+    legal
 }
 
 pub fn select_best_move_from_root(root: Rc<RefCell<MctsNode>>, move_gen: &MoveGen) -> Option<Move> {
