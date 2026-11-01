@@ -4,7 +4,7 @@
 
 use crate::agent::{Agent, HumanlikeAgent, SimpleAgent}; // Import agents and trait
 use crate::boardstack::BoardStack;
-use crate::egtb::EgtbProber; // Import EGTB Prober
+use crate::egtb::Tablebase;
 use crate::eval::PestoEval;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
@@ -23,7 +23,7 @@ lazy_static! {
 
 pub struct UCIEngine {
     board: BoardStack,
-    egtb_prober: Option<EgtbProber>,
+    egtb_prober: Option<Tablebase>,
     time_left: Duration,
     increment: Duration,
     moves_to_go: Option<u32>,
@@ -52,7 +52,7 @@ impl UCIEngine {
     pub fn new() -> Self {
         // EGTB prober disabled by default - requires path configuration
         // TODO: Add UCI option for EGTB path
-        let egtb_prober: Option<EgtbProber> = None;
+        let egtb_prober: Option<Tablebase> = None;
 
         let agent_type = "Humanlike".to_string(); // Default agent type
 

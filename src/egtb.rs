@@ -1,184 +1,92 @@
-//! Endgame Tablebase (EGTB) integration using Syzygy tablebases.
+//! Syzygy endgame tables: the exact result (win, draw or loss with perfect play)
+//! of every position with few enough pieces, read from `.rtbw` files.
 //!
-//! Provides access to pre-computed endgame solutions for positions with 6 or fewer
-//! pieces. When available, tablebase probes give perfect play information:
-//!
-//! - **WDL (Win/Draw/Loss)**: The theoretical outcome with perfect play
-//! - **DTZ (Distance to Zeroing)**: Moves until pawn push or capture (for 50-move rule)
-//!
-//! # Status
-//!
-//! Currently **disabled** to focus on MCTS development. The conversion functions
-//! and probe logic are implemented but return stub values. Enable by uncommenting
-//! the tablebase loading and probe calls.
-//!
-//! # Usage
-//!
-//! ```ignore
-//! let prober = EgtbProber::new("/path/to/syzygy")?;
-//! if let Ok(Some((wdl, dtz))) = prober.probe(&board) {
-//!     // Use WDL for move selection, DTZ for optimal winning
-//! }
-//! ```
+//! Only the win/draw/loss (WDL) tables are used. Search treats a covered
+//! position as solved, and self-play ends a game when it reaches one, so the
+//! distance-to-zeroing tables needed to play such endings out are not loaded.
 
 use crate::board::Board;
-use crate::move_types::Move;
-// Needed for piece count calculation
+use shakmaty::fen::Fen;
+use shakmaty::{CastlingMode, Chess, Position};
+use shakmaty_syzygy::Wdl;
+use std::sync::Arc;
 
-// Use the Syzygy library
-use shakmaty::Board as ShakmatyBoard;
-use shakmaty_syzygy::{Dtz, Wdl};
-
-// Define the error type for EGTB operations
-#[derive(Debug, Clone)]
-pub enum EgtbError {
-    LoadError(String),       // Error loading tablebases
-    ProbeError(String),      // Error during probing
-    ConversionError(String), // Error converting board representation
-}
-
-impl std::fmt::Display for EgtbError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EgtbError::LoadError(s) => write!(f, "EGTB Load Error: {}", s),
-            EgtbError::ProbeError(s) => write!(f, "EGTB Probe Error: {}", s),
-            EgtbError::ConversionError(s) => write!(f, "Board Conversion Error: {}", s),
-        }
-    }
-}
-
-impl std::error::Error for EgtbError {}
-
-/// Information obtained from probing the endgame tablebases.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EgtbInfo {
-    /// Win/Draw/Loss status from the perspective of the side to move.
-    pub wdl: Wdl,
-    /// Distance to Zeroing move (often related to Distance to Mate).
-    pub dtz: Option<Dtz>,
-    /// The best move according to the tablebase, if available. (Currently always None)
-    pub best_move: Option<Move>, // Use crate::move_types::Move
-}
-
-/// Structure to handle Syzygy endgame tablebase probing.
+/// A directory of Syzygy WDL tables, shared between threads.
 #[derive(Clone)]
-pub struct EgtbProber {
-    // tablebases: Tablebase<ShakmatyBoard>, // Temporarily commented out to fix compilation
-    pub max_pieces: u8, // Store the max pieces supported by loaded tables
+pub struct Tablebase {
+    tables: Arc<shakmaty_syzygy::Tablebase<Chess>>,
+    max_pieces: u32,
 }
 
-impl EgtbProber {
-    /// Creates a new EgtbProber by loading tablebases from the specified path.
-    pub fn new(path_str: &str) -> Result<Self, EgtbError> {
-        // Check if path exists and is valid for testing
-        if !std::path::Path::new(path_str).exists() {
-            return Err(EgtbError::LoadError(format!(
-                "Path does not exist: {}",
-                path_str
-            )));
-        }
-
-        // Temporarily simplified implementation to focus on MCTS
-        let max_pieces = 7;
-        Ok(EgtbProber { max_pieces })
-    }
-
-    /// Probes the endgame tablebases for the given board position.
-    pub fn probe(&self, _board: &Board) -> Result<Option<EgtbInfo>, EgtbError> {
-        // Temporarily disabled to focus on MCTS functionality
-        // TODO: Implement proper EGTB integration after MCTS is working
-        Ok(None)
-    }
-
-    /// Helper function to convert `crate::board::Board` to `shakmaty::Board`.
-    #[allow(dead_code)]
-    fn convert_board(&self, _board: &Board) -> Result<ShakmatyBoard, EgtbError> {
-        // Temporarily disabled to focus on MCTS functionality
-        // TODO: Implement proper board conversion after MCTS is working
-        Err(EgtbError::ConversionError(
-            "EGTB temporarily disabled".to_string(),
-        ))
+impl std::fmt::Debug for Tablebase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Tablebase(up to {} pieces)", self.max_pieces)
     }
 }
 
-// Optional: Basic unit tests (updated for internal Board)
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::board::Board; // Use internal Board
-    use shakmaty::Chess; // Use shakmaty's Chess board for creating positions
-
-    // Mock structure specifically for testing the piece count check logic
-    // within the probe function, without needing actual tablebases.
-    struct PieceCountCheckProber {
-        max_pieces: u8,
+impl Tablebase {
+    /// Loads the tables in `dir`. An error if it holds no WDL table.
+    pub fn open(dir: &str) -> Result<Self, String> {
+        let mut tables = shakmaty_syzygy::Tablebase::new();
+        tables
+            .add_directory(dir)
+            .map_err(|e| format!("cannot read Syzygy tables in {dir}: {e}"))?;
+        // A table's name lists its pieces, e.g. KRvK.rtbw has three.
+        let max_pieces = std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot read {dir}: {e}"))?
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|n| {
+                n.strip_suffix(".rtbw")
+                    .map(|s| s.replace('v', "").len() as u32)
+            })
+            .max()
+            .ok_or_else(|| format!("no Syzygy WDL tables (.rtbw) in {dir}"))?;
+        Ok(Self {
+            tables: Arc::new(tables),
+            max_pieces,
+        })
     }
 
-    impl PieceCountCheckProber {
-        fn new(max_pieces: u8) -> Self {
-            PieceCountCheckProber { max_pieces }
+    /// The most pieces (kings included) of any loaded table.
+    pub fn max_pieces(&self) -> u32 {
+        self.max_pieces
+    }
+
+    /// The exact value of `board` for the side to move (+1 win, 0 draw, −1
+    /// loss), or None if the tables do not cover it: too many pieces, or
+    /// castling rights left.
+    pub fn probe_value(&self, board: &Board) -> Option<f32> {
+        let c = &board.castling_rights;
+        let can_castle =
+            c.white_kingside || c.white_queenside || c.black_kingside || c.black_queenside;
+        if board.get_all_occupancy().count_ones() > self.max_pieces || can_castle {
+            return None;
         }
-
-        // Mimics the initial piece count check of the real EgtbProber::probe
-        fn probe(&self, board: &Board) -> Result<Option<()>, EgtbError> {
-            let piece_count = board.get_all_occupancy().count_ones() as u8;
-            if piece_count > self.max_pieces {
-                Ok(None) // Too many pieces, real probe would return here
-            } else {
-                // In a real probe, conversion and actual probing would happen here.
-                // For this mock, we just indicate the piece count was acceptable.
-                Ok(Some(()))
-            }
+        let fen: Fen = board.to_fen()?.parse().ok()?;
+        let pos: Chess = fen
+            .position(CastlingMode::Standard)
+            .or_else(|e| e.ignore_invalid_ep_square().map_err(drop))
+            .ok()?;
+        if pos.is_insufficient_material() {
+            return Some(0.0);
         }
+        self.tables.probe_wdl(&pos).ok().map(wdl_to_value)
     }
 
-    #[test]
-    fn test_new_invalid_path() {
-        // Use a path that is highly unlikely to exist or be valid EGTB dir
-        let result = EgtbProber::new("/tmp/non_existent_egtb_path_for_testing");
-        assert!(result.is_err());
-        match result.err().unwrap() {
-            EgtbError::LoadError(_) => {} // Expected error type
-            _ => panic!("Expected LoadError for invalid path"),
-        }
+    /// The result of the game from White's side (+1 White wins, 0 draw, −1
+    /// Black wins) if the tables cover `board`.
+    pub fn adjudicate(&self, board: &Board) -> Option<f32> {
+        let v = self.probe_value(board)?;
+        Some(if board.w_to_move { v } else { -v })
     }
+}
 
-    #[test]
-    fn test_probe_piece_count_within_limit() {
-        // Use the mock that only checks piece count
-        let prober = PieceCountCheckProber::new(7);
-
-        // 7 pieces - should pass piece count check (returns Some in mock)
-        let board = Board::new_from_fen("8/8/8/8/k7/p7/P7/K7 w - - 0 1");
-        assert!(prober.probe(&board).unwrap().is_some());
-
-        // 3 pieces - should pass piece count check
-        let board = Board::new_from_fen("8/8/8/8/8/8/k7/K1N5 w - - 0 1");
-        assert!(prober.probe(&board).unwrap().is_some());
+/// +1 for a win, −1 for a loss, and 0 for a draw, including wins and losses
+/// that the fifty-move rule turns into draws, since self-play applies the rule.
+pub fn wdl_to_value(wdl: Wdl) -> f32 {
+    match wdl {
+        Wdl::Win => 1.0,
+        Wdl::Loss => -1.0,
+        Wdl::CursedWin | Wdl::Draw | Wdl::BlessedLoss => 0.0,
     }
-
-    #[test]
-    fn test_probe_piece_count_exceeds_limit() {
-        // Use the mock that only checks piece count
-        let prober = PieceCountCheckProber::new(7);
-
-        // Starting pos (32 pieces) - should fail piece count check (returns None)
-        let board = Board::new_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        assert!(prober.probe(&board).unwrap().is_none());
-
-        // 8 pieces exactly - should fail piece count check
-        let board = Board::new_from_fen("8/8/8/8/k7/p1p5/P1P5/KBN5 w - - 0 1");
-        assert!(prober.probe(&board).unwrap().is_none());
-    }
-
-    // Note: Testing actual probing still requires real EGTB files.
-    // #[test]
-    // #[ignore]
-    // fn test_real_probe_known_position() {
-    //     let prober = EgtbProber::new("../egtb_files").expect("Failed to load test EGTBs");
-    //     let board = Board::new_from_fen("8/8/8/8/8/k7/P7/K7 w - - 0 1"); // K vs K+P endgame
-    //     let result = prober.probe(&board).unwrap();
-    //     assert!(result.is_some());
-    //     // Add assertions based on expected WDL/DTZ
-    // }
 }

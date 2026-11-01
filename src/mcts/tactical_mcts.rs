@@ -155,6 +155,14 @@ pub struct TacticalMctsConfig {
     /// sent together, so one game keeps several positions waiting. 1 = one
     /// leaf at a time (standard MCTS).
     pub leaves_per_iteration: u32,
+    /// With tier 1 off, give a leaf whose side to move can mate in one the exact
+    /// value +1 instead of a network evaluation. (Tier 1's mate search already
+    /// covers this.)
+    pub leaf_mate_in_1: bool,
+    /// Syzygy tables: a leaf they cover gets its exact value instead of a
+    /// network evaluation. Not used in King of the Hill, where the tables'
+    /// results do not hold.
+    pub tablebase: Option<crate::egtb::Tablebase>,
 }
 
 impl Default for TacticalMctsConfig {
@@ -180,6 +188,8 @@ impl Default for TacticalMctsConfig {
             randomize_move_order: false,
             pesto: PestoEval::new(),
             leaves_per_iteration: 1,
+            leaf_mate_in_1: false,
+            tablebase: None,
         }
     }
 }
@@ -296,6 +306,8 @@ pub struct TacticalMctsStats {
     pub nn_saved_by_tier1: u32,
     /// Positions where Tier 1 found forced win/loss
     pub tier1_solutions: u32,
+    /// Leaves given an exact value by `leaf_mate_in_1` or the tablebase
+    pub exact_leaf_values: u32,
 
     // Per-operation timing
     pub koth_timing: TimingAccumulator,
@@ -825,9 +837,37 @@ fn begin_leaf_evaluation(
         }
     }
 
-    if config.enable_tier1_gate && config.mate_search_depth > 0 {
+    // The root is always searched: marking it solved would leave no move.
+    let is_root = node_ref.parent.is_none();
+
+    if let Some(tb) = config
+        .tablebase
+        .as_ref()
+        .filter(|_| !config.enable_koth && !is_root)
+    {
+        if let Some(v) = tb.probe_value(board) {
+            let v = v as f64;
+            node_ref.terminal_or_mate_value = Some(v);
+            node_ref.origin = NodeOrigin::Gate;
+            stats.exact_leaf_values += 1;
+            return LeafEval::Done(v);
+        }
+    }
+
+    // Tier 1 searches for mates to its full depth; without it, only mate in
+    // one is looked for, if asked.
+    let leaf_mate_in_1 = !config.enable_tier1_gate && config.leaf_mate_in_1 && !is_root;
+    let mate_search_depth = if config.enable_tier1_gate {
+        config.mate_search_depth
+    } else if leaf_mate_in_1 {
+        1
+    } else {
+        0
+    };
+
+    if mate_search_depth > 0 {
         if let Some((mate_depth, _mate_move)) =
-            transposition_table.probe_mate(board, config.mate_search_depth)
+            transposition_table.probe_mate(board, mate_search_depth)
         {
             stats.tt_mate_hits += 1;
             if mate_depth != 0 {
@@ -850,6 +890,9 @@ fn begin_leaf_evaluation(
                     node_ref.terminal_distance = Some(mate_depth.unsigned_abs() as u8);
                     node_ref.origin = NodeOrigin::Gate;
                     stats.nn_saved_by_tier1 += 1;
+                    if leaf_mate_in_1 {
+                        stats.exact_leaf_values += 1;
+                    }
                     return LeafEval::Done(mate_value);
                 }
             }
@@ -859,7 +902,7 @@ fn begin_leaf_evaluation(
             let mate_result = mate_search(
                 board,
                 move_gen,
-                config.mate_search_depth,
+                mate_search_depth,
                 false,
                 config.exhaustive_mate_depth,
             );
@@ -869,7 +912,7 @@ fn begin_leaf_evaluation(
                 board,
                 mate_result.0.abs(),
                 mate_result.1,
-                config.mate_search_depth,
+                mate_search_depth,
             );
 
             if mate_result.0 != 0 {
@@ -880,7 +923,11 @@ fn begin_leaf_evaluation(
                 node_ref.terminal_or_mate_value = Some(mate_value);
                 node_ref.terminal_distance = Some(mate_result.0.unsigned_abs() as u8);
                 stats.nn_saved_by_tier1 += 1;
-                stats.tier1_solutions += 1;
+                if leaf_mate_in_1 {
+                    stats.exact_leaf_values += 1;
+                } else {
+                    stats.tier1_solutions += 1;
+                }
                 return LeafEval::Done(mate_value);
             }
         }

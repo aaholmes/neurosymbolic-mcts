@@ -65,12 +65,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
 
 [[package]]
-name = "arrayvec"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
-
-[[package]]
 name = "ascii"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,7 +201,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "serde",
  "serde_json",
- "shakmaty 0.25.0",
+ "shakmaty",
  "shakmaty-syzygy",
  "tempfile",
  "tiny_http",
@@ -1974,19 +1968,8 @@ version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f580db5b2b7aa5903b997ef6309c461dd30015f0b61e748a8082f84f245889a7"
 dependencies = [
- "arrayvec 0.5.2",
+ "arrayvec",
  "bitflags 1.3.2",
- "btoi",
-]
-
-[[package]]
-name = "shakmaty"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3423f7235d679251bb3a4014ab286d3a724efa130a3ac00d4e85916231f5ed30"
-dependencies = [
- "arrayvec 0.7.6",
- "bitflags 2.13.2",
  "btoi",
 ]
 
@@ -1996,7 +1979,7 @@ version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20c23f78c84f33214e31abd5dcff00e01465a6fc9d91da1e4f9f4951f5f63f27"
 dependencies = [
- "arrayvec 0.5.2",
+ "arrayvec",
  "bitflags 1.3.2",
  "byteorder",
  "itertools 0.10.5",
@@ -2005,7 +1988,7 @@ dependencies = [
  "once_cell",
  "positioned-io-preview",
  "rustc-hash 1.1.0",
- "shakmaty 0.18.0",
+ "shakmaty",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 //! This module specifies various agents, which can use any combination of search and eval routines.
 
 use crate::boardstack::BoardStack;
-use crate::egtb::EgtbProber;
+use crate::egtb::Tablebase;
 use crate::eval::PestoEval;
 use crate::mcts::node::MctsNode;
 use crate::mcts::tactical_mcts::{tactical_mcts_search, TacticalMctsConfig};
@@ -67,7 +67,7 @@ impl SimpleAgent<'_> {
 /// An agent designed to mimic human-like decision making, using EGTB, Mate Search, and MCTS.
 pub struct HumanlikeAgent<'a> {
     pub move_gen: &'a MoveGen,
-    pub egtb_prober: Option<EgtbProber>,
+    pub egtb_prober: Option<Tablebase>,
     pub mate_search_depth: i32,
     pub mcts_iterations: u32,
     pub mcts_time_limit_ms: u64,
@@ -78,7 +78,7 @@ pub struct HumanlikeAgent<'a> {
 impl HumanlikeAgent<'_> {
     pub fn new<'a>(
         move_gen: &'a MoveGen,
-        egtb_prober: Option<EgtbProber>,
+        egtb_prober: Option<Tablebase>,
         mate_search_depth: i32,
         mcts_iterations: u32,
         mcts_time_limit_ms: u64,
