@@ -15,7 +15,7 @@ pub const NHWC_CHANNELS: usize = 24;
 /// squares of `NHWC_CHANNELS` channels.
 pub fn planes_to_nhwc(planes: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0f32; 64 * NHWC_CHANNELS];
-    for (plane, squares) in planes.chunks_exact(64).enumerate() {
+    for (plane, squares) in planes.as_chunks::<64>().0.iter().enumerate() {
         for (sq, &v) in squares.iter().enumerate() {
             out[sq * NHWC_CHANNELS + plane] = v;
         }
