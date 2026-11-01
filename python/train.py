@@ -11,7 +11,7 @@ import struct
 import glob
 import sys
 from model import SeresNet, TransformerNet
-from augmentation import augment_sample, augment_all_transforms
+from augmentation import random_transform
 
 # Configuration
 INPUT_CHANNELS = 17
@@ -76,11 +76,10 @@ class ChessDataset(Dataset):
         policy_start = value_idx + 1
         policy_np = flat_data[policy_start:]
 
-        # 6. Augmentation (randomly pick one transform, weight 1.0)
+        # 6. Augmentation: one random symmetric image
         if self.augment:
-            transforms = augment_all_transforms(board_np, material, value, policy_np)
-            idx = self._rng.integers(len(transforms))
-            board_np, material, value, policy_np = transforms[idx]
+            board_np, material, value, policy_np = random_transform(
+                board_np, material, value, policy_np, self._rng)
 
         board_tensor = torch.from_numpy(np.ascontiguousarray(board_np))
         scalars = torch.tensor([material, qsearch_flag])  # [2]
@@ -112,23 +111,12 @@ class BufferDataset(Dataset):
     def _refresh_chunk(self):
         boards, scalars, values, policies = self.buffer.sample_batch(self.chunk_size)
         if self.augment:
-            aug_boards, aug_scalars, aug_vals, aug_pols = [], [], [], []
+            # One random image per sampled position, so symmetric positions
+            # are not counted once per image.
             for i in range(len(boards)):
-                for b, m, v, p in augment_all_transforms(
-                    boards[i], scalars[i, 0], values[i], policies[i]
-                ):
-                    aug_boards.append(b)
-                    aug_scalars.append([m, scalars[i, 1]])  # preserve qsearch_flag
-                    aug_vals.append(v)
-                    aug_pols.append(p)
-            self._chunk = (
-                np.array(aug_boards),
-                np.array(aug_scalars),
-                np.array(aug_vals),
-                np.array(aug_pols),
-            )
-        else:
-            self._chunk = (boards, scalars, values, policies)
+                boards[i], _, _, policies[i] = random_transform(
+                    boards[i], scalars[i, 0], values[i], policies[i], self._rng)
+        self._chunk = (boards, scalars, values, policies)
         self._chunk_len = len(self._chunk[0])
         self._chunk_idx = 0
 
@@ -195,9 +183,8 @@ class EpochDataset(Dataset):
         policy_np = raw[self._board_end + 3:]
 
         if self.augment:
-            transforms = augment_all_transforms(board_np, material, value, policy_np)
-            t_idx = self._rng.integers(len(transforms))
-            board_np, material, value, policy_np = transforms[t_idx]
+            board_np, material, value, policy_np = random_transform(
+                board_np, material, value, policy_np, self._rng)
 
         board_tensor = torch.from_numpy(np.ascontiguousarray(board_np))
         scalars = torch.tensor([material, qsearch_flag])  # [2]

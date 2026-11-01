@@ -201,8 +201,8 @@ def apply_transform(board, policy, sq_perm, pol_perm):
 def augment_sample(board, material, value, policy, rng=None):
     """Augment a training sample using its symmetry group.
 
-    DEPRECATED: Use augment_all_transforms() instead. This function randomly
-    picks one transform and underweights symmetric positions.
+    DEPRECATED: use random_transform(). This returns a weight of 1/|group|,
+    which underweights symmetric positions if applied to the loss.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -233,7 +233,8 @@ def augment_all_transforms(board, material, value, policy):
     For positions without castling (hflip): returns [original, hflip] (2 samples).
     For positions without castling/pawns/EP (D4): returns all 8 dihedral transforms.
 
-    Each returned sample has equal weight (no weighting needed).
+    Training on every image counts a position once per image (8 times for a
+    pawnless ending), so training draws one image with random_transform().
 
     Returns:
         List of (board, material, value, policy) tuples.
@@ -255,3 +256,28 @@ def augment_all_transforms(board, material, value, policy):
             new_board, new_policy = apply_transform(board, policy, sq_perm, pol_perm)
             results.append((new_board, material, value, new_policy))
     return results
+
+
+def symmetry_group(board):
+    """The transforms that map this position to an equivalent one."""
+    sym = classify_symmetry(board)
+    if sym == "d4":
+        return D4_GROUP
+    if sym == "hflip":
+        return HFLIP_GROUP
+    return D4_GROUP[:1]
+
+
+def random_transform(board, material, value, policy, rng):
+    """One image of a training sample, drawn uniformly from its symmetry group.
+
+    Every position counts once in expectation whatever its symmetry, and
+    repeated draws of one position see different images.
+    """
+    group = symmetry_group(board)
+    i = int(rng.integers(len(group)))
+    if i == 0:
+        return board, material, value, policy
+    sq_perm, pol_perm = group[i]
+    new_board, new_policy = apply_transform(board, policy, sq_perm, pol_perm)
+    return new_board, material, value, new_policy

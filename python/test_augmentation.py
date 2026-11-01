@@ -336,3 +336,55 @@ class TestAugmentAllTransforms:
         original_sum = policy.sum()
         for _, _, _, p in results:
             np.testing.assert_almost_equal(p.sum(), original_sum)
+
+
+class TestRandomTransform:
+    """random_transform returns one equivalent sample, uniform over the group,
+    so every position counts once in expectation whatever its symmetry."""
+
+    def _lone_king(self):
+        board = np.zeros((17, 8, 8), dtype=np.float32)
+        board[5, 0, 1] = 1.0  # STM king on b1: its 8 images are distinct squares
+        return board
+
+    def test_returns_one_sample(self):
+        from augmentation import random_transform
+        policy = np.zeros(4672, dtype=np.float32)
+        out = random_transform(self._lone_king(), 1.5, -0.25, policy, np.random.default_rng(0))
+        assert len(out) == 4
+        assert out[0].shape == (17, 8, 8)
+        assert out[1] == 1.5 and out[2] == -0.25
+
+    def test_covers_the_whole_d4_group_uniformly(self):
+        from augmentation import random_transform
+        rng = np.random.default_rng(0)
+        policy = np.zeros(4672, dtype=np.float32)
+        counts = {}
+        n = 4000
+        for _ in range(n):
+            b, _, _, _ = random_transform(self._lone_king(), 0.0, 0.0, policy, rng)
+            sq = int(np.flatnonzero(b[5].ravel())[0])
+            counts[sq] = counts.get(sq, 0) + 1
+        assert len(counts) == 8
+        # Each image should get n/8 = 500; 5 sd of a binomial is about 105.
+        assert all(abs(c - n / 8) < 105 for c in counts.values()), counts
+
+    def test_hflip_positions_get_both_images(self):
+        from augmentation import random_transform
+        board = np.zeros((17, 8, 8), dtype=np.float32)
+        board[0, 1, 0] = 1.0  # pawn on a2
+        rng = np.random.default_rng(0)
+        policy = np.zeros(4672, dtype=np.float32)
+        files = {int(np.flatnonzero(random_transform(board, 0.0, 0.0, policy, rng)[0][0].ravel())[0])
+                 for _ in range(200)}
+        assert files == {8, 15}
+
+    def test_castling_positions_are_unchanged(self):
+        from augmentation import random_transform
+        board = np.zeros((17, 8, 8), dtype=np.float32)
+        board[13] = 1.0
+        board[5, 0, 4] = 1.0
+        policy = np.random.default_rng(1).random(4672).astype(np.float32)
+        b, _, _, p = random_transform(board, 0.0, 0.0, policy, np.random.default_rng(0))
+        np.testing.assert_array_equal(b, board)
+        np.testing.assert_array_equal(p, policy)

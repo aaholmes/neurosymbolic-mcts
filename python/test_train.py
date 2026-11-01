@@ -726,6 +726,39 @@ class TestBufferDatasetChunking:
             shutil.rmtree(buffer_dir, ignore_errors=True)
 
 
+class TestBufferDatasetAugmentation:
+    """With augmentation, each sampled position yields one sample, so positions
+    with more symmetries are not counted more often."""
+
+    def _lone_king_buffer(self, n):
+        buffer_dir = tempfile.mkdtemp(prefix="bufaug_")
+        source_dir = tempfile.mkdtemp(prefix="src_")
+        data = np.zeros((n, SAMPLE_SIZE_FLOATS), dtype=np.float32)
+        data[:, 5 * 64 + 1] = 1.0  # STM king on b1; no pawns or castling: 8 images
+        data.tofile(os.path.join(source_dir, "game.bin"))
+        buf = ReplayBuffer(capacity_positions=100000, buffer_dir=buffer_dir)
+        buf.add_games(source_dir)
+        shutil.rmtree(source_dir, ignore_errors=True)
+        return buffer_dir
+
+    def test_one_sample_per_sampled_position(self):
+        buffer_dir = self._lone_king_buffer(20)
+        try:
+            dataset = train_module.BufferDataset(buffer_dir, chunk_size=10, augment=True)
+            assert dataset._chunk_len == 10
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+    def test_samples_are_random_images(self):
+        buffer_dir = self._lone_king_buffer(20)
+        try:
+            dataset = train_module.BufferDataset(buffer_dir, chunk_size=64, augment=True)
+            squares = {int(np.flatnonzero(dataset[i][0][5].numpy().ravel())[0]) for i in range(64)}
+            assert len(squares) > 4
+        finally:
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+
 class TestEpochDataset:
     def test_epoch_dataset_loads_all_positions_same_elo(self, tmp_dirs):
         """EpochDataset with same-Elo data should include all positions."""
