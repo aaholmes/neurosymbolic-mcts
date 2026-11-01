@@ -24,6 +24,7 @@ mod incremental_hash_tests;
 mod inference_server_tests;
 mod iterative_deepening_tests;
 mod koth_tests;
+mod leaf_log_tests;
 mod leaf_parallel_tests;
 mod legality_check_tests;
 mod magic_bitboard_tests;

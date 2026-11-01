@@ -45,6 +45,7 @@ pub mod alpha_beta;
 pub mod history;
 pub mod iterative_deepening;
 mod koth;
+pub mod leaf_log;
 pub mod mate_order;
 pub mod mate_search;
 pub mod quiescence;

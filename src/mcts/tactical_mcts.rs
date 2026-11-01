@@ -902,6 +902,7 @@ fn begin_leaf_evaluation(
             // Only whether a mate exists matters here, not its move or length.
             stats.tt_mate_misses += 1;
             let mate_start = Instant::now();
+            crate::search::leaf_log::record_leaf(board);
             let (found, nodes) = config.leaf_mate.search(board, move_gen);
             stats.mate_search_timing.record(mate_start.elapsed());
             stats.mate_search_nodes.record(nodes as f64);
