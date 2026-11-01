@@ -24,6 +24,9 @@
 //!   piece attacks from its new square; ties closest first.
 //! - A10: A9 for lists of checking moves, except at the attacker's last move
 //!   (where order helps only if that move mates); other lists as generated.
+//! - A11: as A10, but only queen moves are sorted, and put first; the rest
+//!   keep their generated order.
+//! - A12: as A11 for queen and rook moves.
 //!
 //! Defender orders (a block is any other move out of check; when not in check
 //! it is any quiet move):
@@ -35,9 +38,19 @@
 //! - D5: captures by the most valuable piece first, blocks, king moves.
 //! - D6: captures, blocks by the least valuable piece first, king moves
 //!   closest to the checking piece first.
+//!
+//! Generation orders, which cost nothing because the generators emit moves
+//! in them (named after the A and D orders, as in "A10,D0,G4,V1"):
+//! - G0–G5, checking moves: G0 knights, bishops, rooks, queens (as
+//!   generated); G1 queens, rooks, bishops, knights; G4 queens, knights,
+//!   bishops, rooks; G2, G3 and G5 are G0, G1 and G4 with capturing checks
+//!   first. The king's uncovered checks, then pawns, follow each list.
+//! - V0–V2, moves out of check: V0 captures of the checker by pawns first
+//!   (as generated), then blocks by pawns first; V1 captures by queens
+//!   first; V2 captures and blocks by queens first.
 
 use crate::board::Board;
-use crate::move_generation::MoveGen;
+use crate::move_generation::{CheckGenOrder, EvasionGenOrder, MoveGen};
 use crate::move_types::Move;
 use crate::piece_types::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
 
@@ -48,7 +61,7 @@ pub struct AttackerOrder(u8);
 pub struct DefenderOrder(u8);
 
 impl AttackerOrder {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self(0),
         Self(1),
         Self(2),
@@ -60,12 +73,14 @@ impl AttackerOrder {
         Self(8),
         Self(9),
         Self(10),
+        Self(11),
+        Self(12),
     ];
 
     /// True if the order applies only to lists of checking moves, and not at
     /// the attacker's last move.
     pub fn checking_moves_only(self) -> bool {
-        self.0 == 10
+        self.0 >= 10
     }
 }
 
@@ -82,9 +97,57 @@ impl DefenderOrder {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckOrder(u8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvasionOrder(u8);
+
+impl CheckOrder {
+    pub const ALL: [Self; 6] = [Self(0), Self(1), Self(2), Self(3), Self(4), Self(5)];
+
+    pub fn generation(self) -> CheckGenOrder {
+        let pieces = match self.0 {
+            0 | 2 => [KNIGHT, BISHOP, ROOK, QUEEN, KING, PAWN],
+            1 | 3 => [QUEEN, ROOK, BISHOP, KNIGHT, KING, PAWN],
+            _ => [QUEEN, KNIGHT, BISHOP, ROOK, KING, PAWN],
+        };
+        CheckGenOrder {
+            pieces,
+            captures_first: matches!(self.0, 2 | 3 | 5),
+        }
+    }
+}
+
+impl EvasionOrder {
+    pub const ALL: [Self; 3] = [Self(0), Self(1), Self(2)];
+
+    pub fn generation(self) -> EvasionGenOrder {
+        const PAWNS: [usize; 5] = [PAWN, KNIGHT, BISHOP, ROOK, QUEEN];
+        const QUEENS: [usize; 5] = [QUEEN, ROOK, BISHOP, KNIGHT, PAWN];
+        match self.0 {
+            0 => EvasionGenOrder::PAWNS_FIRST,
+            1 => EvasionGenOrder {
+                captures: QUEENS,
+                blocks: PAWNS,
+            },
+            _ => EvasionGenOrder {
+                captures: QUEENS,
+                blocks: QUEENS,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveOrder {
     pub attacker: AttackerOrder,
     pub defender: DefenderOrder,
+    pub checks: CheckOrder,
+    pub evasions: EvasionOrder,
+    /// Try first the move that last ended a search at the same ply (K).
+    pub killer: bool,
+    /// Remember results for positions reached again in one search (T).
+    pub table: bool,
 }
 
 impl MoveOrder {
@@ -92,42 +155,90 @@ impl MoveOrder {
     pub const GENERATED: Self = Self {
         attacker: AttackerOrder(0),
         defender: DefenderOrder(0),
+        checks: CheckOrder(0),
+        evasions: EvasionOrder(0),
+        killer: false,
+        table: false,
     };
 
     /// The order the search uses unless told otherwise: A10 for the
-    /// attacker, the defender's moves as generated. Fastest of 77 orders
-    /// timed on leaf positions from logged games.
+    /// attacker, the defender's moves as generated with captures by the most
+    /// valuable piece first (V1), and the table. Fastest of the orders timed
+    /// on positions logged from self-play leaves.
     pub const DEFAULT: Self = Self {
         attacker: AttackerOrder(10),
         defender: DefenderOrder(0),
+        checks: CheckOrder(0),
+        evasions: EvasionOrder(1),
+        killer: false,
+        table: true,
     };
 
-    /// Every pair of an attacker and a defender order.
+    /// Every pair of an attacker and a defender order, moves generated as G0, V0.
     pub fn all() -> Vec<Self> {
         AttackerOrder::ALL
             .iter()
             .flat_map(|&attacker| {
-                DefenderOrder::ALL
-                    .iter()
-                    .map(move |&defender| Self { attacker, defender })
+                DefenderOrder::ALL.iter().map(move |&defender| Self {
+                    attacker,
+                    defender,
+                    ..Self::GENERATED
+                })
             })
             .collect()
     }
 
-    /// From a name such as "A1,D1".
+    /// From a name such as "A1,D1" (generated as G0, V0), "A10,D0,G4,V1",
+    /// or either followed by K and/or T.
     pub fn parse(name: &str) -> Option<Self> {
-        let (a, d) = name.split_once(',')?;
-        let a: u8 = a.strip_prefix('A')?.parse().ok()?;
-        let d: u8 = d.strip_prefix('D')?.parse().ok()?;
-        ((a as usize) < AttackerOrder::ALL.len() && (d as usize) < DefenderOrder::ALL.len())
-            .then_some(Self {
-                attacker: AttackerOrder(a),
-                defender: DefenderOrder(d),
-            })
+        let mut parts: Vec<&str> = name.split(',').collect();
+        let (mut killer, mut table) = (false, false);
+        while let Some(&last) = parts.last() {
+            let flag = match last {
+                "K" => &mut killer,
+                "T" => &mut table,
+                _ => break,
+            };
+            if *flag {
+                return None;
+            }
+            *flag = true;
+            parts.pop();
+        }
+        let field = |s: &str, prefix: char, n: usize| -> Option<u8> {
+            let v: u8 = s.strip_prefix(prefix)?.parse().ok()?;
+            ((v as usize) < n).then_some(v)
+        };
+        let (g, v) = match parts.len() {
+            2 => (0, 0),
+            4 => (
+                field(parts[2], 'G', CheckOrder::ALL.len())?,
+                field(parts[3], 'V', EvasionOrder::ALL.len())?,
+            ),
+            _ => return None,
+        };
+        Some(Self {
+            attacker: AttackerOrder(field(parts[0], 'A', AttackerOrder::ALL.len())?),
+            defender: DefenderOrder(field(parts[1], 'D', DefenderOrder::ALL.len())?),
+            checks: CheckOrder(g),
+            evasions: EvasionOrder(v),
+            killer,
+            table,
+        })
     }
 
     pub fn name(self) -> String {
-        format!("A{},D{}", self.attacker.0, self.defender.0)
+        let mut name = format!("A{},D{}", self.attacker.0, self.defender.0);
+        if self.checks.0 != 0 || self.evasions.0 != 0 {
+            name += &format!(",G{},V{}", self.checks.0, self.evasions.0);
+        }
+        if self.killer {
+            name += ",K";
+        }
+        if self.table {
+            name += ",T";
+        }
+        name
     }
 }
 
@@ -188,7 +299,16 @@ pub fn order_attacker_moves(
     }
     let ksq = their_king.trailing_zeros() as usize;
     if order.0 == 9 || order.0 == 10 {
-        order_by_estimated_escapes(board, move_gen, us, ksq, moves);
+        order_by_estimated_escapes(board, move_gen, us, ksq, moves, !0);
+        return;
+    }
+    if order.0 == 11 || order.0 == 12 {
+        let sorted = if order.0 == 11 {
+            board.pieces[us][QUEEN]
+        } else {
+            board.pieces[us][QUEEN] | board.pieces[us][ROOK]
+        };
+        order_by_estimated_escapes(board, move_gen, us, ksq, moves, sorted);
         return;
     }
     let ep = board.en_passant.map(|e| e as usize);
@@ -291,13 +411,19 @@ fn attacks(move_gen: &MoveGen, color: usize, piece: usize, sq: usize, occ: u64) 
 }
 
 /// A9: fewest estimated escape squares for the enemy king on `ksq` first.
+/// Only moves from a square in `from` are sorted, and put first; the rest
+/// keep their order.
 fn order_by_estimated_escapes(
     board: &Board,
     move_gen: &MoveGen,
     us: usize,
     ksq: usize,
     moves: &mut [Move],
+    from: u64,
 ) {
+    if !moves.iter().any(|m| from & (1u64 << m.from()) != 0) {
+        return;
+    }
     let them = 1 - us;
     let occ = board.pieces_occ[WHITE] | board.pieces_occ[BLACK];
     // Sliders see through the king, so it cannot step back along their line.
@@ -310,6 +436,9 @@ fn order_by_estimated_escapes(
     }
     let around = move_gen.k_move_bitboard[ksq] & !board.pieces_occ[them];
     sort_by_key(moves, |m| {
+        if from & (1u64 << m.from()) == 0 {
+            return u32::MAX;
+        }
         let piece = piece_on(board, us, m.from()).unwrap_or(KING);
         let piece = m.promotion().unwrap_or(piece);
         let occ_after = (occ_without_king & !(1u64 << m.from())) | (1u64 << m.to());

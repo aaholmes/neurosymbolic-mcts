@@ -70,9 +70,9 @@ fn king_square(board: &Board, white: bool) -> usize {
 
 #[test]
 fn the_names_list_every_order_once() {
-    assert_eq!(AttackerOrder::ALL.len(), 11);
+    assert_eq!(AttackerOrder::ALL.len(), 13);
     assert_eq!(DefenderOrder::ALL.len(), 7);
-    assert_eq!(MoveOrder::all().len(), 77);
+    assert_eq!(MoveOrder::all().len(), 91);
     assert_eq!(MoveOrder::GENERATED, MoveOrder::parse("A0,D0").unwrap());
     let a1d1 = MoveOrder::parse("A1,D1").unwrap();
     assert_eq!(a1d1.attacker, AttackerOrder::ALL[1]);
@@ -80,7 +80,7 @@ fn the_names_list_every_order_once() {
     assert_eq!(a1d1.name(), "A1,D1");
     assert!(MoveOrder::parse("A9,D0").is_some());
     assert!(MoveOrder::parse("A10,D0").is_some());
-    assert!(MoveOrder::parse("A11,D0").is_none());
+    assert!(MoveOrder::parse("A13,D0").is_none());
     assert!(MoveOrder::parse("A1").is_none());
 }
 
@@ -250,10 +250,12 @@ fn every_order_gives_the_same_answers() {
         .map(|&attacker| MoveOrder {
             attacker,
             defender: DefenderOrder::ALL[1],
+            ..MoveOrder::GENERATED
         })
         .chain(DefenderOrder::ALL.iter().map(|&defender| MoveOrder {
             attacker: AttackerOrder::ALL[1],
             defender,
+            ..MoveOrder::GENERATED
         }));
     for order in orders {
         for (s, &(d, e, q)) in settings.iter().enumerate() {
@@ -303,13 +305,320 @@ fn a10_orders_checking_moves_as_a9_and_leaves_other_lists_alone() {
 }
 
 #[test]
-fn the_default_order_sorts_checking_moves_by_escape_squares() {
+fn the_default_order_sorts_checks_by_escape_squares_and_uses_the_table() {
     let mg = MoveGen::new();
-    assert_eq!(MoveOrder::DEFAULT, MoveOrder::parse("A10,D0").unwrap());
+    assert_eq!(
+        MoveOrder::DEFAULT,
+        MoveOrder::parse("A10,D0,G0,V1,T").unwrap()
+    );
     for board in boards().into_iter().take(100) {
         let default = mate_search::has_forced_mate_quiet(&board, &mg, 4, 0, 0);
         let ordered =
             mate_search::has_forced_mate_ordered(&board, &mg, 4, 0, 0, MoveOrder::DEFAULT);
         assert_eq!(default, ordered);
     }
+}
+
+// Orders in which the generators emit moves, at no cost per move.
+
+use kingfisher::search::mate_order::{CheckOrder, EvasionOrder};
+
+fn checks_in(board: &Board, mg: &MoveGen, order: CheckOrder) -> Vec<Move> {
+    let mut v = Vec::new();
+    mg.gen_checking_moves_ordered(board, &mut v, &order.generation());
+    v
+}
+
+fn evasions_in(board: &Board, mg: &MoveGen, order: EvasionOrder) -> Vec<Move> {
+    let mut v = Vec::new();
+    mg.gen_evasions_ordered(board, &mut v, &order.generation());
+    v
+}
+
+fn piece_moved(board: &Board, m: Move) -> char {
+    board
+        .get_piece(m.from())
+        .map_or('?', |(_, p)| "PNBRQK".as_bytes()[p] as char)
+}
+
+#[test]
+fn the_generation_orders_are_named() {
+    assert_eq!(CheckOrder::ALL.len(), 6);
+    assert_eq!(EvasionOrder::ALL.len(), 3);
+    let o = MoveOrder::parse("A10,D0,G4,V1").unwrap();
+    assert_eq!(o.checks, CheckOrder::ALL[4]);
+    assert_eq!(o.evasions, EvasionOrder::ALL[1]);
+    assert_eq!(o.name(), "A10,D0,G4,V1");
+    let short = MoveOrder::parse("A10,D0").unwrap();
+    assert_eq!(short.checks, CheckOrder::ALL[0]);
+    assert_eq!(short.evasions, EvasionOrder::ALL[0]);
+    assert_eq!(short.name(), "A10,D0");
+    assert!(MoveOrder::parse("A10,D0,G6,V0").is_none());
+    assert!(MoveOrder::parse("A10,D0,G1,V3").is_none());
+    assert!(MoveOrder::parse("A10,D0,G1").is_none());
+    assert!(MoveOrder::parse("A12,D0").is_some());
+    assert!(MoveOrder::parse("A13,D0").is_none());
+    assert_eq!(MoveOrder::GENERATED.checks, CheckOrder::ALL[0]);
+    assert_eq!(MoveOrder::DEFAULT.checks, CheckOrder::ALL[0]);
+}
+
+#[test]
+fn every_generation_order_emits_the_same_moves() {
+    let mg = MoveGen::new();
+    for board in boards() {
+        let checks0 = checks(&board, &mg);
+        assert_eq!(checks_in(&board, &mg, CheckOrder::ALL[0]), checks0);
+        for order in CheckOrder::ALL {
+            assert_eq!(
+                sorted(checks_in(&board, &mg, order)),
+                sorted(checks0.clone()),
+                "{order:?}"
+            );
+        }
+        if board.is_check(&mg) {
+            let evasions0 = evasions(&board, &mg);
+            assert_eq!(evasions_in(&board, &mg, EvasionOrder::ALL[0]), evasions0);
+            for order in EvasionOrder::ALL {
+                assert_eq!(
+                    sorted(evasions_in(&board, &mg, order)),
+                    sorted(evasions0.clone()),
+                    "{order:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn check_orders_list_pieces_in_their_order() {
+    let mg = MoveGen::new();
+    // The knight on e4 checks from d6 and f6; the queen, bishop and rook check too.
+    let board = Board::new_from_fen("4k3/8/8/8/4N3/1B6/8/R2QK3 w - - 0 1");
+    let first_of = |order: usize| {
+        let v = checks_in(&board, &mg, CheckOrder::ALL[order]);
+        let mut seen = String::new();
+        for m in v {
+            let p = piece_moved(&board, m);
+            if !seen.contains(p) {
+                seen.push(p);
+            }
+        }
+        seen
+    };
+    assert_eq!(first_of(0), "NBRQ");
+    assert_eq!(first_of(1), "QRBN");
+    assert_eq!(first_of(4), "QNBR");
+}
+
+#[test]
+fn captures_first_orders_put_capturing_checks_first() {
+    let mg = MoveGen::new();
+    // Nxd6+ captures; Nf6+ and the queen's checks do not.
+    let board = Board::new_from_fen("4k3/8/3p4/8/4N3/8/8/3QK3 w - - 0 1");
+    for order in [2, 3, 5] {
+        let v = checks_in(&board, &mg, CheckOrder::ALL[order]);
+        assert_eq!(v[0].to_uci(), "e4d6", "G{order}");
+        assert!(v[1..].iter().all(|m| m.to_uci() != "e4d6"));
+    }
+    assert_ne!(
+        checks_in(&board, &mg, CheckOrder::ALL[1])[0].to_uci(),
+        "e4d6"
+    );
+}
+
+#[test]
+fn evasion_orders_capture_with_the_most_valuable_piece_first() {
+    let mg = MoveGen::new();
+    // The rook on e6 checks; dxe6 and Qxe6 both capture it.
+    let board = Board::new_from_fen("4k3/3p4/q3R3/8/8/8/8/4K3 b - - 0 1");
+    assert!(board.is_check(&mg));
+    assert_eq!(
+        evasions_in(&board, &mg, EvasionOrder::ALL[0])[0].to_uci(),
+        "d7e6"
+    );
+    assert_eq!(
+        evasions_in(&board, &mg, EvasionOrder::ALL[1])[0].to_uci(),
+        "a6e6"
+    );
+    assert_eq!(
+        evasions_in(&board, &mg, EvasionOrder::ALL[2])[0].to_uci(),
+        "a6e6"
+    );
+}
+
+#[test]
+fn evasion_orders_block_in_their_order() {
+    let mg = MoveGen::new();
+    // The bishop on h8 checks; nothing can capture it; c3 blocks with the pawn,
+    // Qd4 and Qg7 with the queen.
+    let board = Board::new_from_fen("7b/8/8/8/8/8/2P5/K5Q1 w - - 0 1");
+    assert!(board.is_check(&mg));
+    assert_eq!(
+        evasions_in(&board, &mg, EvasionOrder::ALL[1])[0].to_uci(),
+        "c2c3"
+    );
+    assert_eq!(
+        piece_moved(&board, evasions_in(&board, &mg, EvasionOrder::ALL[2])[0]),
+        'Q'
+    );
+}
+
+#[test]
+fn a11_and_a12_sort_only_queen_or_queen_and_rook_checks() {
+    let mg = MoveGen::new();
+    let a11 = MoveOrder::parse("A11,D0").unwrap().attacker;
+    let a12 = MoveOrder::parse("A12,D0").unwrap().attacker;
+    assert!(a11.checking_moves_only() && a12.checking_moves_only());
+    for board in boards() {
+        let list = checks(&board, &mg);
+        for (order, sorted_pieces) in [(a11, "Q"), (a12, "QR")] {
+            let mut v = list.clone();
+            order_attacker_moves(&board, &mg, order, &mut v);
+            let n = v
+                .iter()
+                .take_while(|m| sorted_pieces.contains(piece_moved(&board, **m)))
+                .count();
+            // The sorted pieces come first, ordered as A9 orders them...
+            let mut front: Vec<Move> = list
+                .iter()
+                .copied()
+                .filter(|m| sorted_pieces.contains(piece_moved(&board, *m)))
+                .collect();
+            assert_eq!(n, front.len(), "{}", board.to_fen().unwrap());
+            order_attacker_moves(&board, &mg, AttackerOrder::ALL[9], &mut front);
+            assert_eq!(v[..n], front[..]);
+            // ...and the rest keep their generated order.
+            let rest: Vec<Move> = list
+                .iter()
+                .copied()
+                .filter(|m| !sorted_pieces.contains(piece_moved(&board, *m)))
+                .collect();
+            assert_eq!(v[n..], rest[..]);
+        }
+    }
+}
+
+#[test]
+fn every_generation_order_gives_the_same_answers() {
+    let mg = MoveGen::new();
+    let boards = boards();
+    let settings = [(3, 0, 0), (2, 0, 1), (2, 2, 0)];
+    for &(d, e, q) in &settings {
+        let expected: Vec<bool> = boards
+            .iter()
+            .map(|b| mate_search::has_forced_mate_quiet(b, &mg, d, e, q).0)
+            .collect();
+        for attacker in ["A0", "A10", "A11", "A12"] {
+            for g in 0..CheckOrder::ALL.len() {
+                for v in 0..EvasionOrder::ALL.len() {
+                    let name = format!("{attacker},D0,G{g},V{v}");
+                    let order = MoveOrder::parse(&name).unwrap();
+                    for (i, b) in boards.iter().enumerate() {
+                        let found = mate_search::has_forced_mate_ordered(b, &mg, d, e, q, order).0;
+                        assert_eq!(found, expected[i], "{name} position {i} {d},{e},{q}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Options that prune repeated work: K tries first the move that ended the
+// search of the previous sibling at the same ply (the killer heuristic), and
+// T remembers results for positions reached again within one search
+// (a transposition table).
+
+#[test]
+fn killer_and_table_options_are_named() {
+    let k = MoveOrder::parse("A10,D0,K").unwrap();
+    assert!(k.killer && !k.table);
+    assert_eq!(k.name(), "A10,D0,K");
+    let t = MoveOrder::parse("A10,D0,T").unwrap();
+    assert!(!t.killer && t.table);
+    let both = MoveOrder::parse("A10,D0,G4,V1,K,T").unwrap();
+    assert!(both.killer && both.table);
+    assert_eq!(both.checks, CheckOrder::ALL[4]);
+    assert_eq!(both.name(), "A10,D0,G4,V1,K,T");
+    assert_eq!(
+        MoveOrder::parse("A10,D0,T,K"),
+        MoveOrder::parse("A10,D0,K,T")
+    );
+    assert!(MoveOrder::parse("A10,D0,X").is_none());
+    assert!(MoveOrder::parse("A10,D0,K,K").is_none());
+    assert!(!MoveOrder::DEFAULT.killer && MoveOrder::DEFAULT.table);
+}
+
+#[test]
+fn killer_and_table_give_the_same_answers() {
+    let mg = MoveGen::new();
+    let boards = boards();
+    for &(d, e, q) in &[(3, 0, 0), (2, 0, 1), (2, 2, 0), (4, 0, 0)] {
+        for name in [
+            "A10,D0,K",
+            "A10,D0,T",
+            "A10,D0,K,T",
+            "A0,D0,K,T",
+            "A11,D0,G4,V1,K,T",
+        ] {
+            let order = MoveOrder::parse(name).unwrap();
+            for (i, b) in boards.iter().enumerate() {
+                let expected = mate_search::has_forced_mate_quiet(b, &mg, d, e, q).0;
+                let found = mate_search::has_forced_mate_ordered(b, &mg, d, e, q, order).0;
+                assert_eq!(found, expected, "{name} position {i} {d},{e},{q}");
+            }
+        }
+    }
+}
+
+#[test]
+fn killer_and_table_do_not_depend_on_earlier_searches() {
+    let mg = MoveGen::new();
+    let boards = boards();
+    let order = MoveOrder::parse("A10,D0,K,T").unwrap();
+    let alone: Vec<(bool, i32)> = boards
+        .iter()
+        .map(|b| mate_search::has_forced_mate_ordered(b, &mg, 4, 2, 0, order))
+        .collect();
+    // The same positions in reverse, so each follows a different search.
+    for (i, b) in boards.iter().enumerate().rev() {
+        assert_eq!(
+            mate_search::has_forced_mate_ordered(b, &mg, 4, 2, 0, order),
+            alone[i],
+            "position {i}"
+        );
+    }
+}
+
+#[test]
+fn the_table_never_searches_more_positions() {
+    let mg = MoveGen::new();
+    let (mut with, mut without) = (0i64, 0i64);
+    for b in boards() {
+        // Without the killer only: a hit skips a subtree that would have
+        // updated the killers, so with it later orders can differ.
+        for (plain, table) in [("A10,D0", "A10,D0,T"), ("A0,D0", "A0,D0,T")] {
+            let n0 = mate_search::has_forced_mate_ordered(
+                &b,
+                &mg,
+                4,
+                2,
+                0,
+                MoveOrder::parse(plain).unwrap(),
+            )
+            .1;
+            let n1 = mate_search::has_forced_mate_ordered(
+                &b,
+                &mg,
+                4,
+                2,
+                0,
+                MoveOrder::parse(table).unwrap(),
+            )
+            .1;
+            assert!(n1 <= n0, "{table}: {n1} > {n0} on {}", b.to_fen().unwrap());
+            with += n1 as i64;
+            without += n0 as i64;
+        }
+    }
+    assert!(with < without, "the table never hit: {with} vs {without}");
 }

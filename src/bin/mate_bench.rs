@@ -1,18 +1,20 @@
 //! Times the forced-mate search on a fixed set of positions, on one thread.
 //!
 //! Usage: mate_bench <fen file> [reps] [depth,exhaustive,quiet ...]
-//!        [--order A1,D1 | --orders all] [--half tune|held|all]
+//!        [--order A1,D1 or A10,D0,G4,V1 | --orders all] [--half tune|held|all]
 //! (default: 5 reps of 5,0,0 2,2,0 3,0,1, the default move order, all positions).
 //!
 //! For each move order and setting it prints the mates found, the positions
 //! searched (and how many of them lie where a mate is found), a checksum of
 //! every answer, which must not change when the search is made faster or its
 //! moves reordered, and the time per position over the reps (mean ± sd).
-//! `--half tune` keeps the even-numbered positions and `held` the odd ones.
+//! `--half tune` keeps the even-numbered positions and `held` the odd ones;
+//! for a file of logged leaves (`game fen` per line), even and odd games.
 //! With 0 reps it instead prints the index of every position with a mate.
 
 use kingfisher::board::Board;
 use kingfisher::move_generation::MoveGen;
+use kingfisher::search::leaf_log::parse_corpus_line;
 use kingfisher::search::mate_order::MoveOrder;
 use kingfisher::search::mate_search::has_forced_mate_ordered;
 use std::time::Instant;
@@ -26,7 +28,7 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: mate_bench <fen file> [reps] [d,e,q ...] [--order A1,D1 | --orders all] [--half tune|held|all]";
+    let usage = "usage: mate_bench <fen file> [reps] [d,e,q ...] [--order A1,D1 or A10,D0,G4,V1 | --orders all] [--half tune|held|all]";
     let path = args.get(1).expect(usage);
     let positional: Vec<&String> = {
         let mut v = Vec::new();
@@ -69,13 +71,15 @@ fn main() {
         "all" => true,
         other => panic!("--half takes tune, held or all, not {other:?}"),
     };
+    // A line may start with its game; then the halves split by game.
     let boards: Vec<Board> = std::fs::read_to_string(path)
         .expect("fen file")
         .lines()
         .filter(|l| !l.trim().is_empty())
+        .map(parse_corpus_line)
         .enumerate()
-        .filter(|(i, _)| keep(*i))
-        .map(|(_, l)| Board::new_from_fen(l))
+        .filter(|(i, (game, _))| keep(game.unwrap_or(*i)))
+        .map(|(_, (_, fen))| Board::new_from_fen(fen))
         .collect();
     let mg = MoveGen::new();
     println!(

@@ -193,6 +193,41 @@ fn reserved_moves() -> usize {
     *CAP.get_or_init(|| move_list_capacity(std::env::var("KF_RESERVE_MOVES").ok().as_deref()))
 }
 
+/// The order in which `gen_checking_moves_ordered` emits checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckGenOrder {
+    /// Every piece kind once; the king gives only uncovered checks.
+    pub pieces: [usize; 6],
+    /// All capturing checks before the rest, each in `pieces` order.
+    pub captures_first: bool,
+}
+
+impl CheckGenOrder {
+    /// The order of `gen_checking_moves_into`.
+    pub const KNIGHTS_FIRST: Self = Self {
+        pieces: [KNIGHT, BISHOP, ROOK, QUEEN, KING, PAWN],
+        captures_first: false,
+    };
+}
+
+/// The order in which `gen_evasions_ordered` emits moves out of check:
+/// captures of the checking piece in `captures` order, then the king's
+/// captures, then blocks in `blocks` order, then king steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvasionGenOrder {
+    /// Pawn, knight, bishop, rook and queen, each once.
+    pub captures: [usize; 5],
+    pub blocks: [usize; 5],
+}
+
+impl EvasionGenOrder {
+    /// The order of `gen_evasions_into`.
+    pub const PAWNS_FIRST: Self = Self {
+        captures: [PAWN, KNIGHT, BISHOP, ROOK, QUEEN],
+        blocks: [PAWN, KNIGHT, BISHOP, ROOK, QUEEN],
+    };
+}
+
 impl MoveGen {
     /// Creates a new `MoveGen` instance.
     ///
@@ -341,6 +376,18 @@ impl MoveGen {
     /// en passant and castling are rare, so those are generated and tested
     /// with `gives_check`.
     pub fn gen_checking_moves_into(&self, board: &Board, out: &mut Vec<Move>) {
+        self.gen_checking_moves_ordered(board, out, &CheckGenOrder::KNIGHTS_FIRST);
+    }
+
+    /// `gen_checking_moves_into`, emitting each kind of piece's checks in
+    /// `order.pieces`, and with `order.captures_first` all capturing checks
+    /// before the rest. Promotions, en passant and castling come last.
+    pub fn gen_checking_moves_ordered(
+        &self,
+        board: &Board,
+        out: &mut Vec<Move>,
+        order: &CheckGenOrder,
+    ) {
         let us = if board.w_to_move { WHITE } else { BLACK };
         let them = 1 - us;
         let their_king = board.pieces[them][KING];
@@ -393,47 +440,6 @@ impl MoveGen {
             }
         };
 
-        // Knights, bishops, rooks and queens.
-        let knight_checks = self.n_move_bitboard[ksq];
-        for from in bits(&ours[KNIGHT]) {
-            let t = self.n_move_bitboard[from] & !own;
-            if uncovers & (1u64 << from) != 0 {
-                push_tested(out, from, t);
-            } else {
-                push_all(out, from, t & knight_checks);
-            }
-        }
-        for (piece, checks) in [
-            (BISHOP, bishop_line),
-            (ROOK, rook_line),
-            (QUEEN, bishop_line | rook_line),
-        ] {
-            for from in bits(&ours[piece]) {
-                let reach = match piece {
-                    BISHOP => self.gen_bishop_attacks_occ(from, occ),
-                    ROOK => self.gen_rook_attacks_occ(from, occ),
-                    _ => {
-                        self.gen_bishop_attacks_occ(from, occ)
-                            | self.gen_rook_attacks_occ(from, occ)
-                    }
-                };
-                let t = reach & !own;
-                if uncovers & (1u64 << from) != 0 {
-                    push_tested(out, from, t);
-                } else {
-                    push_all(out, from, t & checks);
-                }
-            }
-        }
-
-        // King: only uncovered checks, and castling (below).
-        for from in bits(&ours[KING]) {
-            if uncovers & (1u64 << from) != 0 {
-                push_tested(out, from, self.k_move_bitboard[from] & !own);
-            }
-        }
-
-        // Pawns not about to promote: pushes and ordinary captures.
         let (last_rank, start_rank, pawn_checks) = if us == WHITE {
             (
                 0xFF00_0000_0000_0000u64 >> 8,
@@ -447,27 +453,89 @@ impl MoveGen {
                 self.wp_capture_bitboard[ksq],
             )
         };
-        for from in bits(&(ours[PAWN] & !last_rank)) {
-            let (one, two, caps) = if us == WHITE {
-                (from + 8, from + 16, self.wp_capture_bitboard[from])
-            } else {
-                (
-                    from - 8,
-                    from.wrapping_sub(16),
-                    self.bp_capture_bitboard[from],
-                )
-            };
-            let mut t = caps & board.pieces_occ[them];
-            if occ & (1u64 << one) == 0 {
-                t |= 1u64 << one;
-                if (1u64 << from) & start_rank != 0 && occ & (1u64 << two) == 0 {
-                    t |= 1u64 << two;
+        // The checks by one kind of piece whose destination is in `mask`.
+        let piece_checks = |out: &mut Vec<Move>, piece: usize, mask: u64| match piece {
+            KNIGHT => {
+                let knight_checks = self.n_move_bitboard[ksq];
+                for from in bits(&ours[KNIGHT]) {
+                    let t = self.n_move_bitboard[from] & !own & mask;
+                    if uncovers & (1u64 << from) != 0 {
+                        push_tested(out, from, t);
+                    } else {
+                        push_all(out, from, t & knight_checks);
+                    }
                 }
             }
-            if uncovers & (1u64 << from) != 0 {
-                push_tested(out, from, t);
-            } else {
-                push_all(out, from, t & pawn_checks);
+            BISHOP | ROOK | QUEEN => {
+                let checks = match piece {
+                    BISHOP => bishop_line,
+                    ROOK => rook_line,
+                    _ => bishop_line | rook_line,
+                };
+                for from in bits(&ours[piece]) {
+                    let reach = match piece {
+                        BISHOP => self.gen_bishop_attacks_occ(from, occ),
+                        ROOK => self.gen_rook_attacks_occ(from, occ),
+                        _ => {
+                            self.gen_bishop_attacks_occ(from, occ)
+                                | self.gen_rook_attacks_occ(from, occ)
+                        }
+                    };
+                    let t = reach & !own & mask;
+                    if uncovers & (1u64 << from) != 0 {
+                        push_tested(out, from, t);
+                    } else {
+                        push_all(out, from, t & checks);
+                    }
+                }
+            }
+            // King: only uncovered checks, and castling (below).
+            KING => {
+                for from in bits(&ours[KING]) {
+                    if uncovers & (1u64 << from) != 0 {
+                        push_tested(out, from, self.k_move_bitboard[from] & !own & mask);
+                    }
+                }
+            }
+            // Pawns not about to promote: pushes and ordinary captures.
+            _ => {
+                for from in bits(&(ours[PAWN] & !last_rank)) {
+                    let (one, two, caps) = if us == WHITE {
+                        (from + 8, from + 16, self.wp_capture_bitboard[from])
+                    } else {
+                        (
+                            from - 8,
+                            from.wrapping_sub(16),
+                            self.bp_capture_bitboard[from],
+                        )
+                    };
+                    let mut t = caps & board.pieces_occ[them];
+                    if occ & (1u64 << one) == 0 {
+                        t |= 1u64 << one;
+                        if (1u64 << from) & start_rank != 0 && occ & (1u64 << two) == 0 {
+                            t |= 1u64 << two;
+                        }
+                    }
+                    let t = t & mask;
+                    if uncovers & (1u64 << from) != 0 {
+                        push_tested(out, from, t);
+                    } else {
+                        push_all(out, from, t & pawn_checks);
+                    }
+                }
+            }
+        };
+        if order.captures_first {
+            let theirs = board.pieces_occ[them];
+            for piece in order.pieces {
+                piece_checks(out, piece, theirs);
+            }
+            for piece in order.pieces {
+                piece_checks(out, piece, !theirs);
+            }
+        } else {
+            for piece in order.pieces {
+                piece_checks(out, piece, !0);
             }
         }
 
@@ -505,7 +573,17 @@ impl MoveGen {
     /// Captures come first, then blocks, then king steps, pawns first within
     /// each, so a refutation of a mating attempt tends to come early.
     pub fn gen_evasions_into(&self, board: &Board, out: &mut Vec<Move>) {
-        self.visit_evasions(board, false, &mut |m| {
+        self.gen_evasions_ordered(board, out, &EvasionGenOrder::PAWNS_FIRST);
+    }
+
+    /// `gen_evasions_into`, with captures and blocks in `order`.
+    pub fn gen_evasions_ordered(
+        &self,
+        board: &Board,
+        out: &mut Vec<Move>,
+        order: &EvasionGenOrder,
+    ) {
+        self.visit_evasions(board, false, order, &mut |m| {
             out.push(m);
             false
         });
@@ -515,7 +593,9 @@ impl MoveGen {
     /// Tests each candidate as it is generated, king steps first, and stops
     /// at the first legal one.
     pub fn has_legal_evasion(&self, board: &Board) -> bool {
-        self.visit_evasions(board, true, &mut |m| board.is_legal_after_move(m, self))
+        self.visit_evasions(board, true, &EvasionGenOrder::PAWNS_FIRST, &mut |m| {
+            board.is_legal_after_move(m, self)
+        })
     }
 
     /// Calls `f` on each candidate move out of check until it returns true;
@@ -525,6 +605,7 @@ impl MoveGen {
         &self,
         board: &Board,
         king_first: bool,
+        order: &EvasionGenOrder,
         f: &mut impl FnMut(Move) -> bool,
     ) -> bool {
         let us = if board.w_to_move { WHITE } else { BLACK };
@@ -595,29 +676,32 @@ impl MoveGen {
             };
 
             // Captures of the checker, en passant included.
-            for from in bits(&ours[PAWN]) {
-                let caps = if us == WHITE {
-                    self.wp_capture_bitboard[from]
-                } else {
-                    self.bp_capture_bitboard[from]
-                };
-                if pawn_moves(f, from, caps & checkers) {
-                    return true;
-                }
-                if let Some(e) = ep {
-                    let captured = if us == WHITE { e - 8 } else { e + 8 };
-                    if caps & (1u64 << e) != 0
-                        && (csq == captured || between & (1u64 << e) != 0)
-                        && f(Move::new(from, e, None))
-                    {
-                        return true;
+            for piece in order.captures {
+                if piece == PAWN {
+                    for from in bits(&ours[PAWN]) {
+                        let caps = if us == WHITE {
+                            self.wp_capture_bitboard[from]
+                        } else {
+                            self.bp_capture_bitboard[from]
+                        };
+                        if pawn_moves(f, from, caps & checkers) {
+                            return true;
+                        }
+                        if let Some(e) = ep {
+                            let captured = if us == WHITE { e - 8 } else { e + 8 };
+                            if caps & (1u64 << e) != 0
+                                && (csq == captured || between & (1u64 << e) != 0)
+                                && f(Move::new(from, e, None))
+                            {
+                                return true;
+                            }
+                        }
                     }
-                }
-            }
-            for piece in [KNIGHT, BISHOP, ROOK, QUEEN] {
-                for from in bits(&ours[piece]) {
-                    if each(f, from, reach(piece, from) & checkers) {
-                        return true;
+                } else {
+                    for from in bits(&ours[piece]) {
+                        if each(f, from, reach(piece, from) & checkers) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -627,26 +711,29 @@ impl MoveGen {
 
             // Blocks.
             if between != 0 {
-                for from in bits(&ours[PAWN]) {
-                    let one = if us == WHITE { from + 8 } else { from - 8 };
-                    if occ & (1u64 << one) != 0 {
-                        continue;
-                    }
-                    let mut t = (1u64 << one) & between;
-                    if (1u64 << from) & start_rank != 0 {
-                        let two = if us == WHITE { from + 16 } else { from - 16 };
-                        if occ & (1u64 << two) == 0 {
-                            t |= (1u64 << two) & between;
+                for piece in order.blocks {
+                    if piece == PAWN {
+                        for from in bits(&ours[PAWN]) {
+                            let one = if us == WHITE { from + 8 } else { from - 8 };
+                            if occ & (1u64 << one) != 0 {
+                                continue;
+                            }
+                            let mut t = (1u64 << one) & between;
+                            if (1u64 << from) & start_rank != 0 {
+                                let two = if us == WHITE { from + 16 } else { from - 16 };
+                                if occ & (1u64 << two) == 0 {
+                                    t |= (1u64 << two) & between;
+                                }
+                            }
+                            if pawn_moves(f, from, t) {
+                                return true;
+                            }
                         }
-                    }
-                    if pawn_moves(f, from, t) {
-                        return true;
-                    }
-                }
-                for piece in [KNIGHT, BISHOP, ROOK, QUEEN] {
-                    for from in bits(&ours[piece]) {
-                        if each(f, from, reach(piece, from) & between) {
-                            return true;
+                    } else {
+                        for from in bits(&ours[piece]) {
+                            if each(f, from, reach(piece, from) & between) {
+                                return true;
+                            }
                         }
                     }
                 }

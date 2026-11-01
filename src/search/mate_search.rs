@@ -92,7 +92,7 @@ pub fn mate_search(
             let next_board = board.apply_move_to_board(*m);
 
             let quiet = if checks_only { 0 } else { EVERY_MOVE };
-            let found = with_ply_moves(depth, |lists| {
+            let found = with_scratch(depth, |lists, table| {
                 solve_mate(
                     &next_board,
                     move_gen,
@@ -102,6 +102,7 @@ pub fn mate_search(
                     MoveOrder::GENERATED,
                     &mut nodes,
                     lists,
+                    table,
                 )
             });
             if found {
@@ -114,26 +115,116 @@ pub fn mate_search(
 }
 
 /// Move lists for one ply, kept between searches so that no position allocates.
-#[derive(Default)]
 struct PlyMoves {
     captures: Vec<Move>,
     promotions: Vec<Move>,
     quiet: Vec<Move>,
+    /// With the killer option, the move that last ended a search at this ply.
+    killer: Move,
+}
+
+impl Default for PlyMoves {
+    fn default() -> Self {
+        Self {
+            captures: Vec::new(),
+            promotions: Vec::new(),
+            quiet: Vec::new(),
+            killer: Move::null(),
+        }
+    }
+}
+
+/// With the table option, results for positions already searched in the
+/// current root search, one entry per slot, replaced on collision.
+#[derive(Default)]
+struct MateTable {
+    entries: Vec<TableEntry>,
+    /// Entries from other root searches are ignored.
+    search: u32,
+}
+
+#[derive(Default, Clone, Copy)]
+struct TableEntry {
+    hash: u64,
+    search: u32,
+    quiet: i16,
+    depth: i8,
+    found: bool,
+}
+
+/// Budgets above this (every move searched) share one value in the table.
+fn table_quiet(quiet: i32) -> i16 {
+    quiet.min(i16::MAX as i32) as i16
+}
+
+/// 16,384 entries of 16 bytes: 256 KB per search thread.
+const TABLE_SLOTS: usize = 1 << 14;
+
+/// Positions closer to the end than this are not stored: they are cheaper
+/// to search than to look up.
+const TABLE_MIN_DEPTH: i32 = 2;
+
+impl MateTable {
+    fn start_search(&mut self) {
+        if self.entries.is_empty() {
+            self.entries = vec![TableEntry::default(); TABLE_SLOTS];
+        }
+        self.search = self.search.wrapping_add(1);
+        if self.search == 0 {
+            self.entries.fill(TableEntry::default());
+            self.search = 1;
+        }
+    }
+
+    /// A mate within fewer moves is also a mate within more, and no mate
+    /// within more moves means none within fewer, for the same side to move.
+    fn probe(&self, hash: u64, depth: i32, quiet: i32) -> Option<bool> {
+        let e = &self.entries[hash as usize & (TABLE_SLOTS - 1)];
+        let depth_e = e.depth as i32;
+        if e.search != self.search || e.hash != hash || e.quiet != table_quiet(quiet) {
+            return None;
+        }
+        if (depth_e - depth) % 2 != 0 {
+            return None;
+        }
+        if (e.found && depth_e <= depth) || (!e.found && depth_e >= depth) {
+            Some(e.found)
+        } else {
+            None
+        }
+    }
+
+    fn store(&mut self, hash: u64, depth: i32, quiet: i32, found: bool) {
+        self.entries[hash as usize & (TABLE_SLOTS - 1)] = TableEntry {
+            hash,
+            search: self.search,
+            quiet: table_quiet(quiet),
+            depth: depth as i8,
+            found,
+        };
+    }
+}
+
+#[derive(Default)]
+struct Scratch {
+    lists: Vec<PlyMoves>,
+    table: MateTable,
 }
 
 thread_local! {
-    static PLY_MOVES: std::cell::RefCell<Vec<PlyMoves>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
 }
 
-/// Runs `f` with at least `plies` move lists for this thread.
-fn with_ply_moves<R>(plies: i32, f: impl FnOnce(&mut [PlyMoves]) -> R) -> R {
-    PLY_MOVES.with(|cell| {
-        let mut lists = cell.borrow_mut();
+/// Runs `f` with at least `plies` move lists for this thread, and its table.
+fn with_scratch<R>(plies: i32, f: impl FnOnce(&mut [PlyMoves], &mut MateTable) -> R) -> R {
+    SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let Scratch { lists, table } = &mut *scratch;
         let plies = plies.max(1) as usize + 1;
         if lists.len() < plies {
             lists.resize_with(plies, PlyMoves::default);
         }
-        f(&mut lists)
+        f(lists, table)
     })
 }
 
@@ -193,7 +284,15 @@ pub fn has_forced_mate_ordered(
 ) -> (bool, i32) {
     let mut nodes = 0;
     let exhaustive = exhaustive.min(depth);
-    with_ply_moves(2 * depth, |lists| {
+    with_scratch(2 * depth, |lists, table| {
+        if order.killer {
+            for l in lists.iter_mut() {
+                l.killer = Move::null();
+            }
+        }
+        if order.table {
+            table.start_search();
+        }
         // The search with fewer quiet moves first: usually the smaller tree.
         if depth > exhaustive
             && solve_mate(
@@ -205,6 +304,7 @@ pub fn has_forced_mate_ordered(
                 order,
                 &mut nodes,
                 lists,
+                table,
             )
         {
             return (true, nodes);
@@ -219,6 +319,7 @@ pub fn has_forced_mate_ordered(
                 order,
                 &mut nodes,
                 lists,
+                table,
             );
         (found, nodes)
     })
@@ -229,6 +330,7 @@ pub fn has_forced_mate_ordered(
 /// Returns true if the position is a forced mate for the attacker.
 /// - Attacker: returns true if ANY child leads to mate (short-circuits on first success)
 /// - Defender: returns true only if ALL children lead to mate (short-circuits on first refutation)
+#[allow(clippy::too_many_arguments)]
 fn solve_mate(
     board: &Board,
     move_gen: &MoveGen,
@@ -238,6 +340,7 @@ fn solve_mate(
     order: MoveOrder,
     nodes: &mut i32,
     lists: &mut [PlyMoves],
+    table: &mut MateTable,
 ) -> bool {
     *nodes += 1;
     // A limited budget is no use on the attacker's last move, which must mate
@@ -247,7 +350,59 @@ fn solve_mate(
     } else {
         quiet
     };
+    let use_table = order.table && depth >= TABLE_MIN_DEPTH;
+    if use_table {
+        if let Some(found) = table.probe(board.zobrist_hash, depth, quiet) {
+            return found;
+        }
+    }
+    let found = search_children(
+        board,
+        move_gen,
+        depth,
+        is_attackers_turn,
+        quiet,
+        order,
+        nodes,
+        lists,
+        table,
+    );
+    if use_table {
+        table.store(board.zobrist_hash, depth, quiet, found);
+    }
+    found
+}
 
+/// Moves `killer` to the front of the ply's moves, if it is one of them.
+fn try_killer_first(here: &mut PlyMoves) {
+    let k = here.killer;
+    if k == Move::null() {
+        return;
+    }
+    if let Some(i) = here.captures.iter().position(|&m| m == k) {
+        here.captures[..=i].rotate_right(1);
+    } else if let Some(i) = here.promotions.iter().position(|&m| m == k) {
+        here.promotions.remove(i);
+        here.captures.insert(0, k);
+    } else if let Some(i) = here.quiet.iter().position(|&m| m == k) {
+        here.quiet.remove(i);
+        here.captures.insert(0, k);
+    }
+}
+
+/// `solve_mate` below the table lookup.
+#[allow(clippy::too_many_arguments)]
+fn search_children(
+    board: &Board,
+    move_gen: &MoveGen,
+    depth: i32,
+    is_attackers_turn: bool,
+    quiet: i32,
+    order: MoveOrder,
+    nodes: &mut i32,
+    lists: &mut [PlyMoves],
+    table: &mut MateTable,
+) -> bool {
     let (here, deeper) = lists.split_first_mut().expect("one move list per ply");
     here.captures.clear();
     here.promotions.clear();
@@ -266,9 +421,9 @@ fn solve_mate(
     // With no quiet moves left, the attacker's moves are its checking moves.
     let checks_only = is_attackers_turn && quiet == 0;
     if checks_only {
-        move_gen.gen_checking_moves_into(board, &mut here.captures);
+        move_gen.gen_checking_moves_ordered(board, &mut here.captures, &order.checks.generation());
     } else if !is_attackers_turn && board.is_check(move_gen) {
-        move_gen.gen_evasions_into(board, &mut here.captures);
+        move_gen.gen_evasions_ordered(board, &mut here.captures, &order.evasions.generation());
     } else {
         move_gen.gen_all_moves_into(
             board,
@@ -294,9 +449,14 @@ fn solve_mate(
             order_defender_moves(board, move_gen, order.defender, &mut here.captures);
         }
     }
+    if order.killer {
+        try_killer_first(here);
+    }
     let mut has_legal_move = false;
+    // The move that ended the search early: a mate, or a refutation.
+    let mut cutoff = None;
 
-    for m in here
+    for &m in here
         .captures
         .iter()
         .chain(here.promotions.iter())
@@ -307,17 +467,17 @@ fn solve_mate(
         if is_attackers_turn
             && !checks_only
             && quiet != EVERY_MOVE
-            && !board.gives_check(*m, move_gen)
+            && !board.gives_check(m, move_gen)
         {
             child_quiet = quiet - 1;
         }
 
-        if !board.is_legal_after_move(*m, move_gen) {
+        if !board.is_legal_after_move(m, move_gen) {
             continue;
         }
 
         has_legal_move = true;
-        let next_board = board.apply_move_to_board(*m);
+        let next_board = board.apply_move_to_board(m);
 
         let child_result = solve_mate(
             &next_board,
@@ -328,18 +488,20 @@ fn solve_mate(
             order,
             nodes,
             deeper,
+            table,
         );
 
-        if is_attackers_turn {
-            if child_result {
-                return true; // Found a mating line
-            }
-        } else {
-            // Defender
-            if !child_result {
-                return false; // Found a refutation
-            }
+        // The attacker stops at a mating line, the defender at a refutation.
+        if child_result == is_attackers_turn {
+            cutoff = Some(m);
+            break;
         }
+    }
+    if let Some(m) = cutoff {
+        if order.killer {
+            here.killer = m;
+        }
+        return is_attackers_turn;
     }
 
     // No legal moves found
