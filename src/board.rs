@@ -698,19 +698,34 @@ impl Board {
     ///
     /// For special moves (en passant, castling, promotion), falls back to apply_move + is_check.
     pub fn gives_check(&self, mv: Move, move_gen: &MoveGen) -> bool {
+        let (direct, uncovered) = self.check_kinds_inner(mv, move_gen, false);
+        direct || uncovered
+    }
+
+    /// Whether a move gives check directly (the moved piece attacks the king)
+    /// and whether it uncovers a check from another piece; both for a double
+    /// check. For promotions, en passant and castling the move is made and
+    /// any check counts as direct.
+    pub fn check_kinds(&self, mv: Move, move_gen: &MoveGen) -> (bool, bool) {
+        self.check_kinds_inner(mv, move_gen, true)
+    }
+
+    /// With `both` false, stops after finding a direct check.
+    #[inline(always)]
+    fn check_kinds_inner(&self, mv: Move, move_gen: &MoveGen, both: bool) -> (bool, bool) {
         use crate::board_utils::bit_to_sq_ind;
 
         // Handle special moves with fallback (these are rare)
         if mv.promotion().is_some() || mv.is_castle() {
             let new_board = self.apply_move_to_board(mv);
-            return new_board.is_check(move_gen);
+            return (new_board.is_check(move_gen), false);
         }
 
         // En passant: also fallback (pawn disappears from a different square)
         if self.en_passant.is_some() && mv.to() == self.en_passant.unwrap() as usize {
             if let Some((_, PAWN)) = self.get_piece(mv.from()) {
                 let new_board = self.apply_move_to_board(mv);
-                return new_board.is_check(move_gen);
+                return (new_board.is_check(move_gen), false);
             }
         }
 
@@ -720,7 +735,7 @@ impl Board {
         // Find opponent's king square
         let opp_king_bb = self.pieces[opp_color][KING];
         if opp_king_bb == 0 {
-            return false;
+            return (false, false);
         }
         let king_sq = bit_to_sq_ind(opp_king_bb);
 
@@ -734,7 +749,7 @@ impl Board {
         // 1. Direct check: does the moved piece attack the king from its destination?
         let piece_type = match self.get_piece(mv.from()) {
             Some((_, pt)) => pt,
-            None => return false,
+            None => return (false, false),
         };
 
         let direct_check = match piece_type {
@@ -768,8 +783,8 @@ impl Board {
             _ => false,
         };
 
-        if direct_check {
-            return true;
+        if direct_check && !both {
+            return (true, false);
         }
 
         // 2. Discovered check: does removing the piece from `from` reveal a sliding attack?
@@ -778,7 +793,7 @@ impl Board {
         if rook_queen != 0 {
             let rook_attacks_to_king = move_gen.gen_rook_attacks_occ(king_sq, all_occ);
             if rook_attacks_to_king & rook_queen & !from_bit != 0 {
-                return true;
+                return (direct_check, true);
             }
         }
 
@@ -787,11 +802,11 @@ impl Board {
         if bishop_queen != 0 {
             let bishop_attacks_to_king = move_gen.gen_bishop_attacks_occ(king_sq, all_occ);
             if bishop_attacks_to_king & bishop_queen & !from_bit != 0 {
-                return true;
+                return (direct_check, true);
             }
         }
 
-        false
+        (direct_check, false)
     }
 
     /// Checks if a pseudo-legal move is legal (doesn't leave own king in check)

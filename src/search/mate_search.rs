@@ -49,6 +49,7 @@
 use crate::board::Board;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
+use crate::search::mate_order::{order_attacker_moves, order_defender_moves, MoveOrder};
 
 /// Public API: Mate search with configurable exhaustive depth.
 ///
@@ -98,6 +99,7 @@ pub fn mate_search(
                     depth - 1,
                     false,
                     quiet,
+                    MoveOrder::GENERATED,
                     &mut nodes,
                     lists,
                 )
@@ -169,6 +171,26 @@ pub fn has_forced_mate_quiet(
     exhaustive: i32,
     quiet: i32,
 ) -> (bool, i32) {
+    has_forced_mate_ordered(
+        board,
+        move_gen,
+        depth,
+        exhaustive,
+        quiet,
+        MoveOrder::DEFAULT,
+    )
+}
+
+/// `has_forced_mate_quiet`, trying moves in `order`. The answer never depends
+/// on the order; the number of positions searched does.
+pub fn has_forced_mate_ordered(
+    board: &Board,
+    move_gen: &MoveGen,
+    depth: i32,
+    exhaustive: i32,
+    quiet: i32,
+    order: MoveOrder,
+) -> (bool, i32) {
     let mut nodes = 0;
     let exhaustive = exhaustive.min(depth);
     with_ply_moves(2 * depth, |lists| {
@@ -180,6 +202,7 @@ pub fn has_forced_mate_quiet(
                 2 * depth - 1,
                 true,
                 quiet.max(0),
+                order,
                 &mut nodes,
                 lists,
             )
@@ -193,6 +216,7 @@ pub fn has_forced_mate_quiet(
                 2 * exhaustive - 1,
                 true,
                 EVERY_MOVE,
+                order,
                 &mut nodes,
                 lists,
             );
@@ -211,6 +235,7 @@ fn solve_mate(
     depth: i32,
     is_attackers_turn: bool,
     quiet: i32,
+    order: MoveOrder,
     nodes: &mut i32,
     lists: &mut [PlyMoves],
 ) -> bool {
@@ -252,6 +277,23 @@ fn solve_mate(
             &mut here.quiet,
         );
     }
+    let generated = if is_attackers_turn {
+        order.attacker == MoveOrder::GENERATED.attacker
+            || (order.attacker.checking_moves_only() && (!checks_only || depth == 1))
+    } else {
+        order.defender == MoveOrder::GENERATED.defender
+    };
+    if !generated {
+        here.captures.extend_from_slice(&here.promotions);
+        here.captures.extend_from_slice(&here.quiet);
+        here.promotions.clear();
+        here.quiet.clear();
+        if is_attackers_turn {
+            order_attacker_moves(board, move_gen, order.attacker, &mut here.captures);
+        } else {
+            order_defender_moves(board, move_gen, order.defender, &mut here.captures);
+        }
+    }
     let mut has_legal_move = false;
 
     for m in here
@@ -283,6 +325,7 @@ fn solve_mate(
             depth - 1,
             !is_attackers_turn,
             child_quiet,
+            order,
             nodes,
             deeper,
         );

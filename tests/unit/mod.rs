@@ -28,6 +28,7 @@ mod leaf_parallel_tests;
 mod legality_check_tests;
 mod magic_bitboard_tests;
 mod make_move_tests;
+mod mate_order_tests;
 mod mate_search_tests;
 mod move_generation_tests;
 mod move_types_tests;
