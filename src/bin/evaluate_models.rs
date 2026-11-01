@@ -6,7 +6,7 @@
 //! Usage: evaluate_models <candidate.pt> <current.pt> <num_games> <simulations> [--threshold 0.55]
 
 use kingfisher::boardstack::BoardStack;
-use kingfisher::egtb::ExactEndings;
+use kingfisher::egtb::{Ending, ExactEndings};
 use kingfisher::eval::PestoEval;
 use kingfisher::mcts::sprt::{SprtConfig, SprtResult, SprtState};
 use kingfisher::mcts::{
@@ -292,18 +292,17 @@ pub fn play_evaluation_game_with_servers(
 
     let mut candidate_samples: Vec<TrainingSample> = Vec::new();
     let mut current_samples: Vec<TrainingSample> = Vec::new();
-    // White's result, if the game reached a position the endgame tables cover
-    let mut tablebase_score_white: Option<f32> = None;
+    // White's result, if the game reached a mate in one or a position the
+    // endgame tables cover
+    let mut exact_end: Option<(f32, Ending)> = None;
 
     loop {
         let board = board_stack.current_state().clone();
         let white_to_move = board.w_to_move;
 
-        if let Some(tb) = exact.tablebase.as_ref().filter(|_| !enable_koth) {
-            tablebase_score_white = tb.adjudicate(&board);
-            if tablebase_score_white.is_some() {
-                break;
-            }
+        if let Some(end) = exact.game_result(&board, &move_gen, enable_koth) {
+            exact_end = Some(end);
+            break;
         }
 
         let candidate_turn =
@@ -428,14 +427,16 @@ pub fn play_evaluation_game_with_servers(
         (false, false)
     };
 
-    let (result, result_str) = if let Some(v) = tablebase_score_white {
+    let (result, result_str) = if let Some((v, ending)) = exact_end {
         let candidate_score = if candidate_is_white { v } else { -v };
-        if candidate_score > 0.0 {
-            (GameResult::CandidateWin, "Candidate wins (tablebase)")
-        } else if candidate_score < 0.0 {
-            (GameResult::CurrentWin, "Current wins (tablebase)")
-        } else {
-            (GameResult::Draw, "Draw (tablebase)")
+        match (ending, candidate_score) {
+            (Ending::MateInOne, c) if c > 0.0 => {
+                (GameResult::CandidateWin, "Candidate wins (mate in one)")
+            }
+            (Ending::MateInOne, _) => (GameResult::CurrentWin, "Current wins (mate in one)"),
+            (_, c) if c > 0.0 => (GameResult::CandidateWin, "Candidate wins (tablebase)"),
+            (_, c) if c < 0.0 => (GameResult::CurrentWin, "Current wins (tablebase)"),
+            _ => (GameResult::Draw, "Draw (tablebase)"),
         }
     } else if koth_white || koth_black {
         let white_wins = koth_white;
@@ -475,7 +476,7 @@ pub fn play_evaluation_game_with_servers(
 
     // Backfill value targets: +1 for white win, -1 for black win, 0 for draw
     if collect_training_data {
-        let final_score_white = if let Some(v) = tablebase_score_white {
+        let final_score_white = if let Some((v, _)) = exact_end {
             v
         } else if koth_white {
             1.0f32

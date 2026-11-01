@@ -128,3 +128,67 @@ fn exact_endings_set_the_search_options() {
     assert!(c.leaf_mate_in_1);
     assert!(c.tablebase.is_none());
 }
+
+fn game_end(
+    e: &kingfisher::egtb::ExactEndings,
+    fen: &str,
+    koth: bool,
+) -> Option<(f32, kingfisher::egtb::Ending)> {
+    let mg = kingfisher::move_generation::MoveGen::new();
+    e.game_result(&Board::new_from_fen(fen), &mg, koth)
+}
+
+#[test]
+fn a_mate_in_one_ends_the_game_as_a_win_for_the_side_to_move() {
+    use kingfisher::egtb::{Ending, ExactEndings};
+    let e = ExactEndings {
+        mate_in_1: true,
+        tablebase: None,
+    };
+    // White plays Re8#.
+    let white = "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1";
+    assert_eq!(game_end(&e, white, false), Some((1.0, Ending::MateInOne)));
+    // Black plays Ra1#; the result is from White's side.
+    let black = "r5k1/5ppp/8/8/8/8/5PPP/6K1 b - - 0 1";
+    assert_eq!(game_end(&e, black, false), Some((-1.0, Ending::MateInOne)));
+    // Checkmate ends a King of the Hill game too.
+    assert_eq!(game_end(&e, white, true), Some((1.0, Ending::MateInOne)));
+}
+
+#[test]
+fn no_mate_in_one_or_the_option_off_does_not_end_the_game() {
+    use kingfisher::egtb::ExactEndings;
+    let on = ExactEndings {
+        mate_in_1: true,
+        tablebase: None,
+    };
+    let off = ExactEndings::default();
+    let white_mates = "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1";
+    assert_eq!(game_end(&off, white_mates, false), None);
+    // Black to move in the same position has no mate in one.
+    assert_eq!(
+        game_end(&on, "6k1/5ppp/8/8/8/8/8/4R1K1 b - - 0 1", false),
+        None
+    );
+    assert_eq!(
+        game_end(
+            &on,
+            kingfisher::board::Board::new().to_fen().unwrap().as_str(),
+            false
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_position_the_tables_cover_ends_the_game_except_in_king_of_the_hill() {
+    use kingfisher::egtb::{Ending, ExactEndings};
+    let Some(tb) = tables() else { return };
+    let e = ExactEndings {
+        mate_in_1: true,
+        tablebase: Some(tb),
+    };
+    let krk = "8/8/8/8/8/2k5/8/R3K3 b - - 0 1";
+    assert_eq!(game_end(&e, krk, false), Some((1.0, Ending::Tablebase)));
+    assert_eq!(game_end(&e, krk, true), None);
+}

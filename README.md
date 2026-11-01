@@ -125,8 +125,8 @@ Either mode can also use two exact results that cost almost nothing, so that the
 have to learn them. With `--mate-in-1`, a leaf whose side to move can mate in one gets the value +1
 (tiered search already finds these). With `--syzygy <dir>`, a leaf with 5 or fewer pieces and no
 castling rights gets its value from Syzygy endgame tables (win/draw/loss tables for every such
-position, 396 MB), and a self-play or evaluation game ends with the tables' result as soon as it
-reaches one. Wins and losses that the fifty-move rule would turn into draws count as draws. The
+position, 396 MB). Either kind of position also ends a self-play or evaluation game with its exact
+result, so no training position of either kind is recorded. Wins and losses that the fifty-move rule would turn into draws count as draws. The
 tables are not used in King of the Hill, where reaching the centre changes the result. A model
 trained with these options should be played with them.
 

@@ -95,6 +95,13 @@ pub fn wdl_to_value(wdl: Wdl) -> f32 {
 /// and `evaluate_models`: `--mate-in-1` gives a leaf whose side to move can
 /// mate in one its exact value, and `--syzygy <dir>` loads endgame tables that
 /// value the leaves they cover and end games that reach them.
+/// Why `ExactEndings::game_result` ended a game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    MateInOne,
+    Tablebase,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExactEndings {
     pub mate_in_1: bool,
@@ -128,6 +135,34 @@ impl ExactEndings {
             tablebase: self.tablebase.clone(),
             ..config
         }
+    }
+
+    /// The result from White's side (+1, 0 or −1) if a game at `board` should
+    /// end now: the side to move can mate in one, or the tables cover the
+    /// position (not in King of the Hill, where reaching the centre also wins).
+    pub fn game_result(
+        &self,
+        board: &Board,
+        move_gen: &crate::move_generation::MoveGen,
+        koth: bool,
+    ) -> Option<(f32, Ending)> {
+        let white = |v: f32| if board.w_to_move { v } else { -v };
+        if let Some(v) = self
+            .tablebase
+            .as_ref()
+            .filter(|_| !koth)
+            .and_then(|tb| tb.probe_value(board))
+        {
+            return Some((white(v), Ending::Tablebase));
+        }
+        if self.mate_in_1 {
+            let (score, _, _) =
+                crate::search::mate_search::mate_search(board, move_gen, 1, false, 0);
+            if score >= 1_000_000 {
+                return Some((white(1.0), Ending::MateInOne));
+            }
+        }
+        None
     }
 
     /// One line for a program's settings printout.

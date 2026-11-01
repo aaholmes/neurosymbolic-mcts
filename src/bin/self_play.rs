@@ -4,7 +4,7 @@
 //! for the neural network. It outputs binary files compatible with the Python training script.
 
 use kingfisher::boardstack::BoardStack;
-use kingfisher::egtb::ExactEndings;
+use kingfisher::egtb::{Ending, ExactEndings};
 use kingfisher::mcts::{
     qsearch_inputs, reuse_subtree, tactical_mcts_search_for_training_with_reuse, InferenceServer,
     QSearchVariant, TacticalMctsConfig,
@@ -229,10 +229,19 @@ fn main() {
             num_games
         );
     }
+    if exact.mate_in_1 {
+        println!(
+            "Games ended at a mate in one: {}/{}",
+            MATE_IN_ONE_ENDINGS.load(Ordering::Relaxed),
+            num_games
+        );
+    }
 }
 
 /// Games ended because they reached a position the endgame tables cover.
 static TABLEBASE_ENDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Games ended because the side to move could mate in one.
+static MATE_IN_ONE_ENDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 enum EarlyWinType {
@@ -293,16 +302,20 @@ fn play_game(
     loop {
         let board = board_stack.current_state().clone();
 
-        // A position the endgame tables cover ends the game with their result.
-        if let Some(score_white) = exact
-            .tablebase
-            .as_ref()
-            .filter(|_| !enable_koth)
-            .and_then(|tb| tb.adjudicate(&board))
-        {
+        // A mate in one, or a position the endgame tables cover, ends the game
+        // with its exact result.
+        if let Some((score_white, ending)) = exact.game_result(&board, &move_gen, enable_koth) {
             early_outcome = Some(score_white);
-            early_win_type = Some(EarlyWinType::Tablebase);
-            TABLEBASE_ENDINGS.fetch_add(1, Ordering::Relaxed);
+            early_win_type = Some(match ending {
+                Ending::MateInOne => {
+                    MATE_IN_ONE_ENDINGS.fetch_add(1, Ordering::Relaxed);
+                    EarlyWinType::Mate
+                }
+                Ending::Tablebase => {
+                    TABLEBASE_ENDINGS.fetch_add(1, Ordering::Relaxed);
+                    EarlyWinType::Tablebase
+                }
+            });
             break;
         }
 
