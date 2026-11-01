@@ -88,6 +88,7 @@ impl Conv {
     /// The same convolution for channels-last tensors, with its input channels
     /// padded with zero weights to `cin` and its outputs padded with zero filters
     /// (and zero bias) to `cout`.
+    #[cfg(feature = "cudnn")]
     fn to_channels_last(&self, cin: usize, cout: usize) -> Result<Self> {
         let pad = |t: &Tensor, dim: usize, to: usize| -> Result<Tensor> {
             let have = t.dim(dim)?;
@@ -107,6 +108,7 @@ impl Conv {
         })
     }
 
+    #[cfg(feature = "cudnn")]
     fn channels_last_as_is(&self) -> Result<Self> {
         let (cout, cin, _, _) = self.weight.dims4()?;
         self.to_channels_last(cin, cout)
@@ -278,6 +280,7 @@ impl ResBlock {
             .forward_with_residual(&out, &self.conv2.bias, x, self.conv2.channels_last)
     }
 
+    #[cfg(feature = "cudnn")]
     fn to_channels_last(&self) -> Result<Self> {
         Ok(Self {
             conv1: self.conv1.channels_last_as_is()?,
@@ -336,6 +339,7 @@ impl SeresNet {
     /// The same network computing in channels-last layout, with the start conv's
     /// input padded to `NHWC_CHANNELS` and the policy head to
     /// `POLICY_PLANES_PADDED` outputs.
+    #[cfg(feature = "cudnn")]
     fn to_channels_last(&self) -> Result<Self> {
         let h = self.config.hidden_dim;
         Ok(Self {
