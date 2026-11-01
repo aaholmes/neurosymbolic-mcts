@@ -825,3 +825,92 @@ fn a_quiet_move_budget_searches_fewer_positions_than_every_move() {
     assert!(!found);
     assert!(budget < every, "{budget} vs {every}");
 }
+
+// The search must give the same answer as a slow reference solver built on
+// plain legal-move lists, on positions from logged games extended by a few
+// random moves (as search leaves are), half of them with a mate in up to 3.
+
+const MATE_POSITIONS: &str = include_str!("../fixtures/mate_positions.fen");
+
+fn legal_moves(board: &Board, mg: &MoveGen) -> Vec<Move> {
+    let (captures, quiet) = mg.gen_pseudo_legal_moves(board);
+    captures
+        .into_iter()
+        .chain(quiet)
+        .filter(|m| board.apply_move_to_board(*m).is_legal(mg))
+        .collect()
+}
+
+/// The side to move mates in up to `n` moves, playing at most `quiet`
+/// non-checking moves on the way.
+fn reference_mate(board: &Board, mg: &MoveGen, n: i32, quiet: i32) -> bool {
+    if n == 0 {
+        return false;
+    }
+    legal_moves(board, mg).into_iter().any(|m| {
+        let next = board.apply_move_to_board(m);
+        let check = next.is_check(mg);
+        if !check && (quiet == 0 || n == 1) {
+            return false;
+        }
+        let replies = legal_moves(&next, mg);
+        if replies.is_empty() {
+            return check;
+        }
+        let left = if check { quiet } else { quiet - 1 };
+        n > 1
+            && replies
+                .iter()
+                .all(|r| reference_mate(&next.apply_move_to_board(*r), mg, n - 1, left))
+    })
+}
+
+#[test]
+fn the_mate_search_agrees_with_a_reference_solver_on_leaf_positions() {
+    let mg = MoveGen::new();
+    let boards: Vec<Board> = MATE_POSITIONS
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(Board::new_from_fen)
+        .collect();
+    assert!(boards.len() >= 100);
+    // (depth, exhaustive, quiet)
+    let settings = [
+        (1, 1, 0),
+        (3, 0, 0),
+        (2, 2, 0),
+        (2, 0, 1),
+        (3, 0, 1),
+        (3, 1, 0),
+    ];
+    for (depth, exhaustive, quiet) in settings {
+        let mut mates = 0;
+        for (i, b) in boards.iter().enumerate() {
+            let expected = reference_mate(b, &mg, depth, quiet)
+                || reference_mate(b, &mg, exhaustive, exhaustive);
+            let found = mate_search::has_forced_mate_quiet(b, &mg, depth, exhaustive, quiet).0;
+            assert_eq!(
+                found, expected,
+                "position {i} setting {depth},{exhaustive},{quiet}"
+            );
+            mates += found as usize;
+        }
+        // Enough positions on each side for the comparison to mean something.
+        assert!(
+            mates >= 10,
+            "{mates} mates for {depth},{exhaustive},{quiet}"
+        );
+        assert!(mates + 10 <= boards.len());
+    }
+}
+
+// Black has no mate in one: after Ra3+ every king move is covered, but Nf3,
+// Bc3 or Bg3 blocks. The black pawn on g2, diagonally behind the white king,
+// does not attack it and must not count as a second checker.
+#[test]
+fn a_pawn_behind_the_king_is_not_a_second_checker() {
+    let mg = MoveGen::new();
+    let board = Board::new_from_fen("r6k/8/8/8/6PP/7K/6p1/4BnNb b - - 0 1");
+    assert!(!mate_search::has_forced_mate(&board, &mg, 1, 1));
+    assert!(mate_search::mate_search(&board, &mg, 1, false, 1).0 < 1_000_000);
+}

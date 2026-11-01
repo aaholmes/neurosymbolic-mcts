@@ -332,6 +332,331 @@ impl MoveGen {
         self.gen_king_moves_into(board, captures, moves);
     }
 
+    /// Appends every pseudo-legal move that gives check to `out`: exactly the
+    /// moves `Board::gives_check` accepts, without generating the others.
+    ///
+    /// Direct checks are found by intersecting each piece's targets with the
+    /// squares from which that piece type attacks the enemy king. Moves by a
+    /// piece that may uncover a check from one of our sliders, promotions,
+    /// en passant and castling are rare, so those are generated and tested
+    /// with `gives_check`.
+    pub fn gen_checking_moves_into(&self, board: &Board, out: &mut Vec<Move>) {
+        let us = if board.w_to_move { WHITE } else { BLACK };
+        let them = 1 - us;
+        let their_king = board.pieces[them][KING];
+        if their_king == 0 {
+            return;
+        }
+        let ksq = their_king.trailing_zeros() as usize;
+        let occ = board.pieces_occ[WHITE] | board.pieces_occ[BLACK];
+        let own = board.pieces_occ[us];
+        let ours = &board.pieces[us];
+
+        // Our pieces that block one of our sliders from the king.
+        let mut uncovers = 0u64;
+        let rook_line = self.gen_rook_attacks_occ(ksq, occ);
+        let bishop_line = self.gen_bishop_attacks_occ(ksq, occ);
+        for (line, sliders, attacks) in [
+            (
+                rook_line,
+                ours[ROOK] | ours[QUEEN],
+                Self::gen_rook_attacks_occ as fn(&Self, usize, u64) -> u64,
+            ),
+            (
+                bishop_line,
+                ours[BISHOP] | ours[QUEEN],
+                Self::gen_bishop_attacks_occ,
+            ),
+        ] {
+            if sliders == 0 {
+                continue;
+            }
+            for sq in bits(&(line & own)) {
+                let bit = 1u64 << sq;
+                if attacks(self, ksq, occ & !bit) & sliders & !bit != 0 {
+                    uncovers |= bit;
+                }
+            }
+        }
+
+        let push_tested = |out: &mut Vec<Move>, from: usize, targets: u64| {
+            for to in bits(&targets) {
+                let m = Move::new(from, to, None);
+                if board.gives_check(m, self) {
+                    out.push(m);
+                }
+            }
+        };
+        let push_all = |out: &mut Vec<Move>, from: usize, targets: u64| {
+            for to in bits(&targets) {
+                out.push(Move::new(from, to, None));
+            }
+        };
+
+        // Knights, bishops, rooks and queens.
+        let knight_checks = self.n_move_bitboard[ksq];
+        for from in bits(&ours[KNIGHT]) {
+            let t = self.n_move_bitboard[from] & !own;
+            if uncovers & (1u64 << from) != 0 {
+                push_tested(out, from, t);
+            } else {
+                push_all(out, from, t & knight_checks);
+            }
+        }
+        for (piece, checks) in [
+            (BISHOP, bishop_line),
+            (ROOK, rook_line),
+            (QUEEN, bishop_line | rook_line),
+        ] {
+            for from in bits(&ours[piece]) {
+                let reach = match piece {
+                    BISHOP => self.gen_bishop_attacks_occ(from, occ),
+                    ROOK => self.gen_rook_attacks_occ(from, occ),
+                    _ => {
+                        self.gen_bishop_attacks_occ(from, occ)
+                            | self.gen_rook_attacks_occ(from, occ)
+                    }
+                };
+                let t = reach & !own;
+                if uncovers & (1u64 << from) != 0 {
+                    push_tested(out, from, t);
+                } else {
+                    push_all(out, from, t & checks);
+                }
+            }
+        }
+
+        // King: only uncovered checks, and castling (below).
+        for from in bits(&ours[KING]) {
+            if uncovers & (1u64 << from) != 0 {
+                push_tested(out, from, self.k_move_bitboard[from] & !own);
+            }
+        }
+
+        // Pawns not about to promote: pushes and ordinary captures.
+        let (last_rank, start_rank, pawn_checks) = if us == WHITE {
+            (
+                0xFF00_0000_0000_0000u64 >> 8,
+                0xFF00u64,
+                self.bp_capture_bitboard[ksq],
+            )
+        } else {
+            (
+                0xFF00u64,
+                0xFF00_0000_0000_0000u64 >> 8,
+                self.wp_capture_bitboard[ksq],
+            )
+        };
+        for from in bits(&(ours[PAWN] & !last_rank)) {
+            let (one, two, caps) = if us == WHITE {
+                (from + 8, from + 16, self.wp_capture_bitboard[from])
+            } else {
+                (
+                    from - 8,
+                    from.wrapping_sub(16),
+                    self.bp_capture_bitboard[from],
+                )
+            };
+            let mut t = caps & board.pieces_occ[them];
+            if occ & (1u64 << one) == 0 {
+                t |= 1u64 << one;
+                if (1u64 << from) & start_rank != 0 && occ & (1u64 << two) == 0 {
+                    t |= 1u64 << two;
+                }
+            }
+            if uncovers & (1u64 << from) != 0 {
+                push_tested(out, from, t);
+            } else {
+                push_all(out, from, t & pawn_checks);
+            }
+        }
+
+        // Promotions, en passant and castling, tested one by one.
+        let castling = &board.castling_rights;
+        let may_castle = if us == WHITE {
+            castling.white_kingside || castling.white_queenside
+        } else {
+            castling.black_kingside || castling.black_queenside
+        };
+        if ours[PAWN] & last_rank != 0 || board.en_passant.is_some() || may_castle {
+            let (mut captures, mut promotions, mut quiet) = (Vec::new(), Vec::new(), Vec::new());
+            if ours[PAWN] & last_rank != 0 || board.en_passant.is_some() {
+                self.gen_pawn_moves_into(board, &mut captures, &mut promotions, &mut quiet);
+            }
+            if may_castle {
+                self.gen_king_moves_into(board, &mut captures, &mut quiet);
+            }
+            let ep = board.en_passant.map(|e| e as usize);
+            for m in captures.into_iter().chain(promotions).chain(quiet) {
+                let special = m.promotion().is_some()
+                    || m.is_castle()
+                    || (Some(m.to()) == ep && ours[PAWN] & (1u64 << m.from()) != 0);
+                if special && board.gives_check(m, self) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+
+    /// Appends the candidate moves out of check for the side to move, which
+    /// must be in check: king steps, and with a single checker, moves that
+    /// capture it or land between it and the king. Filtered for legality,
+    /// they are exactly the legal moves. Castling is never legal in check.
+    /// Captures come first, then blocks, then king steps, pawns first within
+    /// each, so a refutation of a mating attempt tends to come early.
+    pub fn gen_evasions_into(&self, board: &Board, out: &mut Vec<Move>) {
+        self.visit_evasions(board, false, &mut |m| {
+            out.push(m);
+            false
+        });
+    }
+
+    /// True if the side to move, which must be in check, has a legal move.
+    /// Tests each candidate as it is generated, king steps first, and stops
+    /// at the first legal one.
+    pub fn has_legal_evasion(&self, board: &Board) -> bool {
+        self.visit_evasions(board, true, &mut |m| board.is_legal_after_move(m, self))
+    }
+
+    /// Calls `f` on each candidate move out of check until it returns true;
+    /// returns whether it did. King steps come first if `king_first`, last
+    /// otherwise.
+    fn visit_evasions(
+        &self,
+        board: &Board,
+        king_first: bool,
+        f: &mut impl FnMut(Move) -> bool,
+    ) -> bool {
+        let us = if board.w_to_move { WHITE } else { BLACK };
+        let them = 1 - us;
+        let ours = &board.pieces[us];
+        let theirs = &board.pieces[them];
+        let king = ours[KING];
+        if king == 0 {
+            return false;
+        }
+        let ksq = king.trailing_zeros() as usize;
+        let occ = board.pieces_occ[WHITE] | board.pieces_occ[BLACK];
+        let own = board.pieces_occ[us];
+        let king_steps = self.k_move_bitboard[ksq] & !own;
+        let each = |f: &mut dyn FnMut(Move) -> bool, from: usize, targets: u64| {
+            bits(&targets).any(|to| f(Move::new(from, to, None)))
+        };
+        let king_captures = king_steps & board.pieces_occ[them];
+        if king_first && each(f, ksq, king_steps) {
+            return true;
+        }
+
+        let rook_line = self.gen_rook_attacks_occ(ksq, occ);
+        let bishop_line = self.gen_bishop_attacks_occ(ksq, occ);
+        let pawn_attackers = if us == WHITE {
+            self.wp_capture_bitboard[ksq]
+        } else {
+            self.bp_capture_bitboard[ksq]
+        };
+        let rook_checkers = rook_line & (theirs[ROOK] | theirs[QUEEN]);
+        let bishop_checkers = bishop_line & (theirs[BISHOP] | theirs[QUEEN]);
+        let checkers = (self.n_move_bitboard[ksq] & theirs[KNIGHT])
+            | (pawn_attackers & theirs[PAWN])
+            | rook_checkers
+            | bishop_checkers;
+        if checkers.count_ones() == 1 {
+            let csq = checkers.trailing_zeros() as usize;
+            // The squares between the checker and the king.
+            let between = if rook_checkers != 0 {
+                rook_line & self.gen_rook_attacks_occ(csq, occ)
+            } else if bishop_checkers != 0 {
+                bishop_line & self.gen_bishop_attacks_occ(csq, occ)
+            } else {
+                0
+            };
+            let (last_rank, start_rank) = if us == WHITE {
+                (0x00FF_0000_0000_0000u64, 0xFF00u64)
+            } else {
+                (0xFF00u64, 0x00FF_0000_0000_0000u64)
+            };
+            let ep = board.en_passant.map(|e| e as usize);
+            let pawn_moves = |f: &mut dyn FnMut(Move) -> bool, from: usize, targets: u64| {
+                bits(&targets).any(|to| {
+                    if (1u64 << from) & last_rank != 0 {
+                        [QUEEN, ROOK, KNIGHT, BISHOP]
+                            .into_iter()
+                            .any(|p| f(Move::new(from, to, Some(p))))
+                    } else {
+                        f(Move::new(from, to, None))
+                    }
+                })
+            };
+            let reach = |piece: usize, from: usize| match piece {
+                KNIGHT => self.n_move_bitboard[from],
+                BISHOP => self.gen_bishop_attacks_occ(from, occ),
+                ROOK => self.gen_rook_attacks_occ(from, occ),
+                _ => self.gen_bishop_attacks_occ(from, occ) | self.gen_rook_attacks_occ(from, occ),
+            };
+
+            // Captures of the checker, en passant included.
+            for from in bits(&ours[PAWN]) {
+                let caps = if us == WHITE {
+                    self.wp_capture_bitboard[from]
+                } else {
+                    self.bp_capture_bitboard[from]
+                };
+                if pawn_moves(f, from, caps & checkers) {
+                    return true;
+                }
+                if let Some(e) = ep {
+                    let captured = if us == WHITE { e - 8 } else { e + 8 };
+                    if caps & (1u64 << e) != 0
+                        && (csq == captured || between & (1u64 << e) != 0)
+                        && f(Move::new(from, e, None))
+                    {
+                        return true;
+                    }
+                }
+            }
+            for piece in [KNIGHT, BISHOP, ROOK, QUEEN] {
+                for from in bits(&ours[piece]) {
+                    if each(f, from, reach(piece, from) & checkers) {
+                        return true;
+                    }
+                }
+            }
+            if !king_first && each(f, ksq, king_captures) {
+                return true;
+            }
+
+            // Blocks.
+            if between != 0 {
+                for from in bits(&ours[PAWN]) {
+                    let one = if us == WHITE { from + 8 } else { from - 8 };
+                    if occ & (1u64 << one) != 0 {
+                        continue;
+                    }
+                    let mut t = (1u64 << one) & between;
+                    if (1u64 << from) & start_rank != 0 {
+                        let two = if us == WHITE { from + 16 } else { from - 16 };
+                        if occ & (1u64 << two) == 0 {
+                            t |= (1u64 << two) & between;
+                        }
+                    }
+                    if pawn_moves(f, from, t) {
+                        return true;
+                    }
+                }
+                for piece in [KNIGHT, BISHOP, ROOK, QUEEN] {
+                    for from in bits(&ours[piece]) {
+                        if each(f, from, reach(piece, from) & between) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } else if !king_first && each(f, ksq, king_captures) {
+            return true;
+        }
+        !king_first && each(f, ksq, king_steps & !king_captures)
+    }
+
     /// Generates all pseudo-legal moves for a given position.
     ///
     /// This function generates all pseudo-legal moves for the given position,
@@ -574,25 +899,7 @@ impl MoveGen {
         }
     }
 
-    /// Generates moves for a knight on a specific square.
-    ///
-    /// This function generates moves for a knight on the given square, including
-    /// captures and non-captures.
-    ///
-    /// # Arguments
-    ///
-    /// * `board` - The current chess position.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing the capture moves and non-capture moves for the knight.
-    pub(crate) fn gen_knight_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
-        let (mut captures, mut moves) = (Vec::new(), Vec::new());
-        self.gen_knight_moves_into(board, &mut captures, &mut moves);
-        (captures, moves)
-    }
-
-    /// As `gen_knight_moves`, appending to the given vectors.
+    /// Appends the pseudo-legal knight moves: captures to `captures`, others to `moves`.
     pub(crate) fn gen_knight_moves_into(
         &self,
         board: &Board,
@@ -729,25 +1036,7 @@ impl MoveGen {
         }
     }
 
-    /// Generates moves for a rook on a specific square.
-    ///
-    /// This function generates moves for a rook on the given square, including
-    /// captures and non-captures.
-    ///
-    /// # Arguments
-    ///
-    /// * `board` - The current chess position.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing the capture moves and non-capture moves for the rook.
-    pub(crate) fn gen_rook_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
-        let (mut captures, mut moves) = (Vec::new(), Vec::new());
-        self.gen_rook_moves_into(board, &mut captures, &mut moves);
-        (captures, moves)
-    }
-
-    /// As `gen_rook_moves`, appending to the given vectors.
+    /// Appends the pseudo-legal rook moves: captures to `captures`, others to `moves`.
     pub(crate) fn gen_rook_moves_into(
         &self,
         board: &Board,
@@ -856,25 +1145,7 @@ impl MoveGen {
         self.r_move_bitboard[from_sq_ind][key]
     }
 
-    /// Generates moves for a bishop on a specific square.
-    ///
-    /// This function generates moves for a bishop on the given square, including
-    /// captures and non-captures.
-    ///
-    /// # Arguments
-    ///
-    /// * `board` - The current chess position.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing the capture moves and non-capture moves for the bishop.
-    pub(crate) fn gen_bishop_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
-        let (mut captures, mut moves) = (Vec::new(), Vec::new());
-        self.gen_bishop_moves_into(board, &mut captures, &mut moves);
-        (captures, moves)
-    }
-
-    /// As `gen_bishop_moves`, appending to the given vectors.
+    /// Appends the pseudo-legal bishop moves: captures to `captures`, others to `moves`.
     pub(crate) fn gen_bishop_moves_into(
         &self,
         board: &Board,
@@ -935,25 +1206,7 @@ impl MoveGen {
         }
     }
 
-    /// Generates moves for a queen on a specific square.
-    ///
-    /// This function generates moves for a queen on the given square, including
-    /// captures and non-captures.
-    ///
-    /// # Arguments
-    ///
-    /// * `board` - The current chess position.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing the capture moves and non-capture moves for the queen.
-    pub(crate) fn gen_queen_moves(&self, board: &Board) -> (Vec<Move>, Vec<Move>) {
-        let (mut captures, mut moves) = (Vec::new(), Vec::new());
-        self.gen_queen_moves_into(board, &mut captures, &mut moves);
-        (captures, moves)
-    }
-
-    /// As `gen_queen_moves`, appending to the given vectors.
+    /// Appends the pseudo-legal queen moves: captures to `captures`, others to `moves`.
     pub(crate) fn gen_queen_moves_into(
         &self,
         board: &Board,

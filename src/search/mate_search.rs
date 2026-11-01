@@ -49,7 +49,6 @@
 use crate::board::Board;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
-use crate::piece_types::{BISHOP, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
 
 /// Public API: Mate search with configurable exhaustive depth.
 ///
@@ -92,13 +91,48 @@ pub fn mate_search(
             let next_board = board.apply_move_to_board(*m);
 
             let quiet = if checks_only { 0 } else { EVERY_MOVE };
-            if solve_mate(&next_board, move_gen, depth - 1, false, quiet, &mut nodes) {
+            let found = with_ply_moves(depth, |lists| {
+                solve_mate(
+                    &next_board,
+                    move_gen,
+                    depth - 1,
+                    false,
+                    quiet,
+                    &mut nodes,
+                    lists,
+                )
+            });
+            if found {
                 return (1_000_000 + depth, *m, nodes);
             }
         }
     }
 
     (0, Move::null(), nodes)
+}
+
+/// Move lists for one ply, kept between searches so that no position allocates.
+#[derive(Default)]
+struct PlyMoves {
+    captures: Vec<Move>,
+    promotions: Vec<Move>,
+    quiet: Vec<Move>,
+}
+
+thread_local! {
+    static PLY_MOVES: std::cell::RefCell<Vec<PlyMoves>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Runs `f` with at least `plies` move lists for this thread.
+fn with_ply_moves<R>(plies: i32, f: impl FnOnce(&mut [PlyMoves]) -> R) -> R {
+    PLY_MOVES.with(|cell| {
+        let mut lists = cell.borrow_mut();
+        let plies = plies.max(1) as usize + 1;
+        if lists.len() < plies {
+            lists.resize_with(plies, PlyMoves::default);
+        }
+        f(&mut lists)
+    })
 }
 
 /// A quiet-move budget that never runs out: every legal attacker move is searched.
@@ -137,29 +171,33 @@ pub fn has_forced_mate_quiet(
 ) -> (bool, i32) {
     let mut nodes = 0;
     let exhaustive = exhaustive.min(depth);
-    // The search with fewer quiet moves first: usually the smaller tree.
-    if depth > exhaustive
-        && solve_mate(
-            board,
-            move_gen,
-            2 * depth - 1,
-            true,
-            quiet.max(0),
-            &mut nodes,
-        )
-    {
-        return (true, nodes);
-    }
-    let found = exhaustive > 0
-        && solve_mate(
-            board,
-            move_gen,
-            2 * exhaustive - 1,
-            true,
-            EVERY_MOVE,
-            &mut nodes,
-        );
-    (found, nodes)
+    with_ply_moves(2 * depth, |lists| {
+        // The search with fewer quiet moves first: usually the smaller tree.
+        if depth > exhaustive
+            && solve_mate(
+                board,
+                move_gen,
+                2 * depth - 1,
+                true,
+                quiet.max(0),
+                &mut nodes,
+                lists,
+            )
+        {
+            return (true, nodes);
+        }
+        let found = exhaustive > 0
+            && solve_mate(
+                board,
+                move_gen,
+                2 * exhaustive - 1,
+                true,
+                EVERY_MOVE,
+                &mut nodes,
+                lists,
+            );
+        (found, nodes)
+    })
 }
 
 /// Recursive pure minimax mate solver.
@@ -174,6 +212,7 @@ fn solve_mate(
     is_attackers_turn: bool,
     quiet: i32,
     nodes: &mut i32,
+    lists: &mut [PlyMoves],
 ) -> bool {
     *nodes += 1;
     // A limited budget is no use on the attacker's last move, which must mate
@@ -184,130 +223,50 @@ fn solve_mate(
         quiet
     };
 
-    // Depth 0: check for checkmate using batched per-piece generation with early abort.
-    // Generate moves by piece type in priority order, aborting as soon as any legal
-    // evasion is found. This avoids generating all moves for all piece types in the
-    // common case where a king move provides the evasion.
+    let (here, deeper) = lists.split_first_mut().expect("one move list per ply");
+    here.captures.clear();
+    here.promotions.clear();
+    here.quiet.clear();
+
+    // Depth 0: checkmate if no move out of check is legal.
     if depth <= 0 {
         // Unless every move is searched, the attacker's last move gave check,
         // so the defender is in check at depth 0. Skip the is_check() call.
         if quiet == EVERY_MOVE && !board.is_check(move_gen) {
-            return false; // Not in check = not checkmate
-        }
-
-        // 1. King moves (direct bitboard — no vectors, no castling since in check)
-        let stm = if board.w_to_move { WHITE } else { 1 };
-        let king_sq = board.pieces[stm][KING].trailing_zeros() as usize;
-        let friendly_occ = board.get_color_occupancy(stm);
-        let mut king_bits = move_gen.k_move_bitboard[king_sq] & !friendly_occ;
-        while king_bits != 0 {
-            let to_sq = king_bits.trailing_zeros() as usize;
-            king_bits &= king_bits - 1;
-            if board.is_legal_after_move(Move::new(king_sq, to_sq, None), move_gen) {
-                return false;
-            }
-        }
-
-        // 2. Double check detection — if 2+ pieces attack king, only king moves
-        //    work. Since king moves already failed above, it's checkmate.
-        let opp = 1 - stm;
-        let mut num_slider_attackers = 0u32;
-        if (move_gen.gen_bishop_potential_captures(board, king_sq)
-            & (board.pieces[opp][BISHOP] | board.pieces[opp][QUEEN]))
-            != 0
-        {
-            num_slider_attackers += 1;
-        }
-        if (move_gen.gen_rook_potential_captures(board, king_sq)
-            & (board.pieces[opp][ROOK] | board.pieces[opp][QUEEN]))
-            != 0
-        {
-            num_slider_attackers += 1;
-        }
-        if num_slider_attackers >= 2 {
-            return true; // Double slider check + no king escape = checkmate
-        }
-        if num_slider_attackers == 1 {
-            // Check if a knight or pawn also attacks → double check
-            let has_knight_attacker =
-                (move_gen.n_move_bitboard[king_sq] & board.pieces[opp][KNIGHT]) != 0;
-            if has_knight_attacker {
-                return true; // Slider + knight double check, no king escape
-            }
-            let pawn_attack_bb = if stm == WHITE {
-                move_gen.bp_capture_bitboard[king_sq]
-            } else {
-                move_gen.wp_capture_bitboard[king_sq]
-            };
-            if (pawn_attack_bb & board.pieces[opp][PAWN]) != 0 {
-                return true; // Slider + pawn double check, no king escape
-            }
-        }
-
-        // 3. Knight moves
-        let (caps, moves) = move_gen.gen_knight_moves(board);
-        if caps
-            .iter()
-            .chain(moves.iter())
-            .any(|m| board.is_legal_after_move(*m, move_gen))
-        {
             return false;
         }
-
-        // 4. Bishop moves
-        let (caps, moves) = move_gen.gen_bishop_moves(board);
-        if caps
-            .iter()
-            .chain(moves.iter())
-            .any(|m| board.is_legal_after_move(*m, move_gen))
-        {
-            return false;
-        }
-
-        // 5. Rook moves
-        let (caps, moves) = move_gen.gen_rook_moves(board);
-        if caps
-            .iter()
-            .chain(moves.iter())
-            .any(|m| board.is_legal_after_move(*m, move_gen))
-        {
-            return false;
-        }
-
-        // 6. Queen moves
-        let (caps, moves) = move_gen.gen_queen_moves(board);
-        if caps
-            .iter()
-            .chain(moves.iter())
-            .any(|m| board.is_legal_after_move(*m, move_gen))
-        {
-            return false;
-        }
-
-        // 7. Pawn moves (most complex generation, checked last)
-        let (caps, promos, moves) = move_gen.gen_pawn_moves(board);
-        if caps
-            .iter()
-            .chain(promos.iter())
-            .chain(moves.iter())
-            .any(|m| board.is_legal_after_move(*m, move_gen))
-        {
-            return false;
-        }
-
-        return true; // No legal moves = checkmate
+        return !move_gen.has_legal_evasion(board);
     }
 
-    let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
+    // With no quiet moves left, the attacker's moves are its checking moves.
+    let checks_only = is_attackers_turn && quiet == 0;
+    if checks_only {
+        move_gen.gen_checking_moves_into(board, &mut here.captures);
+    } else if !is_attackers_turn && board.is_check(move_gen) {
+        move_gen.gen_evasions_into(board, &mut here.captures);
+    } else {
+        move_gen.gen_all_moves_into(
+            board,
+            &mut here.captures,
+            &mut here.promotions,
+            &mut here.quiet,
+        );
+    }
     let mut has_legal_move = false;
 
-    for m in captures.iter().chain(moves.iter()) {
-        // On attacker turns with a limited budget: filter before legality/clone.
+    for m in here
+        .captures
+        .iter()
+        .chain(here.promotions.iter())
+        .chain(here.quiet.iter())
+    {
+        // A quiet move by the attacker uses up one of its quiet moves.
         let mut child_quiet = quiet;
-        if is_attackers_turn && quiet != EVERY_MOVE && !board.gives_check(*m, move_gen) {
-            if quiet == 0 {
-                continue;
-            }
+        if is_attackers_turn
+            && !checks_only
+            && quiet != EVERY_MOVE
+            && !board.gives_check(*m, move_gen)
+        {
             child_quiet = quiet - 1;
         }
 
@@ -325,6 +284,7 @@ fn solve_mate(
             !is_attackers_turn,
             child_quiet,
             nodes,
+            deeper,
         );
 
         if is_attackers_turn {
