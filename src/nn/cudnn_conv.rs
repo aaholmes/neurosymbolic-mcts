@@ -23,6 +23,7 @@ use candle_core::{
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 /// `conv2d(x, w)` with stride 1 and `padding` on each side, for `x: [B, Cin, H, W]`
@@ -256,9 +257,22 @@ impl Drop for RawHandle {
 
 type FusedKey = (usize, DType, [usize; 9]);
 
+// Each thread's handles, plans and workspaces live until the process exits: they
+// are left unreleased when the thread exits (see `Leaked`).
 thread_local! {
-    static RAW_HANDLES: RefCell<HashMap<usize, RawHandle>> = RefCell::new(HashMap::new());
-    static FUSED_PLANS: RefCell<HashMap<FusedKey, FusedPlan>> = RefCell::new(HashMap::new());
+    static RAW_HANDLES: Leaked<HashMap<usize, RawHandle>> = leaked();
+    static FUSED_PLANS: Leaked<HashMap<FusedKey, FusedPlan>> = leaked();
+}
+
+/// A thread-local cache that is never dropped. Releasing a cuDNN handle while
+/// another thread records a CUDA graph can invalidate that recording, and the
+/// release can itself fail and panic during thread teardown, which aborts the
+/// process. Inference threads exit only at shutdown, so nothing is lost by
+/// leaving their handles to the driver.
+type Leaked<T> = ManuallyDrop<RefCell<T>>;
+
+fn leaked<T: Default>() -> Leaked<T> {
+    ManuallyDrop::new(RefCell::new(T::default()))
 }
 
 fn raw_handle(sid: usize, stream: &CudaStream) -> Result<sys::cudnnHandle_t> {
@@ -266,6 +280,7 @@ fn raw_handle(sid: usize, stream: &CudaStream) -> Result<sys::cudnnHandle_t> {
         if let Some(h) = m.borrow().get(&sid) {
             return Ok(h.0);
         }
+        let _setup = crate::nn::cuda_setup_lock();
         let h = result::create_handle()?;
         // SAFETY: `h` is a fresh handle and the stream outlives this thread's use of it.
         unsafe { result::set_stream(h, stream.cu_stream() as _) }?;
@@ -490,9 +505,9 @@ struct Plan<T: CudnnDataType> {
 type Key = (usize, DType, [usize; 7]);
 
 thread_local! {
-    static HANDLES: RefCell<HashMap<usize, Arc<Cudnn>>> = RefCell::new(HashMap::new());
-    static PLANS: RefCell<HashMap<Key, Box<dyn Any>>> = RefCell::new(HashMap::new());
-    static WORKSPACES: RefCell<HashMap<usize, CudaSlice<u8>>> = RefCell::new(HashMap::new());
+    static HANDLES: Leaked<HashMap<usize, Arc<Cudnn>>> = leaked();
+    static PLANS: Leaked<HashMap<Key, Box<dyn Any>>> = leaked();
+    static WORKSPACES: Leaked<HashMap<usize, CudaSlice<u8>>> = leaked();
 }
 
 impl Conv {
@@ -527,6 +542,7 @@ impl Conv {
             if let Some(c) = m.borrow().get(&sid) {
                 return Ok(c.clone());
             }
+            let _setup = crate::nn::cuda_setup_lock();
             let c = Cudnn::new(stream.clone())?;
             m.borrow_mut().insert(sid, c.clone());
             Ok(c)

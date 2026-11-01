@@ -135,26 +135,35 @@ mod candle_impl {
 
     impl NeuralNetPolicy {
         pub fn new() -> Self {
-            Self::with_device(Device::cuda_if_available(0).unwrap_or(Device::Cpu))
+            #[cfg(feature = "cuda")]
+            let device = if candle_core::utils::cuda_is_available() {
+                crate::nn::cuda_device(0).unwrap_or_else(|e| {
+                    eprintln!("CUDA device unavailable, using the CPU: {e}");
+                    Device::Cpu
+                })
+            } else {
+                Device::Cpu
+            };
+            #[cfg(not(feature = "cuda"))]
+            let device = Device::Cpu;
+            Self::with_device(device)
         }
 
         /// A policy on its own CUDA stream (or the CPU without a GPU), so that
         /// several inference workers can overlap their GPU work.
         pub fn new_on_own_stream() -> Self {
+            // Each worker keeps all its tensors on its own stream.
+            #[cfg(feature = "cuda")]
             let device = if candle_core::utils::cuda_is_available() {
-                Device::new_cuda_with_stream(0).unwrap_or(Device::Cpu)
+                crate::nn::cuda_device_on_own_stream(0).unwrap_or_else(|e| {
+                    eprintln!("CUDA stream unavailable, using the CPU: {e}");
+                    Device::Cpu
+                })
             } else {
                 Device::Cpu
             };
-            #[cfg(feature = "cuda")]
-            if let Device::Cuda(dev) = &device {
-                // A second stream switches candle to recording and waiting on CUDA
-                // events around every tensor access (hundreds of calls per batch).
-                // Each worker keeps all its tensors on its own stream, so none are
-                // needed. The setting is per CUDA context, i.e. process-wide.
-                // SAFETY: no tensor is shared between streams.
-                unsafe { dev.disable_event_tracking() };
-            }
+            #[cfg(not(feature = "cuda"))]
+            let device = Device::Cpu;
             Self::with_device(device)
         }
 
@@ -189,9 +198,11 @@ mod candle_impl {
 
         /// Load weights. `path` may be a `.safetensors` or `.pth` state dict, or a
         /// TorchScript `.pt` with one of those next to it.
-        /// Computes in the precision named by KF_PRECISION (f32 when unset).
+        /// Computes in the precision named by KF_PRECISION, or when unset in
+        /// [`Precision::default_for`] this policy's device.
         pub fn load(&mut self, path: &str) -> Result<(), String> {
-            self.load_with_precision(path, Precision::from_env())
+            let precision = Precision::from_env_or(Precision::default_for(&self.device));
+            self.load_with_precision(path, precision)
         }
 
         /// As `load`, computing in `precision` (f16 and bf16 need CUDA).

@@ -341,6 +341,38 @@ fn precision_parses_its_names_and_rejects_others() {
     assert_eq!(Precision::default(), Precision::F32);
 }
 
+/// With KF_PRECISION unset, a network loads in f32 on the CPU, and in f16 on a
+/// CUDA device when cuDNN is compiled in (the fastest measured setting).
+#[test]
+fn the_precision_used_when_none_is_named_depends_on_the_device() {
+    use kingfisher::nn::Precision;
+    assert_eq!(Precision::default_for(&Device::Cpu), Precision::F32);
+    assert_eq!(
+        Precision::from_name_or(None, Precision::F16),
+        Precision::F16
+    );
+    assert_eq!(
+        Precision::from_name_or(Some("f32"), Precision::F16),
+        Precision::F32
+    );
+    #[cfg(feature = "cuda")]
+    {
+        let expected = if cfg!(feature = "cudnn") {
+            Precision::F16
+        } else {
+            Precision::F32
+        };
+        let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
+        assert_eq!(Precision::default_for(&dev), expected);
+    }
+}
+
+#[test]
+#[should_panic(expected = "KF_PRECISION")]
+fn an_unknown_precision_name_panics() {
+    kingfisher::nn::Precision::from_name_or(Some("fp8"), kingfisher::nn::Precision::F32);
+}
+
 #[test]
 fn half_precision_net_on_cpu_is_an_error() {
     use kingfisher::nn::Precision;
@@ -357,7 +389,7 @@ fn half_precision_net_on_cpu_is_an_error() {
 #[test]
 fn tiny_net_in_half_precision_matches_golden_outputs() {
     use kingfisher::nn::Precision;
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let io = io();
     for (p, tol) in [(Precision::F16, 2e-2), (Precision::Bf16, 5e-2)] {
         let sd = load_state_dict(&fixture("seresnet_tiny.safetensors"), &dev).unwrap();
@@ -479,7 +511,7 @@ fn predict_batch_records_wall_and_cpu_time_per_phase() {
 #[test]
 fn half_precision_net_on_gpu_is_channels_last() {
     use kingfisher::nn::Precision;
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let sd = || load_state_dict(&fixture("seresnet_tiny.safetensors"), &dev).unwrap();
     assert!(
         SeresNet::from_state_dict_with_precision(sd(), &dev, Precision::F16)
@@ -500,7 +532,7 @@ fn half_precision_net_on_gpu_is_channels_last() {
 fn channels_last_net_accepts_both_input_layouts() {
     use kingfisher::nn::Precision;
     use kingfisher::tensor::{planes_to_nhwc, NHWC_CHANNELS};
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let sd = load_state_dict(&fixture("seresnet_tiny.safetensors"), &dev).unwrap();
     let net = SeresNet::from_state_dict_with_precision(sd, &dev, Precision::F16).unwrap();
     let io = io();
@@ -524,7 +556,7 @@ fn channels_last_net_accepts_both_input_layouts() {
 #[test]
 fn policy_index_maps_every_move_index_to_its_logit() {
     use kingfisher::nn::Precision;
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let io = io();
     let (input, scalars) = (
         io["input"].to_device(&dev).unwrap(),

@@ -39,7 +39,7 @@ const SHAPES: [(usize, usize, usize); 4] = [(17, 128, 3), (128, 128, 3), (128, 7
 
 #[test]
 fn cached_conv_matches_candle_conv_in_every_precision() {
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     for (cin, cout, k) in SHAPES {
         let w = Tensor::randn(0f32, 0.1, (cout, cin, k, k), &dev).unwrap();
         // Batch sizes alternate, so cached descriptors must be keyed by batch.
@@ -66,7 +66,7 @@ fn cached_conv_matches_candle_conv_in_every_precision() {
 
 #[test]
 fn cached_conv_rejects_mismatched_channels() {
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let x = Tensor::zeros((2, 16, 8, 8), DType::F32, &dev).unwrap();
     let w = Tensor::zeros((8, 17, 3, 3), DType::F32, &dev).unwrap();
     assert!(conv2d(&x, &w, 1).is_err());
@@ -74,7 +74,7 @@ fn cached_conv_rejects_mismatched_channels() {
 
 #[test]
 fn fused_conv_bias_activation_matches_conv_then_bias_act() {
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     for (cin, cout, k) in SHAPES {
         let w = Tensor::randn(0f32, 0.1, (cout, cin, k, k), &dev).unwrap();
         let bias = Tensor::randn(0f32, 0.5, cout, &dev).unwrap();
@@ -103,7 +103,7 @@ fn fused_conv_bias_activation_matches_conv_then_bias_act() {
 
 #[test]
 fn fused_conv_rejects_a_bias_of_the_wrong_length() {
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let x = Tensor::zeros((2, 16, 8, 8), DType::F16, &dev).unwrap();
     let w = Tensor::zeros((8, 16, 3, 3), DType::F16, &dev).unwrap();
     let bias = Tensor::zeros(7, DType::F16, &dev).unwrap();
@@ -117,7 +117,7 @@ fn channels_last(t: &Tensor) -> Tensor {
 
 #[test]
 fn channels_last_convolutions_match_channels_first() {
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     // Plus the start conv with its input padded to 24 channels and the policy head
     // padded to 80 outputs, as the channels-last network uses them.
     let shapes = SHAPES.iter().copied().chain([(24, 128, 3), (128, 80, 1)]);

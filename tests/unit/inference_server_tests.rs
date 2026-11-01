@@ -330,6 +330,9 @@ mod with_model {
         assert_eq!(stats.iter().map(|s| s.positions).sum::<u64>(), 1);
     }
 
+    // With cuDNN, `load` records CUDA graphs, which is tested in
+    // tests/cuda_graph_tests.rs, in a process of its own.
+    #[cfg(not(feature = "cudnn"))]
     #[test]
     fn load_starts_the_requested_number_of_workers() {
         let path = concat!(
@@ -363,6 +366,7 @@ mod with_model {
         );
         assert!(o.pipeline);
         assert!(!o.full_policy);
+        assert!(o.cuda_graphs);
     }
 
     #[test]

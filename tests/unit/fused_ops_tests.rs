@@ -115,7 +115,7 @@ fn fused_ops_reject_mismatched_bias() {
 #[cfg(feature = "cuda")]
 #[test]
 fn fused_ops_match_unfused_on_gpu() {
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     // The GPU may contract multiply-add into one rounding, so allow a few ulps.
     check_all(&dev, 1e-5);
 }
@@ -129,7 +129,7 @@ fn tiny_net_on_gpu_matches_pytorch_golden_outputs() {
     use std::path::Path;
 
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let sd = load_state_dict(&fixtures.join("seresnet_tiny.safetensors"), &dev).unwrap();
     let net = SeresNet::from_state_dict(sd, &dev).unwrap();
     let io = candle_core::safetensors::load(fixtures.join("seresnet_tiny_io.safetensors"), &dev)
@@ -164,7 +164,7 @@ fn rel_diff(a: &Tensor, b: &Tensor) -> f32 {
 #[test]
 fn fused_ops_in_half_precision_match_f32_on_gpu() {
     use candle_core::DType;
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let (x, bias, gate, res) = inputs(&dev);
     for (dtype, tol) in [(DType::F16, 2e-3), (DType::BF16, 2e-2)] {
         let h = |t: &Tensor| t.to_dtype(dtype).unwrap();
@@ -200,7 +200,7 @@ fn fused_ops_reject_half_precision_on_cpu() {
 fn channels_last_kernels_match_channels_first_on_permuted_input() {
     use candle_core::DType;
     use kingfisher::nn::fused::{bias_act_nhwc, channel_mean_bias_nhwc, se_tail_nhwc};
-    let dev = Device::new_cuda(0).expect("CUDA device");
+    let dev = kingfisher::nn::cuda_device(0).expect("CUDA device");
     let nhwc = |t: &Tensor| t.permute((0, 2, 3, 1)).unwrap().contiguous().unwrap();
     for c in [20, 128] {
         let x = Tensor::randn(0f32, 1., (3, c, 8, 8), &dev).unwrap();

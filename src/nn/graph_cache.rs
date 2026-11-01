@@ -74,6 +74,9 @@ mod gpu {
             let b = planes.dim(0)?;
             let size = bucket(b, self.cap);
             if !self.entries.contains_key(&size) {
+                // No other thread may create a stream or a cuDNN handle while
+                // this one warms up and records: either makes the recording fail.
+                let _setup = crate::nn::cuda_setup_lock();
                 if !self.warmed {
                     let top = bucket(self.cap, self.cap);
                     let (p, s) = zeros(top, planes.device())?;
@@ -89,6 +92,24 @@ mod gpu {
             e.graph.launch().map_err(candle_core::Error::wrap)?;
             Ok((e.logits.narrow(0, 0, b)?, e.value.narrow(0, 0, b)?.copy()?))
         }
+    }
+
+    /// Record `run` on `stream` as a graph and upload it.
+    fn capture(
+        stream: &std::sync::Arc<candle_core::cuda::cudarc::driver::CudaStream>,
+        run: &dyn Fn() -> Result<()>,
+    ) -> Result<CudaGraph> {
+        stream
+            .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
+            .map_err(candle_core::Error::wrap)?;
+        let captured = run();
+        let graph = stream.end_capture(sys::CUgraphInstantiate_flags(0));
+        captured?;
+        let graph = graph
+            .map_err(candle_core::Error::wrap)?
+            .ok_or_else(|| candle_core::Error::Msg("CUDA graph capture recorded nothing".into()))?;
+        graph.upload().map_err(candle_core::Error::wrap)?;
+        Ok(graph)
     }
 
     fn zeros(b: usize, dev: &Device) -> Result<(Tensor, Tensor)> {
@@ -121,16 +142,7 @@ mod gpu {
             run()?;
         }
         stream.synchronize().map_err(candle_core::Error::wrap)?;
-        stream
-            .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
-            .map_err(candle_core::Error::wrap)?;
-        let captured = run();
-        let graph = stream.end_capture(sys::CUgraphInstantiate_flags(0));
-        captured?;
-        let graph = graph
-            .map_err(candle_core::Error::wrap)?
-            .ok_or_else(|| candle_core::Error::Msg("CUDA graph capture recorded nothing".into()))?;
-        graph.upload().map_err(candle_core::Error::wrap)?;
+        let graph = capture(&stream, &run)?;
         Ok(Entry {
             graph,
             planes,

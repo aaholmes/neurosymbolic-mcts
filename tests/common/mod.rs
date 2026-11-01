@@ -1,5 +1,4 @@
 /// Shared test utilities for Kingfisher test suite
-
 use kingfisher::board::Board;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
@@ -33,7 +32,11 @@ pub fn assert_approx_eq(a: f64, b: f64, epsilon: f64, context: &str) {
     assert!(
         (a - b).abs() < epsilon,
         "{}: expected {} ≈ {}, difference {} exceeds epsilon {}",
-        context, a, b, (a - b).abs(), epsilon
+        context,
+        a,
+        b,
+        (a - b).abs(),
+        epsilon
     );
 }
 
@@ -42,7 +45,8 @@ pub fn assert_in_tanh_domain(v: f64, context: &str) {
     assert!(
         v >= -1.0 && v <= 1.0,
         "{}: value {} outside tanh domain [-1, 1]",
-        context, v
+        context,
+        v
     );
 }
 
@@ -56,11 +60,11 @@ pub mod positions {
     pub const EN_PASSANT: &str = "8/8/8/pP6/8/8/8/K6k w - a6 0 1";
     pub const CASTLING_BOTH: &str = "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1";
     pub const PROMOTION: &str = "8/P7/8/8/8/8/8/K6k w - - 0 1";
-    
+
     // Tactical positions
     pub const WINNING_CAPTURE: &str = "8/8/8/3q4/4N3/8/8/K6k w - - 0 1"; // Nxd5 wins queen
     pub const FORK_AVAILABLE: &str = "r3k2r/8/8/8/3N4/8/8/K7 w - - 0 1"; // Nc6 forks rooks
-    
+
     // Material evaluation positions
     pub const EQUAL_MATERIAL: &str = "4k3/8/8/8/8/8/8/4K3 w - - 0 1";
     pub const WHITE_UP_QUEEN: &str = "4k3/8/8/3Q4/8/8/8/4K3 w - - 0 1";

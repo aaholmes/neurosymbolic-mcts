@@ -63,7 +63,7 @@ pub struct ServerOptions {
     /// Logical CPUs to pin each worker thread to (None: leave it unpinned).
     pub inference_cpus: Option<Vec<usize>>,
     /// Replay each batch's forward pass as a recorded CUDA graph (half precision
-    /// on CUDA, legal-move priors only).
+    /// on CUDA, legal-move priors only; other setups run eagerly). On by default.
     pub cuda_graphs: bool,
 }
 
@@ -74,7 +74,7 @@ impl Default for ServerOptions {
             pipeline: true,
             full_policy: false,
             inference_cpus: None,
-            cuda_graphs: false,
+            cuda_graphs: true,
         }
     }
 }
