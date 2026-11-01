@@ -1281,7 +1281,7 @@ class TestEloTracking:
 
 
 class TestExactEndings:
-    """--mate-in-1 and --syzygy-path reach both self-play and evaluation games."""
+    """Mate search and --syzygy-path settings reach both self-play and evaluation games."""
 
     def _make_orch(self, tmp_workspace, **overrides):
         cfg = TrainingConfig(
@@ -1304,30 +1304,41 @@ class TestExactEndings:
             orch.run_evaluation("candidate.pt")
         return [c.args[0] for c in run.call_args_list]
 
-    def test_off_by_default(self, tmp_workspace):
+    def test_checking_mates_in_five_by_default_and_no_tables(self, tmp_workspace):
         cfg = TrainingConfig()
-        assert cfg.mate_in_1 is False
+        assert (cfg.mate_in, cfg.mate_checks, cfg.mate_quiet) == (0, 5, 0)
         assert cfg.syzygy_path == ""
         for cmd in self._commands(self._make_orch(tmp_workspace)):
-            assert "--mate-in-1" not in cmd
+            i = cmd.index("--mate-checks")
+            assert cmd[i + 1] == "5"
             assert "--syzygy" not in cmd
+            assert "--mate-quiet" not in cmd
+
+    def test_mate_search_off(self, tmp_workspace):
+        orch = self._make_orch(tmp_workspace, mate_checks=0)
+        for cmd in self._commands(orch):
+            assert "--no-mate-search" in cmd
+            assert "--mate-checks" not in cmd
 
     def test_read_from_the_command_line(self):
-        argv = ["orchestrate.py", "--mate-in-1", "--syzygy-path", "/data/syzygy"]
+        argv = ["orchestrate.py", "--mate-in", "2", "--mate-checks", "6",
+                "--mate-quiet", "1", "--syzygy-path", "/data/syzygy"]
         with patch("sys.argv", argv):
             cfg = TrainingConfig.from_args()
-        assert cfg.mate_in_1 is True
+        assert (cfg.mate_in, cfg.mate_checks, cfg.mate_quiet) == (2, 6, 1)
         assert cfg.syzygy_path == "/data/syzygy"
+        with patch("sys.argv", ["orchestrate.py", "--mate-in-1"]):
+            assert TrainingConfig.from_args().mate_in == 1
 
     def test_passed_to_self_play_and_evaluation(self, tmp_workspace):
-        orch = self._make_orch(tmp_workspace, mate_in_1=True, syzygy_path="/data/syzygy")
+        orch = self._make_orch(tmp_workspace, mate_in=2, mate_checks=6, mate_quiet=1,
+                               syzygy_path="/data/syzygy")
         cmds = self._commands(orch)
         assert len(cmds) == 2
         for cmd in cmds:
-            assert "--mate-in-1" in cmd
-            i = cmd.index("--syzygy")
-            assert cmd[i + 1] == "/data/syzygy"
-
+            for flag, value in [("--mate-in", "2"), ("--mate-checks", "6"),
+                                ("--mate-quiet", "1"), ("--syzygy", "/data/syzygy")]:
+                assert cmd[cmd.index(flag) + 1] == value
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

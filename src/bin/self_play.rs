@@ -229,10 +229,10 @@ fn main() {
             num_games
         );
     }
-    if exact.mate_in_1 {
+    if exact.mate.is_on() {
         println!(
-            "Games ended at a mate in one: {}/{}",
-            MATE_IN_ONE_ENDINGS.load(Ordering::Relaxed),
+            "Games ended at a forced mate: {}/{}",
+            MATE_ENDINGS.load(Ordering::Relaxed),
             num_games
         );
     }
@@ -240,8 +240,8 @@ fn main() {
 
 /// Games ended because they reached a position the endgame tables cover.
 static TABLEBASE_ENDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// Games ended because the side to move could mate in one.
-static MATE_IN_ONE_ENDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Games ended because the side to move had a forced mate the search finds.
+static MATE_ENDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 enum EarlyWinType {
@@ -302,13 +302,13 @@ fn play_game(
     loop {
         let board = board_stack.current_state().clone();
 
-        // A mate in one, or a position the endgame tables cover, ends the game
+        // A forced mate the search finds, or a position the endgame tables cover, ends the game
         // with its exact result.
         if let Some((score_white, ending)) = exact.game_result(&board, &move_gen, enable_koth) {
             early_outcome = Some(score_white);
             early_win_type = Some(match ending {
-                Ending::MateInOne => {
-                    MATE_IN_ONE_ENDINGS.fetch_add(1, Ordering::Relaxed);
+                Ending::Mate => {
+                    MATE_ENDINGS.fetch_add(1, Ordering::Relaxed);
                     EarlyWinType::Mate
                 }
                 Ending::Tablebase => {

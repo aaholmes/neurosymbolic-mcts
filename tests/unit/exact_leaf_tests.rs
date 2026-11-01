@@ -4,12 +4,13 @@
 //! always searched, so a move is always returned.
 
 use kingfisher::board::Board;
-use kingfisher::egtb::Tablebase;
+use kingfisher::egtb::{MateSearch, Tablebase};
 use kingfisher::mcts::tactical_mcts::{
     reuse_subtree, tactical_mcts_search, tactical_mcts_search_for_training_with_reuse,
     TacticalMctsConfig,
 };
 use kingfisher::move_generation::MoveGen;
+use kingfisher::search::mate_search::mate_search;
 use kingfisher::transposition::TranspositionTable;
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ fn tables() -> Option<Tablebase> {
 #[test]
 fn exact_leaf_values_are_off_by_default() {
     let c = TacticalMctsConfig::default();
-    assert!(!c.leaf_mate_in_1);
+    assert_eq!(c.leaf_mate, MateSearch::OFF);
     assert!(c.tablebase.is_none());
 }
 
@@ -46,7 +47,7 @@ fn with_mate_in_one_on_a_root_with_a_mate_in_one_is_searched_and_mates() {
     let mg = MoveGen::new();
     let board = Board::new_from_fen("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1");
     let config = TacticalMctsConfig {
-        leaf_mate_in_1: true,
+        leaf_mate: MateSearch::exhaustive(1),
         ..vanilla(100)
     };
     let (best, _, root) = tactical_mcts_search(board, &mg, config);
@@ -62,7 +63,11 @@ fn with_mate_in_one_on_moves_that_allow_a_mate_in_one_are_proven_losses() {
     let fen = "r5k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 1";
     let run = |on: bool| {
         let config = TacticalMctsConfig {
-            leaf_mate_in_1: on,
+            leaf_mate: if on {
+                MateSearch::exhaustive(1)
+            } else {
+                MateSearch::OFF
+            },
             ..vanilla(400)
         };
         tactical_mcts_search(Board::new_from_fen(fen), &mg, config)
@@ -153,7 +158,7 @@ fn a_reused_root_the_tables_solved_is_searched_again() {
     let mut tt = TranspositionTable::new();
     let config = TacticalMctsConfig {
         tablebase: Some(tb),
-        leaf_mate_in_1: true,
+        leaf_mate: MateSearch::exhaustive(1),
         ..vanilla(60)
     };
     let board = Board::new_from_fen("8/8/8/8/8/2k5/8/R3K3 w - - 0 1");
@@ -175,4 +180,50 @@ fn a_reused_root_the_tables_solved_is_searched_again() {
         &mut tt,
     );
     assert!(second.best_move.is_some());
+}
+
+/// 1. Kb6 Kb8 2. Rh8# is a mate in two for White that starts with a quiet
+/// move. With a mate-in-two search at leaves, positions where White has such a
+/// mate get the exact value +1, and the search keeps a forced win.
+#[test]
+fn a_mate_in_two_search_at_leaves_gives_a_quiet_mating_line_its_exact_value() {
+    let mg = MoveGen::new();
+    let fen = "k7/8/2K5/8/8/8/8/7R w - - 0 1";
+    let config = TacticalMctsConfig {
+        leaf_mate: MateSearch::exhaustive(2),
+        ..vanilla(200)
+    };
+    let (best, stats, root) = tactical_mcts_search(Board::new_from_fen(fen), &mg, config);
+    assert!(stats.exact_leaf_values > 0);
+    let kb6 = root
+        .borrow()
+        .children
+        .iter()
+        .find(|c| c.borrow().action.unwrap().to_uci() == "c6b6")
+        .cloned()
+        .unwrap();
+    assert!(kb6.borrow().visits > 0);
+    // The move chosen keeps a forced win: every reply leaves White a mate in
+    // two. (A mate in three, such as Ra1+, counts.)
+    let after = Board::new_from_fen(fen).apply_move_to_board(best.unwrap());
+    let (caps, quiets) = mg.gen_pseudo_legal_moves(&after);
+    let replies: Vec<_> = caps
+        .iter()
+        .chain(quiets.iter())
+        .filter(|&&m| after.is_legal_after_move(m, &mg))
+        .collect();
+    assert!(
+        !replies.is_empty(),
+        "{} is not stalemate",
+        best.unwrap().to_uci()
+    );
+    for &&r in &replies {
+        let (score, _, _) = mate_search(&after.apply_move_to_board(r), &mg, 2, false, 2);
+        assert!(
+            score >= 1_000_000,
+            "{} then {} is not mate in two",
+            best.unwrap().to_uci(),
+            r.to_uci()
+        );
+    }
 }

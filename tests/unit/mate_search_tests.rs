@@ -706,3 +706,122 @@ fn test_single_check_all_pieces_fail_is_checkmate() {
     assert!(score >= 1_000_000, "Back-rank mate should be found");
     assert_eq!(best_move.to(), 60, "Re8#");
 }
+
+// `has_forced_mate` answers only whether the side to move can force mate, so
+// it runs one search at the full depth instead of deepening move by move.
+
+const MATE_TEST_FENS: &[&str] = &[
+    "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", // Re8#
+    "7k/5ppp/8/5Q2/8/8/8/6K1 w - - 0 1",  // queen mates
+    "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4", // Qxf7#
+    "4r1k1/8/8/8/8/8/5PPP/6K1 b - - 0 1", // Re1#
+    "k7/1R6/K7/8/8/8/8/8 b - - 0 1",      // stalemate
+    "7k/R7/5K2/8/8/8/8/8 w - - 0 1",      // quiet mate in two
+    "k7/8/2K5/8/8/8/8/7R w - - 0 1",      // 1. Kb6 Kb8 2. Rh8#
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+    "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+    "8/8/8/8/8/5k2/8/4K2R w - - 0 1",
+    "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3", // already mated
+    "r5k1/5ppp/8/8/8/8/5PPP/6K1 b - - 0 1",                          // Ra1#
+    "2r3k1/5ppp/8/8/8/8/1Q3PPP/6K1 w - - 0 1",
+];
+
+#[test]
+fn has_forced_mate_agrees_with_mate_search_for_every_depth_and_mode() {
+    let mg = MoveGen::new();
+    for fen in MATE_TEST_FENS {
+        let board = Board::new_from_fen(fen);
+        for depth in 1..=4 {
+            for exhaustive in 0..=depth.min(3) {
+                let expected =
+                    mate_search::mate_search(&board, &mg, depth, false, exhaustive).0 >= 1_000_000;
+                assert_eq!(
+                    mate_search::has_forced_mate(&board, &mg, depth, exhaustive),
+                    expected,
+                    "{fen} depth {depth} exhaustive {exhaustive}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn has_forced_mate_finds_a_shorter_mate_with_a_deeper_search() {
+    let mg = MoveGen::new();
+    let board = Board::new_from_fen("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1");
+    assert!(mate_search::has_forced_mate(&board, &mg, 3, 3));
+    assert!(mate_search::has_forced_mate(&board, &mg, 5, 0));
+}
+
+#[test]
+fn has_forced_mate_needs_every_move_for_a_quiet_first_move() {
+    let mg = MoveGen::new();
+    let board = Board::new_from_fen("k7/8/2K5/8/8/8/8/7R w - - 0 1");
+    assert!(!mate_search::has_forced_mate(&board, &mg, 1, 1));
+    assert!(mate_search::has_forced_mate(&board, &mg, 2, 2));
+    assert!(!mate_search::has_forced_mate(&board, &mg, 4, 1));
+    assert!(!mate_search::has_forced_mate(&board, &mg, 0, 0));
+}
+
+#[test]
+fn has_forced_mate_searches_fewer_positions_than_deepening() {
+    let mg = MoveGen::new();
+    let board =
+        Board::new_from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4");
+    let deepening = mate_search::mate_search(&board, &mg, 3, false, 2).2;
+    let (found, nodes) = mate_search::has_forced_mate_counting(&board, &mg, 3, 2);
+    assert!(!found);
+    assert!(nodes < deepening, "{nodes} vs {deepening}");
+}
+
+// A budget of quiet (non-checking) attacker moves per line sits between
+// checking moves only (no budget) and every move (a budget of depth − 1, since
+// the mating move itself always gives check).
+
+#[test]
+fn a_quiet_move_budget_spans_checks_only_to_every_move() {
+    let mg = MoveGen::new();
+    for fen in MATE_TEST_FENS {
+        let board = Board::new_from_fen(fen);
+        for depth in 1..=4 {
+            let with = |quiet| mate_search::has_forced_mate_quiet(&board, &mg, depth, 0, quiet).0;
+            assert_eq!(
+                with(0),
+                mate_search::has_forced_mate(&board, &mg, depth, 0),
+                "{fen} depth {depth} no quiet moves"
+            );
+            assert_eq!(
+                with(depth - 1),
+                mate_search::has_forced_mate(&board, &mg, depth, depth),
+                "{fen} depth {depth} every move"
+            );
+            for quiet in 1..depth {
+                assert!(
+                    with(quiet) >= with(quiet - 1),
+                    "{fen} depth {depth} quiet {quiet}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn one_quiet_move_finds_a_mate_in_two_that_starts_quietly() {
+    let mg = MoveGen::new();
+    let board = Board::new_from_fen("k7/8/2K5/8/8/8/8/7R w - - 0 1");
+    assert!(mate_search::has_forced_mate_quiet(&board, &mg, 2, 0, 1).0);
+    assert!(mate_search::has_forced_mate_quiet(&board, &mg, 3, 0, 1).0);
+    assert!(!mate_search::has_forced_mate_quiet(&board, &mg, 2, 0, 0).0);
+}
+
+#[test]
+fn a_quiet_move_budget_searches_fewer_positions_than_every_move() {
+    let mg = MoveGen::new();
+    let board =
+        Board::new_from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4");
+    let (_, every) = mate_search::has_forced_mate_quiet(&board, &mg, 3, 3, 0);
+    let (found, budget) = mate_search::has_forced_mate_quiet(&board, &mg, 3, 0, 1);
+    assert!(!found);
+    assert!(budget < every, "{budget} vs {every}");
+}

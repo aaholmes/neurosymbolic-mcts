@@ -91,20 +91,75 @@ pub fn mate_search(
 
             let next_board = board.apply_move_to_board(*m);
 
-            if solve_mate(
-                &next_board,
-                move_gen,
-                depth - 1,
-                false,
-                checks_only,
-                &mut nodes,
-            ) {
+            let quiet = if checks_only { 0 } else { EVERY_MOVE };
+            if solve_mate(&next_board, move_gen, depth - 1, false, quiet, &mut nodes) {
                 return (1_000_000 + depth, *m, nodes);
             }
         }
     }
 
     (0, Move::null(), nodes)
+}
+
+/// A quiet-move budget that never runs out: every legal attacker move is searched.
+const EVERY_MOVE: i32 = i32::MAX;
+
+/// True if the side to move can force mate: in up to `exhaustive` moves
+/// searching every legal move, or in up to `depth` moves playing checking
+/// moves only. Unlike `mate_search` it neither finds the move nor the
+/// shortest mate, so it runs at most two searches at full depth instead of
+/// one per depth. A deeper search still finds shorter mates, because a
+/// defender with no legal move while in check is mated.
+pub fn has_forced_mate(board: &Board, move_gen: &MoveGen, depth: i32, exhaustive: i32) -> bool {
+    has_forced_mate_counting(board, move_gen, depth, exhaustive).0
+}
+
+/// `has_forced_mate`, with the number of positions searched.
+pub fn has_forced_mate_counting(
+    board: &Board,
+    move_gen: &MoveGen,
+    depth: i32,
+    exhaustive: i32,
+) -> (bool, i32) {
+    has_forced_mate_quiet(board, move_gen, depth, exhaustive, 0)
+}
+
+/// `has_forced_mate_counting`, except that the search to `depth` may also
+/// play up to `quiet` non-checking attacker moves in each line. 0 is checking
+/// moves only; `depth − 1` or more is every move, since the mating move
+/// always gives check.
+pub fn has_forced_mate_quiet(
+    board: &Board,
+    move_gen: &MoveGen,
+    depth: i32,
+    exhaustive: i32,
+    quiet: i32,
+) -> (bool, i32) {
+    let mut nodes = 0;
+    let exhaustive = exhaustive.min(depth);
+    // The search with fewer quiet moves first: usually the smaller tree.
+    if depth > exhaustive
+        && solve_mate(
+            board,
+            move_gen,
+            2 * depth - 1,
+            true,
+            quiet.max(0),
+            &mut nodes,
+        )
+    {
+        return (true, nodes);
+    }
+    let found = exhaustive > 0
+        && solve_mate(
+            board,
+            move_gen,
+            2 * exhaustive - 1,
+            true,
+            EVERY_MOVE,
+            &mut nodes,
+        );
+    (found, nodes)
 }
 
 /// Recursive pure minimax mate solver.
@@ -117,19 +172,26 @@ fn solve_mate(
     move_gen: &MoveGen,
     depth: i32,
     is_attackers_turn: bool,
-    checks_only: bool,
+    quiet: i32,
     nodes: &mut i32,
 ) -> bool {
     *nodes += 1;
+    // A limited budget is no use on the attacker's last move, which must mate
+    // and so give check.
+    let quiet = if quiet != EVERY_MOVE && is_attackers_turn && depth == 1 {
+        0
+    } else {
+        quiet
+    };
 
     // Depth 0: check for checkmate using batched per-piece generation with early abort.
     // Generate moves by piece type in priority order, aborting as soon as any legal
     // evasion is found. This avoids generating all moves for all piece types in the
     // common case where a king move provides the evasion.
     if depth <= 0 {
-        // In checks_only mode, the attacker only plays checking moves, so the
-        // defender is always in check at depth 0. Skip the is_check() call.
-        if !checks_only && !board.is_check(move_gen) {
+        // Unless every move is searched, the attacker's last move gave check,
+        // so the defender is in check at depth 0. Skip the is_check() call.
+        if quiet == EVERY_MOVE && !board.is_check(move_gen) {
             return false; // Not in check = not checkmate
         }
 
@@ -240,9 +302,13 @@ fn solve_mate(
     let mut has_legal_move = false;
 
     for m in captures.iter().chain(moves.iter()) {
-        // On attacker turns with checks_only: filter before legality/clone
-        if is_attackers_turn && checks_only && !board.gives_check(*m, move_gen) {
-            continue;
+        // On attacker turns with a limited budget: filter before legality/clone.
+        let mut child_quiet = quiet;
+        if is_attackers_turn && quiet != EVERY_MOVE && !board.gives_check(*m, move_gen) {
+            if quiet == 0 {
+                continue;
+            }
+            child_quiet = quiet - 1;
         }
 
         if !board.is_legal_after_move(*m, move_gen) {
@@ -257,7 +323,7 @@ fn solve_mate(
             move_gen,
             depth - 1,
             !is_attackers_turn,
-            checks_only,
+            child_quiet,
             nodes,
         );
 
@@ -275,11 +341,12 @@ fn solve_mate(
 
     // No legal moves found
     if !has_legal_move {
-        if is_attackers_turn && checks_only {
-            // No checking moves available — non-checking moves may exist
+        if is_attackers_turn {
+            // No checking move (checks only), or the attacker is mated or
+            // stalemated: either way no mate for the attacker.
             return false;
         }
-        // Truly no legal moves: checkmate or stalemate
+        // The defender has no legal move: checkmate or stalemate
         return board.is_check(move_gen); // true = checkmate, false = stalemate
     }
 

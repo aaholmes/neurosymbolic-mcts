@@ -91,26 +91,100 @@ pub fn wdl_to_value(wdl: Wdl) -> f32 {
     }
 }
 
-/// Exact results used without the tiers, from the command line of `self_play`
-/// and `evaluate_models`: `--mate-in-1` gives a leaf whose side to move can
-/// mate in one its exact value, and `--syzygy <dir>` loads endgame tables that
-/// value the leaves they cover and end games that reach them.
 /// Why `ExactEndings::game_result` ended a game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ending {
-    MateInOne,
+    Mate,
     Tablebase,
+}
+
+/// How far to look for a forced mate by the side to move: mates in up to
+/// `exhaustive` moves are searched over every legal move, and longer ones,
+/// up to `depth`, over checking moves plus at most `quiet` non-checking
+/// attacker moves per line. Mate in one is complete either way, since every
+/// mating move gives check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MateSearch {
+    pub depth: i32,
+    pub exhaustive: i32,
+    pub quiet: i32,
+}
+
+impl MateSearch {
+    pub const OFF: Self = Self {
+        depth: 0,
+        exhaustive: 0,
+        quiet: 0,
+    };
+
+    /// The command-line default: checking moves only, mates in up to five.
+    pub const DEFAULT: Self = Self::checks(5);
+
+    /// Every legal move searched, for mates in up to `n`.
+    pub const fn exhaustive(n: i32) -> Self {
+        Self {
+            depth: n,
+            exhaustive: n,
+            quiet: 0,
+        }
+    }
+
+    /// Checking moves only, for mates in up to `n`.
+    pub const fn checks(n: i32) -> Self {
+        Self {
+            depth: n,
+            exhaustive: 0,
+            quiet: 0,
+        }
+    }
+
+    pub fn is_on(self) -> bool {
+        self.depth > 0
+    }
+
+    /// True if the side to move at `board` has a mate this search finds.
+    pub fn finds_mate(self, board: &Board, move_gen: &crate::move_generation::MoveGen) -> bool {
+        self.is_on() && self.search(board, move_gen).0
+    }
+
+    /// Whether this search finds a mate, and the number of positions searched.
+    pub fn search(self, board: &Board, move_gen: &crate::move_generation::MoveGen) -> (bool, i32) {
+        crate::search::mate_search::has_forced_mate_quiet(
+            board,
+            move_gen,
+            self.depth,
+            self.exhaustive,
+            self.quiet,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ExactEndings {
-    pub mate_in_1: bool,
+    pub mate: MateSearch,
     pub tablebase: Option<Tablebase>,
 }
 
+/// The number after `flag` in `args`, if the flag is there.
+fn number_after(args: &[String], flag: &str) -> Result<Option<i32>, String> {
+    match args.iter().position(|a| a == flag) {
+        None => Ok(None),
+        Some(i) => args
+            .get(i + 1)
+            .and_then(|v| v.parse().ok())
+            .map(Some)
+            .ok_or_else(|| format!("{flag} needs a number of moves")),
+    }
+}
+
 impl ExactEndings {
-    /// From `args` (the program's arguments). An error if `--syzygy` has no
-    /// directory or the directory holds no tables.
+    /// From `args` (the program's arguments): `--mate-in N` searches every
+    /// move for mates in up to N (`--mate-in-1` is `--mate-in 1`),
+    /// `--mate-checks N` checking moves only up to N, `--mate-quiet M` allows
+    /// M quiet moves per line in that search, and `--no-mate-search` turns it
+    /// off. With none of these, `MateSearch::DEFAULT`. `--syzygy DIR` loads
+    /// the tables. An error if a number or directory is missing, or the
+    /// directory holds no tables.
     pub fn from_args(args: &[String]) -> Result<Self, String> {
         let tablebase = match args.iter().position(|a| a == "--syzygy") {
             Some(i) => {
@@ -119,10 +193,29 @@ impl ExactEndings {
             }
             None => None,
         };
-        Ok(Self {
-            mate_in_1: args.iter().any(|a| a == "--mate-in-1"),
-            tablebase,
-        })
+        let has = |flag: &str| args.iter().any(|a| a == flag);
+        let quiet = number_after(args, "--mate-quiet")?.unwrap_or(0);
+        let mut exhaustive = number_after(args, "--mate-in")?;
+        if has("--mate-in-1") {
+            exhaustive = Some(exhaustive.unwrap_or(0).max(1));
+        }
+        let checks = number_after(args, "--mate-checks")?;
+        let mate = if has("--no-mate-search") {
+            MateSearch::OFF
+        } else if exhaustive.is_none() && checks.is_none() {
+            MateSearch {
+                quiet,
+                ..MateSearch::DEFAULT
+            }
+        } else {
+            let exhaustive = exhaustive.unwrap_or(0);
+            MateSearch {
+                depth: exhaustive.max(checks.unwrap_or(0)),
+                exhaustive,
+                quiet,
+            }
+        };
+        Ok(Self { mate, tablebase })
     }
 
     /// `config` with these options set.
@@ -131,14 +224,14 @@ impl ExactEndings {
         config: crate::mcts::tactical_mcts::TacticalMctsConfig,
     ) -> crate::mcts::tactical_mcts::TacticalMctsConfig {
         crate::mcts::tactical_mcts::TacticalMctsConfig {
-            leaf_mate_in_1: self.mate_in_1,
+            leaf_mate: self.mate,
             tablebase: self.tablebase.clone(),
             ..config
         }
     }
 
     /// The result from White's side (+1, 0 or −1) if a game at `board` should
-    /// end now: the side to move can mate in one, or the tables cover the
+    /// end now: the side to move has a mate `self.mate` finds, or the tables cover the
     /// position (not in King of the Hill, where reaching the centre also wins).
     pub fn game_result(
         &self,
@@ -155,12 +248,8 @@ impl ExactEndings {
         {
             return Some((white(v), Ending::Tablebase));
         }
-        if self.mate_in_1 {
-            let (score, _, _) =
-                crate::search::mate_search::mate_search(board, move_gen, 1, false, 0);
-            if score >= 1_000_000 {
-                return Some((white(1.0), Ending::MateInOne));
-            }
+        if self.mate.finds_mate(board, move_gen) {
+            return Some((white(1.0), Ending::Mate));
         }
         None
     }
@@ -168,8 +257,28 @@ impl ExactEndings {
     /// One line for a program's settings printout.
     pub fn describe(&self) -> String {
         format!(
-            "mate in one {}, tablebase {}",
-            if self.mate_in_1 { "on" } else { "off" },
+            "mate search {}, tablebase {}",
+            match self.mate {
+                MateSearch { depth: 0, .. } => "off".to_string(),
+                MateSearch {
+                    depth, exhaustive, ..
+                } if depth == exhaustive => format!("every move to mate in {depth}"),
+                MateSearch {
+                    depth,
+                    exhaustive,
+                    quiet,
+                } => {
+                    let mut d = format!("checking moves to mate in {depth}");
+                    if quiet > 0 {
+                        let s = if quiet == 1 { "" } else { "s" };
+                        d += &format!(" with {quiet} quiet move{s} per line");
+                    }
+                    if exhaustive > 0 {
+                        d += &format!(", every move to mate in {exhaustive}");
+                    }
+                    d
+                }
+            },
             match &self.tablebase {
                 Some(t) => format!("up to {} pieces", t.max_pieces()),
                 None => "off".into(),

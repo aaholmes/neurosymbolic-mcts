@@ -31,9 +31,14 @@ class TrainingConfig:
     enable_material_value: bool = True
     qsearch_variant: str = "extended"  # pe, cap1, or extended
     log_games: str = "first"
-    # Exact endings, usable with the tiers off: leaves with a mate in one, and
-    # positions in Syzygy tables (which also end games), get exact values.
-    mate_in_1: bool = False
+    # Exact endings: positions with a forced mate the search below finds, and
+    # positions in Syzygy tables, end games, and get exact values at leaves
+    # when the tiers are off. Every move is searched for mates in up to
+    # mate_in, checking moves plus mate_quiet quiet moves per line for mates in
+    # up to mate_checks; both 0 turns the search off.
+    mate_in: int = 0
+    mate_checks: int = 5
+    mate_quiet: int = 0
     syzygy_path: str = ""
 
     # Replay buffer (sliding window — old data evicted FIFO)
@@ -121,8 +126,14 @@ class TrainingConfig:
                             help="Disable Tier 1 safety gates (mate search + KOTH)")
         parser.add_argument("--disable-material", action="store_true",
                             help="Disable material value integration (pure AlphaZero)")
+        parser.add_argument("--mate-in", type=int, default=0,
+                            help="Search every move for mates in up to N (default 0)")
         parser.add_argument("--mate-in-1", action="store_true",
-                            help="Give leaves whose side to move can mate in one their exact value")
+                            help="Same as --mate-in 1")
+        parser.add_argument("--mate-checks", type=int, default=5,
+                            help="Search checking moves for mates in up to N (default 5; 0 with --mate-in 0 turns the mate search off)")
+        parser.add_argument("--mate-quiet", type=int, default=0,
+                            help="Quiet moves allowed per line in the --mate-checks search (default 0)")
         parser.add_argument("--syzygy-path", type=str, default="",
                             help="Directory of Syzygy WDL tables: covered positions get exact values and end games")
         parser.add_argument("--qsearch", type=str, default="extended",
@@ -160,7 +171,9 @@ class TrainingConfig:
             enable_tier1=not args.disable_tier1,
             enable_material_value=not args.disable_material,
             qsearch_variant=args.qsearch,
-            mate_in_1=args.mate_in_1,
+            mate_in=max(args.mate_in, 1 if args.mate_in_1 else 0),
+            mate_checks=args.mate_checks,
+            mate_quiet=args.mate_quiet,
             syzygy_path=args.syzygy_path,
             buffer_capacity=args.buffer_capacity,
             buffer_dir=args.buffer_dir,
@@ -388,8 +401,14 @@ class Orchestrator:
         return sims
 
     def _exact_ending_args(self):
-        """The Rust flags for mate in one and Syzygy tables, for both kinds of games."""
-        args = ["--mate-in-1"] if self.config.mate_in_1 else []
+        """The Rust flags for the mate search and Syzygy tables, for both kinds of games."""
+        c = self.config
+        if c.mate_in <= 0 and c.mate_checks <= 0:
+            args = ["--no-mate-search"]
+        else:
+            args = ["--mate-in", str(c.mate_in), "--mate-checks", str(c.mate_checks)]
+            if c.mate_quiet > 0:
+                args += ["--mate-quiet", str(c.mate_quiet)]
         if self.config.syzygy_path:
             args += ["--syzygy", self.config.syzygy_path]
         return args

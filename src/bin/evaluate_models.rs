@@ -292,7 +292,7 @@ pub fn play_evaluation_game_with_servers(
 
     let mut candidate_samples: Vec<TrainingSample> = Vec::new();
     let mut current_samples: Vec<TrainingSample> = Vec::new();
-    // White's result, if the game reached a mate in one or a position the
+    // White's result, if the game reached a forced mate or a position the
     // endgame tables cover
     let mut exact_end: Option<(f32, Ending)> = None;
 
@@ -430,10 +430,10 @@ pub fn play_evaluation_game_with_servers(
     let (result, result_str) = if let Some((v, ending)) = exact_end {
         let candidate_score = if candidate_is_white { v } else { -v };
         match (ending, candidate_score) {
-            (Ending::MateInOne, c) if c > 0.0 => {
-                (GameResult::CandidateWin, "Candidate wins (mate in one)")
+            (Ending::Mate, c) if c > 0.0 => {
+                (GameResult::CandidateWin, "Candidate wins (forced mate)")
             }
-            (Ending::MateInOne, _) => (GameResult::CurrentWin, "Current wins (mate in one)"),
+            (Ending::Mate, _) => (GameResult::CurrentWin, "Current wins (forced mate)"),
             (_, c) if c > 0.0 => (GameResult::CandidateWin, "Candidate wins (tablebase)"),
             (_, c) if c < 0.0 => (GameResult::CurrentWin, "Current wins (tablebase)"),
             _ => (GameResult::Draw, "Draw (tablebase)"),
@@ -900,7 +900,7 @@ fn parse_arg_f64(args: &[String], flag: &str, default: f64) -> f64 {
 
 /// Leaves per MCTS iteration for each side, set once from the command line in main.
 static CANDIDATE_LEAVES: AtomicU32 = AtomicU32::new(1);
-/// Set once from --mate-in-1 and --syzygy in main; off when unset (as in tests).
+/// Set once from the mate search flags and --syzygy in main; off when unset (as in tests).
 static EXACT: std::sync::OnceLock<ExactEndings> = std::sync::OnceLock::new();
 
 fn exact_endings() -> ExactEndings {
