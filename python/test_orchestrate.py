@@ -1280,6 +1280,55 @@ class TestEloTracking:
         assert orch.state.model_elos == {"0": 0.0}
 
 
+class TestExactEndings:
+    """--mate-in-1 and --syzygy-path reach both self-play and evaluation games."""
+
+    def _make_orch(self, tmp_workspace, **overrides):
+        cfg = TrainingConfig(
+            weights_dir=os.path.join(tmp_workspace, "weights"),
+            data_dir=os.path.join(tmp_workspace, "data"),
+            buffer_dir=os.path.join(tmp_workspace, "buffer"),
+            log_file=os.path.join(tmp_workspace, "log.jsonl"),
+            **overrides,
+        )
+        return Orchestrator(cfg)
+
+    def _commands(self, orch):
+        """The self-play and evaluation commands the orchestrator would run."""
+        orch.state.current_best_pt = "current.pt"
+        result = MagicMock(stdout="WINS=0 LOSSES=0 DRAWS=1 WINRATE=0.5 ACCEPTED=false "
+                                  "GAMES_PLAYED=1 LLR=0.0 SPRT_RESULT=inconclusive\n",
+                           stderr="", returncode=0)
+        with patch("subprocess.run", return_value=result) as run:
+            orch.run_self_play(1)
+            orch.run_evaluation("candidate.pt")
+        return [c.args[0] for c in run.call_args_list]
+
+    def test_off_by_default(self, tmp_workspace):
+        cfg = TrainingConfig()
+        assert cfg.mate_in_1 is False
+        assert cfg.syzygy_path == ""
+        for cmd in self._commands(self._make_orch(tmp_workspace)):
+            assert "--mate-in-1" not in cmd
+            assert "--syzygy" not in cmd
+
+    def test_read_from_the_command_line(self):
+        argv = ["orchestrate.py", "--mate-in-1", "--syzygy-path", "/data/syzygy"]
+        with patch("sys.argv", argv):
+            cfg = TrainingConfig.from_args()
+        assert cfg.mate_in_1 is True
+        assert cfg.syzygy_path == "/data/syzygy"
+
+    def test_passed_to_self_play_and_evaluation(self, tmp_workspace):
+        orch = self._make_orch(tmp_workspace, mate_in_1=True, syzygy_path="/data/syzygy")
+        cmds = self._commands(orch)
+        assert len(cmds) == 2
+        for cmd in cmds:
+            assert "--mate-in-1" in cmd
+            i = cmd.index("--syzygy")
+            assert cmd[i + 1] == "/data/syzygy"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

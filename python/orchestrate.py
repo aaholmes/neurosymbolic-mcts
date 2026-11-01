@@ -31,6 +31,10 @@ class TrainingConfig:
     enable_material_value: bool = True
     qsearch_variant: str = "extended"  # pe, cap1, or extended
     log_games: str = "first"
+    # Exact endings, usable with the tiers off: leaves with a mate in one, and
+    # positions in Syzygy tables (which also end games), get exact values.
+    mate_in_1: bool = False
+    syzygy_path: str = ""
 
     # Replay buffer (sliding window — old data evicted FIFO)
     buffer_capacity: int = 100_000
@@ -117,6 +121,10 @@ class TrainingConfig:
                             help="Disable Tier 1 safety gates (mate search + KOTH)")
         parser.add_argument("--disable-material", action="store_true",
                             help="Disable material value integration (pure AlphaZero)")
+        parser.add_argument("--mate-in-1", action="store_true",
+                            help="Give leaves whose side to move can mate in one their exact value")
+        parser.add_argument("--syzygy-path", type=str, default="",
+                            help="Directory of Syzygy WDL tables: covered positions get exact values and end games")
         parser.add_argument("--qsearch", type=str, default="extended",
                             choices=["pe", "cap1", "extended"],
                             help="Q-search variant: pe (principal exchange), cap1, extended (default)")
@@ -152,6 +160,8 @@ class TrainingConfig:
             enable_tier1=not args.disable_tier1,
             enable_material_value=not args.disable_material,
             qsearch_variant=args.qsearch,
+            mate_in_1=args.mate_in_1,
+            syzygy_path=args.syzygy_path,
             buffer_capacity=args.buffer_capacity,
             buffer_dir=args.buffer_dir,
             minibatches_per_generation=args.minibatches_per_gen,
@@ -377,6 +387,13 @@ class Orchestrator:
                 break
         return sims
 
+    def _exact_ending_args(self):
+        """The Rust flags for mate in one and Syzygy tables, for both kinds of games."""
+        args = ["--mate-in-1"] if self.config.mate_in_1 else []
+        if self.config.syzygy_path:
+            args += ["--syzygy", self.config.syzygy_path]
+        return args
+
     def run_self_play(self, generation):
         """Run self-play games and return the output directory."""
         data_dir = os.path.join(self.config.data_dir, f"gen_{generation}")
@@ -426,6 +443,7 @@ class Orchestrator:
             cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
             if self.config.qsearch_variant != "extended":
                 cmd.extend(["--qsearch", self.config.qsearch_variant])
+            cmd.extend(self._exact_ending_args())
 
             print(f"Self-play: {self.config.games_per_generation} games, "
                   f"{sims} sims, "
@@ -706,6 +724,7 @@ class Orchestrator:
                 cmd.append("--disable-material")
             if self.config.qsearch_variant != "extended":
                 cmd.extend(["--qsearch", self.config.qsearch_variant])
+            cmd.extend(self._exact_ending_args())
             cmd.extend(["--batch-size", str(self.config.inference_batch_size)])
             cmd.extend(["--inference-workers", str(self.config.inference_workers)])
             cmd.extend(["--explore-base", str(self.config.eval_explore_base)])

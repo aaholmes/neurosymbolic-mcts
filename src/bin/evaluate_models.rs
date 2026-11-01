@@ -6,6 +6,7 @@
 //! Usage: evaluate_models <candidate.pt> <current.pt> <num_games> <simulations> [--threshold 0.55]
 
 use kingfisher::boardstack::BoardStack;
+use kingfisher::egtb::ExactEndings;
 use kingfisher::eval::PestoEval;
 use kingfisher::mcts::sprt::{SprtConfig, SprtResult, SprtState};
 use kingfisher::mcts::{
@@ -242,7 +243,8 @@ pub fn play_evaluation_game_with_servers(
     let candidate_has_nn = candidate_server.is_some();
     let current_has_nn = current_server.is_some();
 
-    let config_candidate = TacticalMctsConfig {
+    let exact = exact_endings();
+    let config_candidate = exact.apply(TacticalMctsConfig {
         max_iterations: simulations,
         time_limit: Duration::from_secs(120),
         mate_search_depth: if candidate_enable_tier1 { 5 } else { 0 },
@@ -260,9 +262,9 @@ pub fn play_evaluation_game_with_servers(
         qsearch_variant,
         leaves_per_iteration: CANDIDATE_LEAVES.load(Ordering::Relaxed),
         ..Default::default()
-    };
+    });
 
-    let config_current = TacticalMctsConfig {
+    let config_current = exact.apply(TacticalMctsConfig {
         max_iterations: simulations,
         time_limit: Duration::from_secs(120),
         mate_search_depth: if current_enable_tier1 { 5 } else { 0 },
@@ -280,7 +282,7 @@ pub fn play_evaluation_game_with_servers(
         qsearch_variant,
         leaves_per_iteration: CURRENT_LEAVES.load(Ordering::Relaxed),
         ..Default::default()
-    };
+    });
 
     let mut board_stack = BoardStack::new();
     let mut move_count = 0;
@@ -290,10 +292,19 @@ pub fn play_evaluation_game_with_servers(
 
     let mut candidate_samples: Vec<TrainingSample> = Vec::new();
     let mut current_samples: Vec<TrainingSample> = Vec::new();
+    // White's result, if the game reached a position the endgame tables cover
+    let mut tablebase_score_white: Option<f32> = None;
 
     loop {
         let board = board_stack.current_state().clone();
         let white_to_move = board.w_to_move;
+
+        if let Some(tb) = exact.tablebase.as_ref().filter(|_| !enable_koth) {
+            tablebase_score_white = tb.adjudicate(&board);
+            if tablebase_score_white.is_some() {
+                break;
+            }
+        }
 
         let candidate_turn =
             (white_to_move && candidate_is_white) || (!white_to_move && !candidate_is_white);
@@ -417,7 +428,16 @@ pub fn play_evaluation_game_with_servers(
         (false, false)
     };
 
-    let (result, result_str) = if koth_white || koth_black {
+    let (result, result_str) = if let Some(v) = tablebase_score_white {
+        let candidate_score = if candidate_is_white { v } else { -v };
+        if candidate_score > 0.0 {
+            (GameResult::CandidateWin, "Candidate wins (tablebase)")
+        } else if candidate_score < 0.0 {
+            (GameResult::CurrentWin, "Current wins (tablebase)")
+        } else {
+            (GameResult::Draw, "Draw (tablebase)")
+        }
+    } else if koth_white || koth_black {
         let white_wins = koth_white;
         let r = if (white_wins && candidate_is_white) || (!white_wins && !candidate_is_white) {
             GameResult::CandidateWin
@@ -455,7 +475,9 @@ pub fn play_evaluation_game_with_servers(
 
     // Backfill value targets: +1 for white win, -1 for black win, 0 for draw
     if collect_training_data {
-        let final_score_white = if koth_white {
+        let final_score_white = if let Some(v) = tablebase_score_white {
+            v
+        } else if koth_white {
             1.0f32
         } else if koth_black {
             -1.0
@@ -877,6 +899,12 @@ fn parse_arg_f64(args: &[String], flag: &str, default: f64) -> f64 {
 
 /// Leaves per MCTS iteration for each side, set once from the command line in main.
 static CANDIDATE_LEAVES: AtomicU32 = AtomicU32::new(1);
+/// Set once from --mate-in-1 and --syzygy in main; off when unset (as in tests).
+static EXACT: std::sync::OnceLock<ExactEndings> = std::sync::OnceLock::new();
+
+fn exact_endings() -> ExactEndings {
+    EXACT.get().cloned().unwrap_or_default()
+}
 static CURRENT_LEAVES: AtomicU32 = AtomicU32::new(1);
 
 fn main() {
@@ -941,6 +969,14 @@ fn main() {
     };
     CANDIDATE_LEAVES.store(leaves("--candidate-leaves"), Ordering::Relaxed);
     CURRENT_LEAVES.store(leaves("--current-leaves"), Ordering::Relaxed);
+
+    // Both sides use the same exact endings, as in their training.
+    let exact = ExactEndings::from_args(&args).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
+    eprintln!("Exact endings: {}", exact.describe());
+    EXACT.set(exact).expect("set once");
 
     // Inference workers per model, each on its own CUDA stream
     let inference_workers: usize = args

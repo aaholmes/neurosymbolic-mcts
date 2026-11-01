@@ -90,3 +90,55 @@ pub fn wdl_to_value(wdl: Wdl) -> f32 {
         Wdl::CursedWin | Wdl::Draw | Wdl::BlessedLoss => 0.0,
     }
 }
+
+/// Exact results used without the tiers, from the command line of `self_play`
+/// and `evaluate_models`: `--mate-in-1` gives a leaf whose side to move can
+/// mate in one its exact value, and `--syzygy <dir>` loads endgame tables that
+/// value the leaves they cover and end games that reach them.
+#[derive(Debug, Clone, Default)]
+pub struct ExactEndings {
+    pub mate_in_1: bool,
+    pub tablebase: Option<Tablebase>,
+}
+
+impl ExactEndings {
+    /// From `args` (the program's arguments). An error if `--syzygy` has no
+    /// directory or the directory holds no tables.
+    pub fn from_args(args: &[String]) -> Result<Self, String> {
+        let tablebase = match args.iter().position(|a| a == "--syzygy") {
+            Some(i) => {
+                let dir = args.get(i + 1).ok_or("--syzygy needs a directory")?;
+                Some(Tablebase::open(dir)?)
+            }
+            None => None,
+        };
+        Ok(Self {
+            mate_in_1: args.iter().any(|a| a == "--mate-in-1"),
+            tablebase,
+        })
+    }
+
+    /// `config` with these options set.
+    pub fn apply(
+        &self,
+        config: crate::mcts::tactical_mcts::TacticalMctsConfig,
+    ) -> crate::mcts::tactical_mcts::TacticalMctsConfig {
+        crate::mcts::tactical_mcts::TacticalMctsConfig {
+            leaf_mate_in_1: self.mate_in_1,
+            tablebase: self.tablebase.clone(),
+            ..config
+        }
+    }
+
+    /// One line for a program's settings printout.
+    pub fn describe(&self) -> String {
+        format!(
+            "mate in one {}, tablebase {}",
+            if self.mate_in_1 { "on" } else { "off" },
+            match &self.tablebase {
+                Some(t) => format!("up to {} pieces", t.max_pieces()),
+                None => "off".into(),
+            }
+        )
+    }
+}

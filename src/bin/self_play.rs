@@ -4,6 +4,7 @@
 //! for the neural network. It outputs binary files compatible with the Python training script.
 
 use kingfisher::boardstack::BoardStack;
+use kingfisher::egtb::ExactEndings;
 use kingfisher::mcts::{
     qsearch_inputs, reuse_subtree, tactical_mcts_search_for_training_with_reuse, InferenceServer,
     QSearchVariant, TacticalMctsConfig,
@@ -124,6 +125,11 @@ fn main() {
         .and_then(|v| QSearchVariant::from_str(v))
         .unwrap_or(QSearchVariant::Extended);
 
+    let exact = ExactEndings::from_args(&args).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
+
     println!("Self-Play Generator Starting...");
     println!("   Games: {}", num_games);
     println!("   Simulations/Move: {}", simulations);
@@ -133,6 +139,7 @@ fn main() {
     println!("   Tier1 Gate: {}", enable_tier1);
     println!("   Material Value: {}", enable_material);
     println!("   Q-Search: {}", qsearch_variant.name());
+    println!("   Exact Endings: {}", exact.describe());
     println!("   Log Games: {}", log_games);
     println!("   Inference Batch Size: {}", inference_batch_size);
     println!("   Explore Base: {}", explore_base);
@@ -191,6 +198,7 @@ fn main() {
             verbose,
             explore_base,
             qsearch_variant,
+            &exact,
         );
 
         if !samples.is_empty() {
@@ -214,12 +222,23 @@ fn main() {
             }
         }
     });
+    if exact.tablebase.is_some() {
+        println!(
+            "Games ended at a tablebase position: {}/{}",
+            TABLEBASE_ENDINGS.load(Ordering::Relaxed),
+            num_games
+        );
+    }
 }
+
+/// Games ended because they reached a position the endgame tables cover.
+static TABLEBASE_ENDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 enum EarlyWinType {
     Mate,
     Koth,
+    Tablebase,
 }
 
 fn play_game(
@@ -233,6 +252,7 @@ fn play_game(
     verbose: bool,
     explore_base: f64,
     qsearch_variant: QSearchVariant,
+    exact: &ExactEndings,
 ) -> Vec<TrainingSample> {
     let mut rng = StdRng::seed_from_u64(seed);
     let move_gen = MoveGen::new();
@@ -241,7 +261,7 @@ fn play_game(
     let has_nn = inference_server.is_some();
 
     // Shared config and transposition table across moves (Phase 2/3 optimization)
-    let config = TacticalMctsConfig {
+    let config = exact.apply(TacticalMctsConfig {
         max_iterations: simulations,
         time_limit: Duration::from_secs(60),
         mate_search_depth: if enable_tier1 { 5 } else { 0 },
@@ -259,7 +279,7 @@ fn play_game(
         qsearch_variant,
         leaves_per_iteration: LEAVES_PER_GAME.load(Ordering::Relaxed),
         ..Default::default()
-    };
+    });
     let mut transposition_table = TranspositionTable::new();
 
     // Use BoardStack for repetition and 50-move detection (Phase 3)
@@ -272,6 +292,19 @@ fn play_game(
 
     loop {
         let board = board_stack.current_state().clone();
+
+        // A position the endgame tables cover ends the game with their result.
+        if let Some(score_white) = exact
+            .tablebase
+            .as_ref()
+            .filter(|_| !enable_koth)
+            .and_then(|tb| tb.adjudicate(&board))
+        {
+            early_outcome = Some(score_white);
+            early_win_type = Some(EarlyWinType::Tablebase);
+            TABLEBASE_ENDINGS.fetch_add(1, Ordering::Relaxed);
+            break;
+        }
 
         // --- Tier 1 pre-checks: skip MCTS for positions resolved by safety gates ---
         // Check both KOTH and mate, pick the fastest forced win (fewest plies).
@@ -531,7 +564,7 @@ fn play_game(
                         }
                     }
                 }
-                None => {}
+                Some(EarlyWinType::Tablebase) | None => {}
             }
             playout_stack = Some(temp_stack);
         }
@@ -564,10 +597,13 @@ fn play_game(
                 }
             } else {
                 // Play-out didn't reach terminal — fall back to gate info
-                if final_score_white > 0.0 {
-                    "White wins (Tier1)"
-                } else {
-                    "Black wins (Tier1)"
+                let tablebase = matches!(early_win_type, Some(EarlyWinType::Tablebase));
+                match (final_score_white, tablebase) {
+                    (v, true) if v > 0.0 => "White wins (tablebase)",
+                    (v, true) if v < 0.0 => "Black wins (tablebase)",
+                    (_, true) => "Draw (tablebase)",
+                    (v, false) if v > 0.0 => "White wins (Tier1)",
+                    _ => "Black wins (Tier1)",
                 }
             }
         } else if koth_white {

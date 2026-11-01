@@ -92,3 +92,39 @@ fn adjudication_gives_the_result_from_whites_side() {
     assert_eq!(tb.adjudicate(&black_wins), Some(-1.0));
     assert_eq!(tb.adjudicate(&Board::new()), None);
 }
+
+fn args(s: &str) -> Vec<String> {
+    s.split_whitespace().map(String::from).collect()
+}
+
+#[test]
+fn exact_endings_are_off_unless_asked_for() {
+    use kingfisher::egtb::ExactEndings;
+    let e = ExactEndings::from_args(&args("self_play 10 200 out model.pt")).unwrap();
+    assert!(!e.mate_in_1);
+    assert!(e.tablebase.is_none());
+}
+
+#[test]
+fn mate_in_one_and_the_tables_are_read_from_the_command_line() {
+    use kingfisher::egtb::ExactEndings;
+    let e = ExactEndings::from_args(&args("self_play 10 200 out --mate-in-1")).unwrap();
+    assert!(e.mate_in_1);
+    assert!(e.tablebase.is_none());
+    assert!(ExactEndings::from_args(&args("x --syzygy /nonexistent/syzygy")).is_err());
+    assert!(ExactEndings::from_args(&args("x --syzygy")).is_err());
+    let Some(_) = tables() else { return };
+    let e = ExactEndings::from_args(&args("x --syzygy /data/syzygy --mate-in-1")).unwrap();
+    assert!(e.mate_in_1);
+    assert_eq!(e.tablebase.unwrap().max_pieces(), 5);
+}
+
+#[test]
+fn exact_endings_set_the_search_options() {
+    use kingfisher::egtb::ExactEndings;
+    use kingfisher::mcts::tactical_mcts::TacticalMctsConfig;
+    let e = ExactEndings::from_args(&args("x --mate-in-1")).unwrap();
+    let c = e.apply(TacticalMctsConfig::default());
+    assert!(c.leaf_mate_in_1);
+    assert!(c.tablebase.is_none());
+}
