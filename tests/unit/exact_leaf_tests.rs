@@ -227,3 +227,55 @@ fn a_mate_in_two_search_at_leaves_gives_a_quiet_mating_line_its_exact_value() {
         );
     }
 }
+
+// Tier 1 and the leaf mate search run the same search; only the depth differs.
+
+#[test]
+fn with_tiers_on_leaves_use_tier_1s_depth_in_the_same_mate_search() {
+    let tiered = TacticalMctsConfig {
+        mate_search_depth: 4,
+        exhaustive_mate_depth: 2,
+        ..Default::default()
+    };
+    let expected = MateSearch {
+        depth: 4,
+        exhaustive: 2,
+        quiet: 0,
+    };
+    assert_eq!(tiered.leaf_mate_search(false), expected);
+    assert_eq!(tiered.leaf_mate_search(true), expected);
+    let vanilla_mate = TacticalMctsConfig {
+        leaf_mate: MateSearch::exhaustive(1),
+        ..vanilla(1)
+    };
+    assert_eq!(
+        vanilla_mate.leaf_mate_search(false),
+        MateSearch::exhaustive(1)
+    );
+    assert_eq!(vanilla_mate.leaf_mate_search(true), MateSearch::OFF);
+    assert_eq!(vanilla(1).leaf_mate_search(false), MateSearch::OFF);
+}
+
+#[test]
+fn with_tiers_on_a_move_that_allows_a_mate_is_a_proven_loss_without_a_length() {
+    let mg = MoveGen::new();
+    let config = TacticalMctsConfig {
+        max_iterations: 400,
+        time_limit: Duration::from_secs(30),
+        ..Default::default()
+    };
+    let board = Board::new_from_fen("r5k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 1");
+    let (_, stats, root) = tactical_mcts_search(board, &mg, config);
+    assert!(stats.tier1_solutions > 0);
+    let kh1 = root
+        .borrow()
+        .children
+        .iter()
+        .find(|c| c.borrow().action.unwrap().to_uci() == "g1h1")
+        .cloned()
+        .unwrap();
+    let kh1 = kh1.borrow();
+    assert_eq!(kh1.terminal_or_mate_value, Some(1.0));
+    // Like the leaf mate search, it records that a mate exists, not its length.
+    assert_eq!(kh1.terminal_distance, None);
+}

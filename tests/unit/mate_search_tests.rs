@@ -914,3 +914,27 @@ fn a_pawn_behind_the_king_is_not_a_second_checker() {
     assert!(!mate_search::has_forced_mate(&board, &mg, 1, 1));
     assert!(mate_search::mate_search(&board, &mg, 1, false, 1).0 < 1_000_000);
 }
+
+#[test]
+fn mate_search_finds_the_same_shortest_mates_in_the_default_order() {
+    use kingfisher::search::mate_order::MoveOrder;
+    use kingfisher::search::mate_search::mate_search_ordered;
+    let mg = MoveGen::new();
+    for fen in include_str!("../fixtures/mate_positions.fen")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+    {
+        let board = Board::new_from_fen(fen);
+        for (depth, exhaustive) in [(3, 2), (4, 0)] {
+            let found = mate_search(&board, &mg, depth, false, exhaustive);
+            let default = mate_search_ordered(&board, &mg, depth, exhaustive, MoveOrder::DEFAULT);
+            let generated =
+                mate_search_ordered(&board, &mg, depth, exhaustive, MoveOrder::GENERATED);
+            assert_eq!(found, default, "{fen}");
+            assert_eq!(found.0, generated.0, "mate length differs: {fen}");
+            if found.0 >= 1_000_000 {
+                assert!(board.is_legal_after_move(found.1, &mg), "{fen}");
+            }
+        }
+    }
+}

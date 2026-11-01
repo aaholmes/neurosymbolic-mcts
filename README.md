@@ -38,9 +38,9 @@ theorem prover.
   network plus the default exact endings (forced mates found by checking moves, and endgame
   tables), and 730 with the network alone, up from about 65 under LibTorch; **109** with the
   classical tiers on.
-- **Mate search**: 2.8× faster at the default setting, from generating only the moves it needs
-  and trying first the checks that leave the enemy king fewest escape squares; this also removed
-  a false-mate bug. Mate in 7 now costs almost no more self-play speed than mate in 5.
+- **Mate search**: 3.7× faster at the default setting, from generating only the moves it needs,
+  trying first the checks that leave the enemy king fewest escape squares, and remembering
+  positions already searched; this also removed a false-mate bug.
 
 ## Result in King of the Hill
 
@@ -134,8 +134,10 @@ Either mode can also use two cheap exact results, so that the network does not h
   gets the value +1 (tiered search already finds these). The search answers only whether a mate
   exists, not which move mates or how fast, so it can stop at the first mating line of any length.
   It tries first the checks that leave the enemy king fewest escape squares, and for the defender
-  captures of the checking piece, then blocks, then king moves; it takes about 16 µs per position.
-  `--mate-checks N` sets the depth, `--mate-in N` searches every move up to mate in N,
+  captures of the checking piece, then blocks, then king moves, and it remembers the result for
+  each position it has searched; it takes about 13 µs per position.
+  Tier 1 runs the same search at leaves, to its own depth, and at the root also finds the
+  mating move. `--mate-checks N` sets the depth, `--mate-in N` searches every move up to mate in N,
   `--mate-quiet M` allows M non-checking attacking moves per line, and `--no-mate-search` turns it
   off.
 - **Endgame tables.** With `--syzygy <dir>`, a leaf with 5 or fewer pieces and no castling rights
@@ -305,8 +307,8 @@ Rows marked ¹ change the search's work per move, so their gain is not a pure sp
 - **Mates in up to 5.** A deeper search ends more games early (82% of games end at a forced mate,
   compared with 72% for mate in one) and saves network calls (41.9 per move, compared with 44.3),
   for 3 ms more CPU time per move on cores that were idle. See the sweep below.
-- **Faster mate search.** At mate in 5 the GPU is the bottleneck, so the 2.8× faster search
-  changed nothing (764.9 ± 2.5 before, in the same session); it matters at deeper settings.
+- **Faster mate search.** At mate in 5 the GPU is the bottleneck, so the faster search changed
+  nothing (764.9 ± 2.5 before, in the same session); it matters at deeper settings.
 - **Unexplained.** Rebuilding the move-generation change that preceded the fused convolution
   measured 437 instead of 453 moves per second (two runs each); the cause was not found.
 
@@ -369,11 +371,13 @@ rebuilding identical code shifts them by about 1%).
 | **Checking moves generated directly** | 22.9 | 81.9 | 32.2 | 26.1 |
 | **Only moves out of check generated**, and the checkmate test stops at the first legal one | 18.4 | 70.2 | 28.1 | 25.9 |
 | **Checking moves tried in order of the enemy king's escape squares**² | 16.0 | 56.0 | 28.7 | 25.9 |
-| Total speed-up | 2.8× | 2.7× | 2.7× | 1.1× |
+| **Positions already searched remembered** (a transposition table)² | 12.0 | 32.0 | 28.1 | 26.0 |
+| Total speed-up | 3.7× | 4.7× | 2.8× | 1.1× |
 
 ² Absolute times drifted between later runs by more than their standard deviation (up to 16% for
-mate in 6), so this row applies the change measured within one run (−12.8%, −20.2%, +2.1%, +0.1%)
-to the row above.
+mate in 6), so these rows apply the change measured within one run to the row above: −12.8%,
+−20.2%, +2.1% and +0.1% for the move order, and −25.2%, −42.9%, −2.2% and +0.5% for the table
+(which includes the defender's captures by its most valuable piece first, −0.1% to −0.5%).
 
 - **Checking moves.** In a checks-only search the attacker plays only checks, about 3 of a
   position's 35 moves, but the search generated all of them and tested each with `gives_check`
@@ -424,15 +428,42 @@ deviations under 0.2%).
   move is tried unless one mates, so sorting there cost more than it saved; dropping it turned
   −2.3% into −13.4%. With a quiet move per line or every move searched, lists are long and stop
   rarely, so they stay as generated.
-- **The defender's generated order was never beaten**: captures of the checking piece, pawns
-  first, then blocks, then king moves.
+- **The defender's generated order was beaten only slightly**: captures of the checking piece,
+  then blocks, then king moves, with captures by the most valuable piece first (rather than pawns
+  first) 0.2–0.6% faster.
+- **Orders in which moves are generated** cost nothing, but none of 72 combinations helped beyond
+  that: generating queen checks first was 1.5–2.3% slower at mate in 5, capturing checks first
+  10–11% slower, and sorting only queen checks by escape squares 11% slower than sorting every
+  check.
+- **Trying first the move that ended the previous sibling's search** (the killer heuristic, common
+  in chess engines) was 44% slower at mate in 5: it overrides the escape-square and
+  captures-first orders, which were already better.
+
+**Remembering positions.** Checking lines revisit positions often: a check, a king step and a
+check back return to an earlier position, and different orders of the same checks meet. The
+search now keeps, for the duration of one search, the result for each position it has searched
+with at least two moves left: 16,384 entries of 16 bytes (256 KB) per search thread, replaced on
+collision. A mate found with fewer moves left also answers a search with more, and no mate with
+more moves left answers one with fewer. This cut positions searched at mate in 5 by 33% and time
+by 25%; at mate in 7 time fell 59%. On positions where a quiet move is allowed or every move is
+searched, it gained 0–2%.
+
+**Benchmark positions.** The positions above extend logged games by random moves. To check that
+they represent what the search actually sees, `self_play` can log every Nth position at which it
+searches a leaf for mates (`KF_LOG_MATE_LEAVES=<file>:<N>`), with its game. 20,000 positions
+sampled from 1,920 games of the generation-28 model, split into halves by game, ranked the 72
+generation orders almost exactly as the old positions did (Spearman correlation 0.995 at mate in
+5). On the half not used for tuning, the table cut time by 26.6% at mate in 5, 44.6% at mate in
+6 and 64.2% at mate in 7.
 
 **In self-play**, with endgame tables on and two runs each (± half their difference), the faster
 search makes no difference at the default mate in 5, where the GPU is the bottleneck: 764.5 ± 0.7
 moves per second, compared with 764.9 ± 2.5. At mate in 7, where the old search ran the CPU out
 of spare time, it raises throughput 18%, from 643.3 ± 0.6 to 760.0 ± 0.3, and cuts CPU time per
-move from 35.6 to 21.5 ms. Deeper mate searches are now nearly free, which the rerun of the depth
-sweep will measure.
+move from 35.6 to 21.5 ms. Adding the table left mate in 5 unchanged (761.8 ± 0.9, compared
+with 762.4 ± 1.4) and raised mate in 7 from 759.3 ± 0.6 to 767.8 ± 0.7, now 0.8% faster than mate
+in 5; CPU time per move at mate in 7 fell from 21.4 to 19.8 ms. Deeper mate searches are now
+nearly free, which the rerun of the depth sweep will measure.
 
 Changes measured and not adopted:
 
@@ -507,9 +538,8 @@ them.
 
 Next, in order:
 
-1. **Rerun the mate depth sweep with the faster search**, and try a lighter way to make a move in
-   the mate search, without updating the position's hash, which it does not use (14–27% of its
-   time).
+1. **Rerun the mate depth sweep with the faster search**, and measure the faster mate search in
+   tiered self-play, which is limited by the CPU.
 2. **Accept unless clearly worse**: replace the SPRT acceptance test with one that rejects only clear
    regressions, and play a fixed number of games per generation. The pilot above rejected most
    improvements of about +70 Elo. AlphaZero kept a single, continually updated network with no
@@ -564,6 +594,7 @@ KF_PIPELINE=0           # launch a batch only after the previous one returns
 KF_FULL_POLICY=1        # read back the full policy and compute legal-move priors on the CPU
 KF_INFER_CPUS=0,16      # pin the batching thread to these CPUs, and search threads to the others
 KF_RESERVE_MOVES=1      # start each move list with room for 256 moves
+KF_LOG_MATE_LEAVES=f:N  # self_play: write every Nth position searched for mates to file f
 # self_play flags: --batch-size N (cap, default 128), --inference-workers N (batching threads,
 # default 4), --threads N (default: one per game), --syzygy DIR, --mate-checks N (default 5),
 # --mate-in N, --mate-quiet M, --no-mate-search (the last five also in evaluate_models)

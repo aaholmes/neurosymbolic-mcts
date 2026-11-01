@@ -165,6 +165,24 @@ pub struct TacticalMctsConfig {
     pub tablebase: Option<crate::egtb::Tablebase>,
 }
 
+impl TacticalMctsConfig {
+    /// The mate search run at a leaf: Tier 1's depths with the tiers on (the
+    /// root included), otherwise `leaf_mate` below the root.
+    pub fn leaf_mate_search(&self, is_root: bool) -> crate::egtb::MateSearch {
+        if self.enable_tier1_gate {
+            crate::egtb::MateSearch {
+                depth: self.mate_search_depth,
+                exhaustive: self.exhaustive_mate_depth,
+                quiet: 0,
+            }
+        } else if self.leaf_mate.is_on() && !is_root {
+            self.leaf_mate
+        } else {
+            crate::egtb::MateSearch::OFF
+        }
+    }
+}
+
 impl Default for TacticalMctsConfig {
     fn default() -> Self {
         TacticalMctsConfig {
@@ -854,56 +872,43 @@ fn begin_leaf_evaluation(
         }
     }
 
-    // Tier 1 has its own mate search; without it, `leaf_mate` is used if on.
-    let leaf_mate = !config.enable_tier1_gate && config.leaf_mate.is_on() && !is_root;
-    let (mate_search_depth, exhaustive_mate_depth) = if config.enable_tier1_gate {
-        (config.mate_search_depth, config.exhaustive_mate_depth)
-    } else if leaf_mate {
-        (config.leaf_mate.depth, config.leaf_mate.exhaustive)
-    } else {
-        (0, 0)
-    };
-
-    if mate_search_depth > 0 {
-        if let Some((mate_depth, _mate_move)) =
+    // One mate search at leaves: Tier 1's depth with the tiers on, otherwise
+    // `leaf_mate`. It records only that a mate exists, not its move or length.
+    let mate = config.leaf_mate_search(is_root);
+    let tier1 = config.enable_tier1_gate;
+    if mate.is_on() {
+        let mate_search_depth = mate.depth.max(mate.exhaustive);
+        let solved = |node_ref: &mut MctsNode, stats: &mut TacticalMctsStats, value: f64| {
+            node_ref.terminal_or_mate_value = Some(value);
+            node_ref.origin = NodeOrigin::Gate;
+            stats.nn_saved_by_tier1 += 1;
+            if tier1 {
+                stats.tier1_solutions += 1;
+            } else {
+                stats.exact_leaf_values += 1;
+            }
+        };
+        if let Some((mate_depth, mate_move)) =
             transposition_table.probe_mate(board, mate_search_depth)
         {
             stats.tt_mate_hits += 1;
-            if mate_depth != 0 {
-                // Validate move legality if present to guard against collisions
-                let is_valid = if _mate_move != Move::null() {
-                    let (captures, quiet) = move_gen.gen_pseudo_legal_moves(board);
-                    let is_pseudo_legal =
-                        captures.contains(&_mate_move) || quiet.contains(&_mate_move);
-                    is_pseudo_legal && board.is_legal_after_move(_mate_move, move_gen)
-                } else {
-                    true
-                };
-
-                if is_valid {
-                    if let Some(log) = logger {
-                        log.log_tier1_gate(&GateReason::TtMateHit { depth: mate_depth }, None);
-                    }
-                    let mate_value = if mate_depth > 0 { 1.0 } else { -1.0 };
-                    node_ref.terminal_or_mate_value = Some(mate_value);
-                    // A leaf search records only that a mate exists, not its length.
-                    if !leaf_mate {
-                        node_ref.terminal_distance = Some(mate_depth.unsigned_abs() as u8);
-                    }
-                    node_ref.origin = NodeOrigin::Gate;
-                    stats.nn_saved_by_tier1 += 1;
-                    if leaf_mate {
-                        stats.exact_leaf_values += 1;
-                    }
-                    return LeafEval::Done(mate_value);
+            // A stored move is checked, to guard against hash collisions.
+            let is_valid = mate_move == Move::null()
+                || (board.is_pseudo_legal(mate_move, move_gen)
+                    && board.is_legal_after_move(mate_move, move_gen));
+            if mate_depth != 0 && is_valid {
+                if let Some(log) = logger {
+                    log.log_tier1_gate(&GateReason::TtMateHit { depth: mate_depth }, None);
                 }
+                let value = if mate_depth > 0 { 1.0 } else { -1.0 };
+                solved(&mut node_ref, stats, value);
+                return LeafEval::Done(value);
             }
-        } else if leaf_mate {
-            // Only whether a mate exists matters here, not its move or length.
+        } else {
             stats.tt_mate_misses += 1;
             let mate_start = Instant::now();
             crate::search::leaf_log::record_leaf(board);
-            let (found, nodes) = config.leaf_mate.search(board, move_gen);
+            let (found, nodes) = mate.search(board, move_gen);
             stats.mate_search_timing.record(mate_start.elapsed());
             stats.mate_search_nodes.record(nodes as f64);
             // Stored as a mate in the full depth, with no move.
@@ -914,45 +919,11 @@ fn begin_leaf_evaluation(
             };
             transposition_table.store_mate_result(board, score, Move::null(), mate_search_depth);
             if found {
-                node_ref.terminal_or_mate_value = Some(1.0);
-                node_ref.origin = NodeOrigin::Gate;
-                stats.nn_saved_by_tier1 += 1;
-                stats.exact_leaf_values += 1;
-                return LeafEval::Done(1.0);
-            }
-        } else {
-            stats.tt_mate_misses += 1;
-            let mate_start = Instant::now();
-            let mate_result = mate_search(
-                board,
-                move_gen,
-                mate_search_depth,
-                false,
-                exhaustive_mate_depth,
-            );
-            stats.mate_search_timing.record(mate_start.elapsed());
-            stats.mate_search_nodes.record(mate_result.2 as f64);
-            transposition_table.store_mate_result(
-                board,
-                mate_result.0.abs(),
-                mate_result.1,
-                mate_search_depth,
-            );
-
-            if mate_result.0 != 0 {
                 if let Some(log) = logger {
-                    log.log_mate_search_result(mate_result.0, mate_result.1, 0);
+                    log.log_mate_search_result(score, Move::null(), nodes as u64);
                 }
-                let mate_value = if mate_result.0 > 0 { 1.0 } else { -1.0 };
-                node_ref.terminal_or_mate_value = Some(mate_value);
-                node_ref.terminal_distance = Some(mate_result.0.unsigned_abs() as u8);
-                stats.nn_saved_by_tier1 += 1;
-                if leaf_mate {
-                    stats.exact_leaf_values += 1;
-                } else {
-                    stats.tier1_solutions += 1;
-                }
-                return LeafEval::Done(mate_value);
+                solved(&mut node_ref, stats, 1.0);
+                return LeafEval::Done(1.0);
             }
         }
     }

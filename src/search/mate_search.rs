@@ -68,50 +68,75 @@ pub fn mate_search(
     _verbose: bool,
     exhaustive_depth: i32,
 ) -> (i32, Move, i32) {
+    mate_search_ordered(
+        board,
+        move_gen,
+        max_depth,
+        exhaustive_depth,
+        MoveOrder::DEFAULT,
+    )
+}
+
+/// `mate_search`, trying moves below the root in `order`. The score (the
+/// shortest mate) never depends on the order; the move found may.
+pub fn mate_search_ordered(
+    board: &Board,
+    move_gen: &MoveGen,
+    max_depth: i32,
+    exhaustive_depth: i32,
+    order: MoveOrder,
+) -> (i32, Move, i32) {
     let mut nodes: i32 = 0;
 
     // Convert exhaustive_depth from mate-in-N to plies for internal comparison
     let exhaustive_plies = exhaustive_depth * 2 - 1;
 
-    for d in 1..=max_depth {
-        let depth = 2 * d - 1; // Only check odd depths (mate for us)
-        let checks_only = depth > exhaustive_plies;
-
-        let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
-
-        for m in captures.iter().chain(moves.iter()) {
-            // On attacker turn with checks_only: filter before legality/clone
-            if checks_only && !board.gives_check(*m, move_gen) {
-                continue;
+    with_scratch(2 * max_depth, |lists, table| {
+        if order.killer {
+            for l in lists.iter_mut() {
+                l.killer = Move::null();
             }
+        }
+        if order.table {
+            table.start_search();
+        }
+        for d in 1..=max_depth {
+            let depth = 2 * d - 1; // Only check odd depths (mate for us)
+            let checks_only = depth > exhaustive_plies;
 
-            if !board.is_legal_after_move(*m, move_gen) {
-                continue;
-            }
+            let (captures, moves) = move_gen.gen_pseudo_legal_moves(board);
 
-            let next_board = board.apply_move_to_board(*m);
+            for m in captures.iter().chain(moves.iter()) {
+                // On attacker turn with checks_only: filter before legality/clone
+                if checks_only && !board.gives_check(*m, move_gen) {
+                    continue;
+                }
 
-            let quiet = if checks_only { 0 } else { EVERY_MOVE };
-            let found = with_scratch(depth, |lists, table| {
-                solve_mate(
+                if !board.is_legal_after_move(*m, move_gen) {
+                    continue;
+                }
+
+                let next_board = board.apply_move_to_board(*m);
+
+                let quiet = if checks_only { 0 } else { EVERY_MOVE };
+                if solve_mate(
                     &next_board,
                     move_gen,
                     depth - 1,
                     false,
                     quiet,
-                    MoveOrder::GENERATED,
+                    order,
                     &mut nodes,
                     lists,
                     table,
-                )
-            });
-            if found {
-                return (1_000_000 + depth, *m, nodes);
+                ) {
+                    return (1_000_000 + depth, *m, nodes);
+                }
             }
         }
-    }
 
-    (0, Move::null(), nodes)
+        (0, Move::null(), nodes)
+    })
 }
 
 /// Move lists for one ply, kept between searches so that no position allocates.
