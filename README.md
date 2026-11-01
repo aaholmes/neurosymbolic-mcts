@@ -30,10 +30,13 @@ theorem prover.
 - **King of the Hill** (a chess variant where reaching the center also wins): the tiered engine
   rates about 625 Elo above a network-only baseline, with caveats below that make this a
   preliminary result.
-- **Standard chess**, the intended headline: training has not yet made progress; the classical
-  search is expensive there, and the acceptance test for new generations rejected three in a row.
-- **Self-play speed** (standard chess, 200 simulations per move): **730 moves per second** with
-  the network alone, up from about 65 under LibTorch; **109** with the classical tiers on.
+- **Standard chess**, the intended headline: a 30-generation pilot of the network-only engine with
+  mate-in-one and endgame tables ran cleanly, and candidates kept beating the current model, but
+  the acceptance test took only 4 of 30. The tiered engine has not yet been trained there, because
+  its classical search is expensive in standard chess.
+- **Self-play speed** (standard chess, 200 simulations per move): **823 moves per second** with the
+  network plus mate-in-one and endgame tables, and 730 with the network alone, up from about 65
+  under LibTorch; **109** with the classical tiers on.
 
 ## Result in King of the Hill
 
@@ -118,6 +121,15 @@ initialized to 0.326. With no network, $V = \tanh(0.326 \cdot \Delta M)$; this i
 engine in the result above. The baseline ("vanilla") runs with Tiers 1 and 2 off: no exact
 search, and the network receives $\Delta M = 0$.
 
+Either mode can also use two exact results that cost almost nothing, so that the network does not
+have to learn them. With `--mate-in-1`, a leaf whose side to move can mate in one gets the value +1
+(tiered search already finds these). With `--syzygy <dir>`, a leaf with 5 or fewer pieces and no
+castling rights gets its value from Syzygy endgame tables (win/draw/loss tables for every such
+position, 396 MB), and a self-play or evaluation game ends with the tables' result as soon as it
+reaches one. Wins and losses that the fifty-move rule would turn into draws count as draws. The
+tables are not used in King of the Hill, where reaching the centre changes the result. A model
+trained with these options should be played with them.
+
 Moves are selected with AlphaZero's rule (PUCT, a variant of the upper confidence bound for trees),
 with one change:
 
@@ -162,8 +174,9 @@ normalization folded into the convolutions at load time and the cuDNN algorithm 
 size, a batch of 128 took 4.40 ms in candle and 7.19 ms in LibTorch (f32, before any of the changes
 below).
 
-**Precision.** `KF_PRECISION=f16` (or `bf16`) runs the network in 16-bit floating point on the
-GPU's tensor cores, accumulating in 32 bits. On the generation-34 model, f16 changes move priors by
+**Precision.** In builds with cuDNN, the network runs on the GPU in 16-bit floating point (f16) on
+the tensor cores, accumulating in 32 bits; `KF_PRECISION=f32` (or `bf16`) overrides this, and the CPU
+always uses f32. On the generation-34 model, f16 changes move priors by
 at most 0.004 and the value logit by at most 0.023, and picks the top move of f32 on 64 of 64 test
 positions. Time per call through `predict_batch` (`nn_bench`, median of 500 calls; interquartile
 ranges within 1.5% of the median):
@@ -181,16 +194,16 @@ standard chess with a randomly initialized network and the classical tiers off, 
 does the same work per move and only speed differs. All runs use 200 simulations per move, an RTX
 5060 Ti and a 16-core Ryzen 9 7950X, with one game per search thread.
 
-The fastest setup makes **730 moves per second** (729.9 and 730.5 in two runs): f16, CUDA graphs on,
-four batching threads serving 1,920 search threads, batch cap 128, built with `--features cudnn`.
-Apart from f16 and CUDA graphs, which are opt-in, these are the defaults of `self_play` and
-`orchestrate.py`:
+The network alone makes **730 moves per second** (729.1 and 730.5 in two runs) with the defaults
+of `self_play` and `orchestrate.py`: f16, CUDA graphs, four batching threads serving 1,920 search
+threads, batch cap 128, built with `--features cudnn`. Adding mate-in-one and endgame tables makes
+**823** (823.3 and 823.5):
 
 ```bash
-KF_PRECISION=f16 KF_CUDA_GRAPHS=1 ./target/release/self_play 1920 200 out/ model.pt false false false none
+./target/release/self_play 1920 200 out/ model.pt false false false none --mate-in-1 --syzygy /data/syzygy
 ```
 
-### From 65 to 730 moves per second
+### From 65 to 823 moves per second
 
 Each row is its own before-and-after comparison, at the setting where it was measured, so the
 gains do not multiply exactly. Values are moves per second for each run.
@@ -210,6 +223,9 @@ gains do not multiply exactly. Values are moves per second for each run.
 | **Two-byte moves** | as above, graphs on | 538.2, 536.2 | 561.3, 558.8 |
 | **Reused subtree counts toward the budget** (5.5% fewer network evaluations per move, so not the same work) | as above | 561.3, 558.8 | 614.3, 617.4 |
 | **No root quiescence search in vanilla self-play** | as above | 617.1, 617.3 | 729.9, 730.5 |
+| **f16 and CUDA graphs as defaults**, from environment variables | as above | 739.0, 730.4 | 729.1, 730.5 |
+| **Mate in one at leaves** (12% fewer network evaluations per move, so not the same work) | as above | 729.1, 730.5 | 824.7, 823.5 |
+| **Endgame tables at leaves**, and games end at a covered position | as above, with mate in one | 824.7, 823.5 | 823.3, 823.5 |
 
 - **The 65 moves per second was not recorded** in this repository, and its settings (game, threads,
   tiers) are not confirmed to match the later rows.
@@ -247,6 +263,15 @@ gains do not multiply exactly. Values are moves per second for each run.
   On positions from games between random networks it took more than half of the search threads' CPU
   time, sometimes seconds for one position. Skipping it cut CPU time per move from 34.3 ms to
   15.6 ms.
+- **Defaults.** Making f16 and graphs the defaults played identical games (234,831 moves) and
+  changed nothing in speed. It exposed a crash: creating a CUDA stream or cuDNN handle on one
+  thread invalidated a graph being recorded on another, so these steps now share one lock.
+- **Mate in one.** A leaf whose side to move can mate in one gets the value +1 without a network
+  call. Network evaluations per move fell from 46.7 to 41.1, and the mean game from 134 to 122
+  moves. The check costs about one move generation per leaf on the CPU, which has spare time
+  while the GPU is the bottleneck.
+- **Endgame tables.** Probes are needed only at 5 or fewer pieces, so they add no measurable cost;
+  22% of games (430 of 1,920) ended at a covered position.
 - **Unexplained.** Rebuilding the move-generation change that preceded the fused convolution
   measured 437 instead of 453 moves per second (two runs each); the cause was not found.
 
@@ -287,7 +312,7 @@ Self-play, a replay buffer, training, and evaluation of each new generation in a
 - **Optimizer:** Muon (learning rate 0.02), with adaptive epochs and early stopping. It has not yet
   been compared with AdamW.
 - **Accepting a new generation:** a sequential probability ratio test (SPRT) over up to 800
-  evaluation games, which usually stops after about 30 when the result is clear.
+  evaluation games by default (200 in the pilot), which stops early when the result is clear.
 - **Data:** after generation 1 the evaluation games also supply training data, so separate self-play
   is optional. Positions are weighted by the strength of the model that played them (a 200-Elo gap
   gives about 32% inclusion). Mirror images are added for positions without castling rights (2×), and
@@ -299,6 +324,8 @@ python python/orchestrate.py --enable-koth \
 python python/orchestrate.py --disable-tier1       # ablation: no exact search
 python python/orchestrate.py --disable-material    # ablation: no classical material score
 python python/orchestrate.py --skip-self-play      # train on evaluation games only
+python python/orchestrate.py --disable-tier1 --disable-material \
+  --mate-in-1 --syzygy-path /data/syzygy           # network only, plus mate in one and endgame tables
 python python/orchestrate.py --arch transformer --enable-koth
 ```
 
@@ -314,10 +341,16 @@ details and measurements: [BENCHMARKS.md](BENCHMARKS.md) and [CUDA_TC_ANALYSIS.m
 
 ## Current state and next steps
 
-The engine, training loop and both search back ends work. Training in standard chess has not yet
-made progress: three successive candidate generations each scored 0.48–0.50 versus the model they
-would replace, were rejected by the acceptance test, and the run was stopped. In standard chess,
-positions with exact solutions are rarer and the classical search is expensive: with the
+The engine, training loop and both search back ends work. In standard chess, a pilot of the
+network-only engine with mate-in-one and endgame tables (30 generations of 400 self-play games,
+about 3.5 minutes each, evaluation capped at 200 games) ran without errors, but only generations
+1, 2, 9 and 28 were accepted. The 26 rejected candidates scored a median of 0.60 (range
+0.50–0.65) versus the current model, about +70 Elo, yet the test ended at the 200-game cap before
+reaching its acceptance threshold, and an unfinished test counts as a rejection. Whether exact
+endings help training is not yet measured: there is no matched run without them.
+
+The tiered engine has not been trained in standard chess yet. Positions with exact solutions are
+rarer there and the classical search is expensive: with the
 generation-34 model and 60 threads, quiescence search takes 56% of search-thread time, waiting for
 the network 42%, and mate search 1%. Quiescence search itself runs at 1.27 million positions per
 second per thread, but averages 11,931 positions and 9.4 ms per call, mostly from a few positions
@@ -327,22 +360,24 @@ them.
 
 Next, in order:
 
-1. **Prune quiescence search**: discard captures that lose material by static exchange evaluation,
+1. **Accept unless clearly worse**: replace the SPRT acceptance test with one that rejects only clear
+   regressions, and play a fixed number of games per generation. The pilot above rejected most
+   improvements of about +70 Elo. AlphaZero kept a single, continually updated network with no
+   acceptance step ([Silver et al., 2017](https://arxiv.org/abs/1712.01815)).
+2. **Network alone, with and without exact endings**: matched runs from scratch on one rating
+   ladder, with a bootstrap interval on the Elo difference.
+3. **Prune quiescence search**: discard captures that lose material by static exchange evaluation,
    skip captures that cannot raise the score enough to matter (delta pruning), search checks only on
    its first ply, cache results in a transposition table, and cap its size. The aim is a tree at
    least 10× smaller with fewer than 2% of positions changing by a pawn or more.
-2. **Accept unless clearly worse**: replace the SPRT acceptance test with one that rejects only clear
-   regressions, and play a fixed number of games per generation. AlphaZero kept a single,
-   continually updated network with no acceptance step
-   ([Silver et al., 2017](https://arxiv.org/abs/1712.01815)).
-3. **Tiers versus network alone in standard chess at equal wall-clock time**: two runs from scratch
+4. **Tiers versus network alone in standard chess at equal wall-clock time**: two runs from scratch
    on one rating ladder, with a bootstrap interval on the Elo difference, including the untrained
    tiered engine to separate a head start from better learning.
-4. **Full searches on only some moves** (playout cap randomization,
+5. **Full searches on only some moves** (playout cap randomization,
    [Wu, 2019](https://arxiv.org/abs/1902.10565)): train only on moves that got a full search, and play
    the rest with a cheap one. This needs a training comparison, not just a throughput one.
-5. **Defaults**: make f16 and CUDA graphs the default, and remove the remaining per-batch driver
-   calls (reuse one event, pinned host buffers, the gather inside the graph).
+6. **Per-batch driver calls**: remove the remaining ones (reuse one event, pinned host buffers, the
+   gather inside the graph). With the GPU about 93% busy, this can gain at most about 7%.
 
 Later directions:
 
@@ -373,14 +408,14 @@ cargo build --release --features cudnn     # as cuda, with cuDNN convolutions (f
 ./target/release/caissawary                # the engine, speaking the Universal Chess Interface (UCI)
 
 # Inference settings, read from the environment by self_play and evaluate_models
-KF_PRECISION=f16        # f32 (default), f16 or bf16 network on the GPU
-KF_CUDA_GRAPHS=1        # replay each half-precision batch as a recorded CUDA graph (needs cudnn)
+KF_PRECISION=f32        # f16 (default on CUDA with cudnn), f32 (default otherwise) or bf16
+KF_CUDA_GRAPHS=0        # turn off replaying each half-precision batch as a recorded CUDA graph
 KF_PIPELINE=0           # launch a batch only after the previous one returns
 KF_FULL_POLICY=1        # read back the full policy and compute legal-move priors on the CPU
 KF_INFER_CPUS=0,16      # pin the batching thread to these CPUs, and search threads to the others
 KF_RESERVE_MOVES=1      # start each move list with room for 256 moves
 # self_play flags: --batch-size N (cap, default 128), --inference-workers N (batching threads,
-# default 4), --threads N (default: one per game)
+# default 4), --threads N (default: one per game), --mate-in-1, --syzygy DIR (also evaluate_models)
 
 cd cuda && mkdir -p build && cd build && cmake .. -DCMAKE_CUDA_ARCHITECTURES=89 && make
 ```
@@ -393,7 +428,8 @@ about 50 s. See [TESTING.md](TESTING.md).
 ```bash
 cargo test                                        # fast Rust tests (~50 s)
 cargo test --features neural                      # plus the network, compared with PyTorch reference outputs
-cargo test --features cudnn --test unit_tests     # plus cuDNN, channels-last and CUDA graph tests
+cargo test --features cudnn --test unit_tests     # plus cuDNN and channels-last tests
+cargo test --features cudnn --test cuda_graph_tests  # CUDA graph replay, in a process of its own
 cargo test --features slow-tests                  # full suite, including move-generation counts (~200 s)
 cd python && python -m pytest test_*.py -v        # training pipeline
 cuda/build/test_mcts_kernel                       # GPU search
