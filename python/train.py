@@ -246,6 +246,26 @@ def freeze_heads(model, train_heads):
     print(f"Frozen {count} parameters (train_heads={train_heads})")
 
 
+def batch_loss(model, boards, scalars, values, policies, device, disable_material=False):
+    """Training loss on one batch: policy KL divergence plus value squared error.
+
+    Returns (loss, policy_loss, value_loss, k), each averaged over the batch.
+    """
+    boards = boards.to(device)
+    scalars = scalars.to(device)
+    if disable_material:
+        scalars = scalars.clone()
+        scalars[:, 0] = 0.0  # zero out material column only
+    values = values.to(device)
+    policies = policies.to(device)
+
+    pred_policy, pred_value, k = model(boards, scalars)
+    policy_loss_per = F.kl_div(pred_policy, policies, reduction='none').sum(dim=1)
+    value_loss_per = F.mse_loss(pred_value, values, reduction='none').squeeze(1)
+    loss = (policy_loss_per + value_loss_per).mean()
+    return loss, policy_loss_per.mean(), value_loss_per.mean(), k
+
+
 def make_optimizer(model, optimizer_name, lr):
     """Create optimizer by name. Only includes parameters with requires_grad."""
     params = [p for p in model.parameters() if p.requires_grad]
@@ -396,20 +416,8 @@ def train_with_config(
                 batch = next(data_iter)
 
             boards, scalars, values, policies = batch
-            boards = boards.to(DEVICE)
-            scalars = scalars.to(DEVICE)
-            if disable_material:
-                scalars = scalars.clone()
-                scalars[:, 0] = 0.0  # zero out material column only
-            values = values.to(DEVICE)
-            policies = policies.to(DEVICE)
-
-            pred_policy, pred_value, k = model(boards, scalars)
-            policy_loss_per = F.kl_div(pred_policy, policies, reduction='none').sum(dim=1)
-            value_loss_per = F.mse_loss(pred_value, values, reduction='none').squeeze(1)
-            loss = (policy_loss_per + value_loss_per).mean()
-            policy_loss = policy_loss_per.mean()
-            value_loss = value_loss_per.mean()
+            loss, policy_loss, value_loss, k = batch_loss(
+                model, boards, scalars, values, policies, DEVICE, disable_material)
 
             optimizer.zero_grad()
             loss.backward()
@@ -454,20 +462,8 @@ def train_with_config(
                 if _return_lr_history:
                     lr_history[steps_this_run] = current_lr
 
-                boards = boards.to(DEVICE)
-                scalars = scalars.to(DEVICE)
-                if disable_material:
-                    scalars = scalars.clone()
-                    scalars[:, 0] = 0.0  # zero out material column only
-                values = values.to(DEVICE)
-                policies = policies.to(DEVICE)
-
-                pred_policy, pred_value, k = model(boards, scalars)
-                policy_loss_per = F.kl_div(pred_policy, policies, reduction='none').sum(dim=1)
-                value_loss_per = F.mse_loss(pred_value, values, reduction='none').squeeze(1)
-                loss = (policy_loss_per + value_loss_per).mean()
-                policy_loss = policy_loss_per.mean()
-                value_loss = value_loss_per.mean()
+                loss, policy_loss, value_loss, k = batch_loss(
+                    model, boards, scalars, values, policies, DEVICE, disable_material)
 
                 optimizer.zero_grad()
                 loss.backward()

@@ -77,3 +77,4 @@ pub mod transposition;
 pub mod tuning;
 pub mod uci;
 pub mod utils;
+pub mod weights_watch;

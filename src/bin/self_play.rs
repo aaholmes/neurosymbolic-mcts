@@ -14,8 +14,9 @@ use kingfisher::move_types::Move;
 use kingfisher::search::mate_search;
 use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
-use kingfisher::training_data::{save_binary_data, TrainingSample};
+use kingfisher::training_data::{game_filename, save_binary_data, TrainingSample};
 use kingfisher::transposition::TranspositionTable;
+use kingfisher::weights_watch::WatchedModel;
 use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -157,28 +158,55 @@ fn main() {
 
     std::fs::create_dir_all(output_dir).unwrap();
 
-    // Create a single shared InferenceServer for all game threads
-    let shared_server: Option<Arc<InferenceServer>> = if let Some(ref path) = model_path {
-        match InferenceServer::load_with_window(
+    // With --watch, each game starts with the newest weights a trainer has
+    // published in that pointer file; otherwise one server for all games.
+    let watch_pointer = args
+        .iter()
+        .position(|a| a == "--watch")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let load = move |path: &str| {
+        let server = InferenceServer::load_with_window(
             path,
             inference_workers,
             inference_batch_size,
             idle_window,
-        ) {
+        );
+        if server.is_ok() {
+            println!("Loaded weights {}", path);
+        }
+        server
+    };
+    let models = if let Some(pointer) = watch_pointer {
+        match WatchedModel::new(pointer.clone().into(), load) {
+            Ok(w) => {
+                println!(
+                    "   Watching {} for new weights: batch_size={}, workers={}, leaves per game={}",
+                    pointer, inference_batch_size, inference_workers, leaves_per_game
+                );
+                Models::Watched(w)
+            }
+            Err(e) => {
+                eprintln!("Failed to load published weights: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else if let Some(ref path) = model_path {
+        match load(path) {
             Ok(server) => {
                 println!(
                     "   Shared InferenceServer: batch_size={}, workers={}, leaves per game={}",
                     inference_batch_size, inference_workers, leaves_per_game
                 );
-                Some(Arc::new(server))
+                Models::Fixed(Some(Arc::new(server)))
             }
             Err(e) => {
                 eprintln!("Failed to load model from {}: {}", path, e);
-                None
+                Models::Fixed(None)
             }
         }
     } else {
-        None
+        Models::Fixed(None)
     };
 
     let completed_games = Mutex::new(0);
@@ -187,11 +215,18 @@ fn main() {
     (0..num_games).into_par_iter().for_each(|i| {
         let verbose = log_all || (log_first && i == 0);
         let seed = seed_offset + i as u64;
+        let (version, server) = match &models {
+            Models::Fixed(server) => (None, server.clone()),
+            Models::Watched(w) => {
+                let (v, server) = w.current();
+                (Some(v), Some(server))
+            }
+        };
         let samples = play_game(
             i,
             simulations,
             seed,
-            shared_server.clone(),
+            server,
             enable_koth,
             enable_tier1,
             enable_material,
@@ -207,7 +242,7 @@ fn main() {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            let filename = format!("{}/game_{}_{}.bin", output_dir, timestamp, i);
+            let filename = game_filename(output_dir, timestamp, i, version);
             if let Err(e) = save_binary_data(&filename, &samples) {
                 eprintln!("Failed to save game data: {}", e);
             } else {
@@ -236,6 +271,12 @@ fn main() {
             num_games
         );
     }
+}
+
+/// The network self-play uses: fixed for the run, or the newest published.
+enum Models {
+    Fixed(Option<Arc<InferenceServer>>),
+    Watched(WatchedModel<InferenceServer>),
 }
 
 /// Games ended because they reached a position the endgame tables cover.

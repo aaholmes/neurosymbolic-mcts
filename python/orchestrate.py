@@ -290,6 +290,21 @@ def get_rust_env():
     return env
 
 
+def exact_ending_args(config):
+    """The Rust flags for the mate search and Syzygy tables, from a config with
+    mate_in, mate_checks, mate_quiet and syzygy_path."""
+    c = config
+    if c.mate_in <= 0 and c.mate_checks <= 0:
+        args = ["--no-mate-search"]
+    else:
+        args = ["--mate-in", str(c.mate_in), "--mate-checks", str(c.mate_checks)]
+        if c.mate_quiet > 0:
+            args += ["--mate-quiet", str(c.mate_quiet)]
+    if c.syzygy_path:
+        args += ["--syzygy", c.syzygy_path]
+    return args
+
+
 class Orchestrator:
     def __init__(self, config: TrainingConfig):
         self.config = config
@@ -402,16 +417,7 @@ class Orchestrator:
 
     def _exact_ending_args(self):
         """The Rust flags for the mate search and Syzygy tables, for both kinds of games."""
-        c = self.config
-        if c.mate_in <= 0 and c.mate_checks <= 0:
-            args = ["--no-mate-search"]
-        else:
-            args = ["--mate-in", str(c.mate_in), "--mate-checks", str(c.mate_checks)]
-            if c.mate_quiet > 0:
-                args += ["--mate-quiet", str(c.mate_quiet)]
-        if self.config.syzygy_path:
-            args += ["--syzygy", self.config.syzygy_path]
-        return args
+        return exact_ending_args(self.config)
 
     def run_self_play(self, generation):
         """Run self-play games and return the output directory."""

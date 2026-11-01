@@ -21,8 +21,12 @@ pub struct TrainingSample {
 ///
 /// Format per sample: 1088 board floats + 1 material float + 1 qsearch_completed float
 /// + 1 value float + 4672 policy floats = 5763 floats * 4 bytes = 23052 bytes per sample.
+///
+/// The file is written under a temporary name and renamed, so a trainer
+/// reading `*.bin` files while self-play runs never sees half a game.
 pub fn save_binary_data(filename: &str, samples: &[TrainingSample]) -> std::io::Result<()> {
-    let mut file = File::create(filename)?;
+    let tmp = format!("{filename}.tmp");
+    let mut file = File::create(&tmp)?;
     let mut buffer = Vec::new();
 
     for sample in samples {
@@ -56,5 +60,15 @@ pub fn save_binary_data(filename: &str, samples: &[TrainingSample]) -> std::io::
     }
 
     file.write_all(&buffer)?;
-    Ok(())
+    drop(file);
+    std::fs::rename(&tmp, filename)
+}
+
+/// The file for one self-play game; `version` names the published weights
+/// that played it, in continuous training.
+pub fn game_filename(dir: &str, timestamp: u64, game: usize, version: Option<u64>) -> String {
+    match version {
+        Some(v) => format!("{dir}/game_{timestamp}_{game}_v{v}.bin"),
+        None => format!("{dir}/game_{timestamp}_{game}.bin"),
+    }
 }

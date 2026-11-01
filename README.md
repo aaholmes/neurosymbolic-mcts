@@ -41,6 +41,9 @@ theorem prover.
 - **Mate search**: 3.7× faster at the default setting, from generating only the moves it needs,
   trying first the checks that leave the enemy king fewest escape squares, and remembering
   positions already searched; this also removed a false-mate bug.
+- **Training loop**: besides generations accepted by a statistical test, the network can now be
+  trained continuously while self-play runs, with no acceptance step. This works end to end but
+  has not yet trained a model.
 
 ## Result in King of the Hill
 
@@ -171,10 +174,10 @@ not that 200 new simulations run.
 |---|---|---|
 | Search engine (`src/`) | Rust | Board representation, move generation, the three tiers, MCTS, self-play and evaluation binaries |
 | Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle), cuDNN, CUDA | Runs the network on CPU or GPU, called from batching threads that collect requests from all search threads |
-| Training (`python/`) | Python, PyTorch | Defines the network, trains it on self-play data, and runs the whole loop (`orchestrate.py`) |
+| Training (`python/`) | Python, PyTorch | Defines the network, trains it on self-play data, and runs the loop in generations (`orchestrate.py`) or continuously (`continuous.py`) |
 | GPU search (`cuda/`) | CUDA C++ | An alternative in which the entire search runs on the GPU (see below) |
 
-The network is trained in PyTorch and run in Rust. The orchestrator calls the Rust binaries for
+The network is trained in PyTorch and run in Rust. The Python side calls the Rust binaries for
 self-play and evaluation, and they write training positions to disk for the Python trainer. The
 Rust side re-implements the network layer by layer and loads the PyTorch weights file (`.pth` or
 `.safetensors`) directly, so a trained model needs no export step. A committed set of PyTorch
@@ -484,7 +487,11 @@ Changes measured and not adopted:
 
 ## Training
 
-Self-play, a replay buffer, training, and evaluation of each new generation in a loop:
+Two loops are available. Both train on positions from self-play, with a policy target (the
+search's visit counts) and a value target (the game's result).
+
+**In generations** (`orchestrate.py`), as in AlphaGo Zero: self-play with the current model, train
+a candidate on a replay buffer, and accept the candidate only if it beats the current model.
 
 - **Optimizer:** Muon (learning rate 0.02), with adaptive epochs and early stopping. It has not yet
   been compared with AdamW.
@@ -492,8 +499,34 @@ Self-play, a replay buffer, training, and evaluation of each new generation in a
   evaluation games by default (200 in the pilot), which stops early when the result is clear.
 - **Data:** after generation 1 the evaluation games also supply training data, so separate self-play
   is optional. Positions are weighted by the strength of the model that played them (a 200-Elo gap
-  gives about 32% inclusion). Mirror images are added for positions without castling rights (2×), and
-  all eight board symmetries for pawnless endgames (8×).
+  gives about 32% inclusion).
+
+**Continuously** (`continuous.py`), as in AlphaZero and KataGo: one network, updated while
+self-play runs, with no acceptance step.
+
+- **Self-play** keeps a fixed number of games going (`--concurrent-games`). Each new game loads the
+  newest weights the trainer has published (`self_play --watch <pointer file>`), so a game never
+  mixes two networks. Game files are written under a temporary name and renamed when complete, and
+  their names record the weights version.
+- **The trainer** moves finished games into a sliding window of recent positions (`--window`) and
+  trains so that each generated position is used `--replay-ratio` times on average. It publishes
+  weights every `--publish-every` steps.
+- **If training falls behind** by more than `--max-owed` steps, self-play is paused until it
+  catches up, so the replay ratio holds whatever the relative speeds of the two.
+- **Logged at each publish:** losses, positions and games so far, how many versions old the
+  finished games' weights were, and the time self-play spent paused.
+- **A 9-minute check** (fresh network, 32 games at a time, 100 simulations per move, replay ratio
+  4): 388 games were played with weights versions 0 to 11, each version loaded once, and training
+  kept up without pausing self-play.
+- **Batches stay on one network** because each version has its own inference server; while games
+  started on an older version finish, the games in flight are split across servers, so batches
+  are smaller. This has not been measured.
+
+**Board symmetries**, in both loops: a position without castling rights is equivalent to its
+mirror image, and a pawnless one to all eight rotations and reflections of the board. Each sampled
+position is trained on one of its equivalent images, drawn at random, so every position counts
+once whatever its symmetry and repeated draws see different images. Adding every image instead
+would count a pawnless ending eight times as often as a position with castling rights.
 
 ```bash
 python python/orchestrate.py --enable-koth \
@@ -505,6 +538,8 @@ python python/orchestrate.py --disable-tier1 --disable-material \
   --syzygy-path /data/syzygy                       # network only, plus forced mates and endgame tables
 python python/orchestrate.py --mate-checks 0       # no mate search (--mate-in N, --mate-quiet M also exist)
 python python/orchestrate.py --arch transformer --enable-koth
+python python/continuous.py --work-dir runs/c1 \
+  --replay-ratio 4 --window 200000                 # continuous training; every setting is a flag
 ```
 
 ## Search on the GPU
@@ -540,10 +575,12 @@ Next, in order:
 
 1. **Rerun the mate depth sweep with the faster search**, and measure the faster mate search in
    tiered self-play, which is limited by the CPU.
-2. **Accept unless clearly worse**: replace the SPRT acceptance test with one that rejects only clear
-   regressions, and play a fixed number of games per generation. The pilot above rejected most
-   improvements of about +70 Elo. AlphaZero kept a single, continually updated network with no
-   acceptance step ([Silver et al., 2017](https://arxiv.org/abs/1712.01815)).
+2. **Train continuously in standard chess**: the pilot above rejected most improvements of about
+   +70 Elo, and AlphaZero kept a single, continually updated network with no acceptance step
+   ([Silver et al., 2017](https://arxiv.org/abs/1712.01815)). Compare the continuous loop with
+   the generation loop at equal compute, add a periodic match with a fixed reference to catch a
+   collapse, and log batch sizes to see whether switching weights only between games costs
+   throughput.
 3. **Network alone, with and without exact endings**: matched runs from scratch on one rating
    ladder, with a bootstrap interval on the Elo difference.
 4. **Prune quiescence search**: discard captures that lose material by static exchange evaluation,
@@ -567,9 +604,10 @@ Later directions:
 - **Exact search on spare CPU cores** in network-only mode: run mate and quiescence search on newly
   expanded nodes in parallel with network evaluation, and correct the tree when an exact result
   arrives.
-- **Training settings**: Muon versus AdamW, the amount of training per new sample, and eventually
-  Bayesian optimization of the simulation schedule, architecture and training ratio for strength
-  after a fixed training budget.
+- **Training settings**: Muon versus AdamW, and the replay ratio and window size of continuous
+  training. Architecture and learning rate can be tuned cheaply by supervised training on a saved
+  buffer; simulations per move and the replay ratio need short training runs compared at equal
+  GPU time.
 - **Networks built around piece moves**: layers that pass information between squares a knight or
   queen move apart, rather than only between neighbours as a 3×3 convolution does.
 - **Other domains**: this tiered search for problems with classically solvable subproblems, such as
@@ -597,7 +635,8 @@ KF_RESERVE_MOVES=1      # start each move list with room for 256 moves
 KF_LOG_MATE_LEAVES=f:N  # self_play: write every Nth position searched for mates to file f
 # self_play flags: --batch-size N (cap, default 128), --inference-workers N (batching threads,
 # default 4), --threads N (default: one per game), --syzygy DIR, --mate-checks N (default 5),
-# --mate-in N, --mate-quiet M, --no-mate-search (the last five also in evaluate_models)
+# --mate-in N, --mate-quiet M, --no-mate-search (the last five also in evaluate_models),
+# --watch FILE (start each game with the newest weights named in FILE, for continuous training)
 ./target/release/mate_bench positions.fen 5 5,0,0 2,2,0   # time the mate search: depth,every-move depth,quiet moves
 ./target/release/mate_bench positions.fen 5 --orders all --half tune   # compare move orders on half the positions
 
@@ -606,7 +645,7 @@ cd cuda && mkdir -p build && cd build && cmake .. -DCMAKE_CUDA_ARCHITECTURES=89 
 
 ## Testing
 
-About 1,400 tests: about 900 in Rust, 314 in CUDA and 208 in Python. The fast `cargo test` suite takes
+About 1,400 tests: about 900 in Rust, 314 in CUDA and 237 in Python. The fast `cargo test` suite takes
 about 50 s. See [TESTING.md](TESTING.md).
 
 ```bash
