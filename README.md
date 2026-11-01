@@ -205,30 +205,36 @@ threads, batch cap 128, built with `--features cudnn`. Adding mate-in-one and en
 
 ### From 65 to 823 moves per second
 
-Each row is its own before-and-after comparison, at the setting where it was measured, so the
-gains do not multiply exactly. Values are moves per second for each run.
+Changes in the order they were made. Each gain comes from before-and-after runs of that change
+alone. The first five were measured with fewer threads, so moves per second is given only from
+the fourth batching thread on, when the final setting (1,920 search threads, cap 128) was reached.
+After that, ± is half the difference between two runs, and rows without it are single runs.
 
-| Change | Setting | Before | After |
-|---|---|---|---|
-| LibTorch, the starting point | not recorded | about 65 | |
-| **Candle with cuDNN** (described above) | one network call, batch 128 | 7.19 ms | 4.40 ms |
-| **Fused kernels** for bias, ReLU and squeeze-and-excitation | 60 threads | 67.6 | 80.2 |
-| **Priors for legal moves only**, gathered on the GPU | 1 batching thread, 480 search threads | 249.5, 236.7, 249.4 | 310.0, 310.2 |
-| **f16 on tensor cores** instead of f32 | 1 batching thread, 480 search threads | 189.0 | 298.0 |
-| **mimalloc** instead of glibc's allocator | f32, 1 batching thread, 480 search threads | 115.9, 120.3 | 159.4, 159.7 |
-| **Four batching threads** and 1,920 search threads, from one and 480 | f16 | 298.0 | 453.1 (mean of five) |
-| **One cuDNN call for convolution, bias and ReLU** | 4 batching threads, 1,920 search threads, cap 128 | 437.1 | 442.1 |
-| **Channels-last activations** throughout | as above | 442.6 | 474.0 |
-| **CUDA graphs**: each batch replays a recorded forward pass | as above | 473.9, 473.6 | 534.0, 534.6 |
-| **Two-byte moves** | as above, graphs on | 538.2, 536.2 | 561.3, 558.8 |
-| **Reused subtree counts toward the budget** (5.5% fewer network evaluations per move, so not the same work) | as above | 561.3, 558.8 | 614.3, 617.4 |
-| **No root quiescence search in vanilla self-play** | as above | 617.1, 617.3 | 729.9, 730.5 |
-| **f16 and CUDA graphs as defaults**, from environment variables | as above | 739.0, 730.4 | 729.1, 730.5 |
-| **Mate in one at leaves** (12% fewer network evaluations per move, so not the same work) | as above | 729.1, 730.5 | 824.7, 823.5 |
-| **Endgame tables at leaves**, and games end at a covered position | as above, with mate in one | 824.7, 823.5 | 823.3, 823.5 |
+| Change | Gain | Moves/s |
+|---|---|---|
+| LibTorch, the starting point | | about 65 |
+| **Candle with cuDNN** (described above) | network call 39% faster | |
+| **Fused kernels** for bias, ReLU and squeeze-and-excitation | +19% | |
+| **Priors for legal moves only**, gathered on the GPU | +26% | |
+| **f16 on tensor cores** instead of f32 | +58% | |
+| **mimalloc** instead of glibc's allocator (measured in f32) | +35% | |
+| **Four batching threads** and 1,920 search threads, from one and 480 | +52% | 453 (mean of 5) |
+| **One cuDNN call for convolution, bias and ReLU** | +1% | 442 |
+| **Channels-last activations** throughout | +7% | 474 |
+| **CUDA graphs**: each batch replays a recorded forward pass | +13% | 534.3 ± 0.3 |
+| **Two-byte moves** | +4% | 560.1 ± 1.3 |
+| **Reused subtree counts toward the budget**¹ | +10% | 615.9 ± 1.6 |
+| **No root quiescence search in vanilla self-play** | +18% | 730.2 ± 0.3 |
+| **f16 and CUDA graphs as defaults**, rather than set by environment variables | none | 729.8 ± 0.7 |
+| **Mate in one at leaves**¹ | +13% | 824.1 ± 0.6 |
+| **Endgame tables at leaves**, ending games at a covered position | none | 823.4 ± 0.1 |
+
+¹ Changes the search's work per move: 5.5% and 12% fewer network evaluations per move.
 
 - **The 65 moves per second was not recorded** in this repository, and its settings (game, threads,
   tiers) are not confirmed to match the later rows.
+- **Moves per second sometimes falls between rows** (453 → 442) because rebuilding the earlier
+  commit measured 437; see "Unexplained" below.
 - **Candle and fused kernels.** Candle's generic broadcast kernels for bias, ReLU and
   squeeze-and-excitation took about 40% of GPU time, 18–30 µs each on tensors that need about 2 µs.
   Three custom CUDA kernels, compiled when the model loads, do each in one pass and match the unfused
