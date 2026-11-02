@@ -60,8 +60,9 @@ $$V = \tanh(V_{\text{net}} + k \cdot \Delta M)$$
 where $V_{\text{net}}$ is the network's unbounded output and $k$ is a learned weight on the
 classical score. With no network, $V = \tanh(0.326 \cdot \Delta M)$, which is why the untrained
 engine already plays reasonably. The baseline, as in AlphaZero, uses the network alone. Moves are
-selected with AlphaZero's PUCT rule, with one change so that the network's top move is tried first
-on a node's first visit. Details: [docs/SEARCH.md](docs/SEARCH.md).
+selected with AlphaZero's rule (PUCT, which adds to each move's average value a bonus that grows
+with the network's prior and shrinks with visits), with one change so that the network's top move
+is tried first on a node's first visit. Details: [docs/SEARCH.md](docs/SEARCH.md).
 
 ## Tech stack and how the parts fit together
 
@@ -86,9 +87,9 @@ Why this split:
 - **Inference uses candle, not LibTorch.** Candle is a machine learning library written in Rust. It
   removed a large C++ dependency, lets the network tests run on CPU in continuous integration, and
   allows custom CUDA kernels and cuDNN calls next to the network code; a batch ran 39% faster.
-- **Training stays in PyTorch**, for its mature automatic differentiation and optimizers. On its
-  own the trainer runs 2.6 times as fast as continuous training needs; how much self-play slows
-  when both share the GPU is being measured.
+- **Training stays in PyTorch**, for its mature automatic differentiation and optimizers. Its cost
+  is GPU time, not Python: on one GPU, training each position 4 times on average slows self-play
+  by 15% with the trainer in bf16 and channels-last layout, compared with 24% in f32.
 
 ## Training
 
@@ -98,8 +99,10 @@ Two loops are available ([docs/TRAINING.md](docs/TRAINING.md)):
   games and keep it only if it beats the current model in a sequential probability ratio test.
 - **Continuously** (`python/continuous.py`), as in AlphaZero and KataGo: self-play never stops,
   each new game uses the newest weights, and the trainer trains on a sliding window of recent
-  games so that each position is used a fixed number of times on average. This runs end to end
-  but has not yet trained a model.
+  games so that each position is used a fixed number of times on average (the replay ratio). The
+  trainer runs in 16-bit floating point (bf16) with the channels-last memory layout, which cuts its
+  GPU time per step by 43%, with training loss within 0.1% of f32 over 320 steps. This runs end
+  to end but has not yet trained a model.
 
 Positions with board symmetries (mirror images without castling rights, all eight rotations and
 reflections without pawns) are trained on one randomly drawn equivalent image, so every position
@@ -108,7 +111,9 @@ counts once whatever its symmetry.
 ## Next steps
 
 1. **Train continuously in standard chess**, compared with the generation loop at equal compute,
-   with a periodic match with a fixed reference to catch a collapse.
+   with a periodic match with a fixed reference to catch a collapse. Choose the replay ratio and
+   batch size by strength per hour: a lower ratio or a larger batch leaves self-play more of the
+   GPU (10% slower than alone at batch 1024, compared with 15% at 256) but may learn less per position.
 2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap
    interval on the Elo difference. Whether exact endings help training is not yet measured.
 3. **Make the quiescence search cheaper**, so the full classical search fits in standard chess.
@@ -119,7 +124,8 @@ counts once whatever its symmetry.
 5. **Full searches on only some moves** (playout cap randomization,
    [Wu, 2019](https://arxiv.org/abs/1902.10565)), judged by a training comparison.
 
-Later directions: a small learned evaluation inside quiescence search, as in Stockfish's NNUE;
+Later directions: a small learned evaluation inside quiescence search, as in Stockfish's
+efficiently updatable neural network (NNUE);
 network layers that connect squares a knight or queen move apart; tuning the training settings
 cheaply on saved data before full runs; and applying the tiered search to mathematical reasoning,
 with an automated theorem prover as the exact method.

@@ -44,6 +44,8 @@ class ContinuousConfig:
     lr: float = 0.02
     batch_size: int = 256
     augment: bool = True
+    precision: str = "bf16"  # "bf16" runs the forward and backward passes under bf16 autocast
+    channels_last: bool = True  # NHWC memory layout for the convolutions
     device: str = ""  # "" = cuda if available
     seed: int = 0
     resume_from: str = ""  # a cont_N.pth to continue from
@@ -159,13 +161,23 @@ class GameWindow:
         return boards, scalars, values, policies
 
 
+PRECISIONS = {"f32": torch.float32, "bf16": torch.bfloat16}
+
+
 class Trainer:
     """Trains one model and publishes its weights for self-play."""
 
     def __init__(self, model, weights_dir, optimizer="muon", lr=0.02, batch_size=256,
-                 keep_published=5, device="", seed=0, augment=True, disable_material=False):
+                 keep_published=5, device="", seed=0, augment=True, disable_material=False,
+                 precision="f32", channels_last=False):
+        if precision not in PRECISIONS:
+            raise ValueError(f"precision must be one of {sorted(PRECISIONS)}, not {precision!r}")
+        self.precision = precision
+        self.channels_last = channels_last
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
+        if channels_last:
+            self.model = self.model.to(memory_format=torch.channels_last)
         self.optimizer = make_optimizer(self.model, optimizer, lr)
         self.weights_dir = weights_dir
         self.pointer = os.path.join(weights_dir, "published.txt")
@@ -196,10 +208,15 @@ class Trainer:
                 for i in range(len(boards)):
                     boards[i], _, _, policies[i] = random_transform(
                         boards[i], scalars[i, 0], values[i], policies[i], self.rng)
-            loss, p_loss, v_loss, k = batch_loss(
-                self.model, torch.from_numpy(boards), torch.from_numpy(scalars),
-                torch.from_numpy(values), torch.from_numpy(policies),
-                self.device, self.disable_material)
+            boards = torch.from_numpy(boards)
+            if self.channels_last:
+                boards = boards.to(memory_format=torch.channels_last)
+            with torch.autocast(torch.device(self.device).type, dtype=PRECISIONS[self.precision],
+                                enabled=self.precision != "f32"):
+                loss, p_loss, v_loss, k = batch_loss(
+                    self.model, boards, torch.from_numpy(scalars),
+                    torch.from_numpy(values), torch.from_numpy(policies),
+                    self.device, self.disable_material)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -217,7 +234,8 @@ class Trainer:
         path = os.path.join(self.weights_dir, f"cont_{self.version}.pth")
         tmp = path + ".tmp"
         torch.save({
-            "model_state_dict": self.model.state_dict(),
+            # Contiguous (NCHW) tensors, the layout the Rust loader reads.
+            "model_state_dict": {k: v.contiguous() for k, v in self.model.state_dict().items()},
             "optimizer_state_dict": self.optimizer.state_dict(),
             "global_minibatch": self.steps,
             "version": self.version,
@@ -236,6 +254,15 @@ def create_model(cfg):
     if cfg.arch == "transformer":
         return TransformerNet(num_blocks=cfg.num_blocks, hidden_dim=cfg.hidden_dim)
     return SeresNet(num_blocks=cfg.num_blocks, hidden_dim=cfg.hidden_dim)
+
+
+def make_trainer(cfg, weights_dir):
+    torch.manual_seed(cfg.seed)
+    return Trainer(create_model(cfg), weights_dir, optimizer=cfg.optimizer, lr=cfg.lr,
+                   batch_size=cfg.batch_size, keep_published=cfg.keep_published,
+                   device=cfg.device, seed=cfg.seed, augment=cfg.augment,
+                   disable_material=not cfg.enable_material, precision=cfg.precision,
+                   channels_last=cfg.channels_last)
 
 
 def self_play_command(cfg, pointer, first_weights, games_dir):
@@ -293,11 +320,7 @@ def run(cfg, launch=launch_self_play):
         json.dump(asdict(cfg), f, indent=2)
     log_path = os.path.join(cfg.work_dir, "continuous_log.jsonl")
 
-    torch.manual_seed(cfg.seed)
-    trainer = Trainer(create_model(cfg), weights_dir, optimizer=cfg.optimizer, lr=cfg.lr,
-                      batch_size=cfg.batch_size, keep_published=cfg.keep_published,
-                      device=cfg.device, seed=cfg.seed, augment=cfg.augment,
-                      disable_material=not cfg.enable_material)
+    trainer = make_trainer(cfg, weights_dir)
     if cfg.resume_from:
         trainer.resume(cfg.resume_from)
     first = trainer.publish()

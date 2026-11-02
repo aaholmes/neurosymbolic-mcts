@@ -35,13 +35,37 @@ self-play runs, with no acceptance step.
   started on an older version finish, the games in flight are split across servers, so batches
   are smaller. This has not been measured.
 
-**Profile of the trainer** (6 residual blocks, 128 channels, Muon, batch 256, f32, on 38,502
-positions saved by the check above, one RTX 5060 Ti; two runs of 500 steps, ± the standard
-deviation over blocks of 100 steps): 32.3 ms per step, or 30.9 steps per second. The step on the
-GPU (forward, backward and optimizer) takes 24.4 ± 0.01 ms, reading positions 3.5 ms and the
-symmetry transforms 4.4 ms. A replay ratio of 4 at 760 positions per second needs about 12 steps
-per second, so the trainer alone has 2.6 times what it needs; how much self-play slows when both
-share the GPU is being measured.
+**Profile of the trainer** (6 residual blocks, 128 channels, Muon, on 38,502 positions saved by
+the check above, one RTX 5060 Ti; two runs of 300 steps per setting, ± under 0.2 ms). The GPU
+step is the forward pass, backward pass and optimizer step:
+
+| Precision and layout | GPU step, batch 256 | GPU step, batch 1024 | Per position, batch 1024 |
+|---|---|---|---|
+| f32 (convolutions in TF32, the PyTorch default) | 24.8 ms | 81.7 ms | 0.080 ms |
+| f32, channels-last | 24.6 ms | 75.2 ms | 0.073 ms |
+| bf16 autocast | 15.0 ms | 44.6 ms | 0.044 ms |
+| bf16 autocast, channels-last (default) | 14.1 ms | 39.2 ms | 0.038 ms |
+
+Reading positions and the symmetry transforms take a further 7.9 ms per 256 positions on the CPU.
+On the same batches, the training loss after 320 steps was 1.0425 in f32 and 1.0429 in bf16 with
+channels-last, a difference about as large as changing only the layout in f32 (1.0408). The
+weights stay in f32 and are published in the layout the Rust loader reads.
+
+**Sharing the GPU with self-play** (network-only self-play of 1,920 games at 200 simulations per
+move, mate search and endgame tables on; each trainer paced to train each position 4 times, and
+the ratios achieved were 3.98 to 4.02; two runs per setting, ± half their difference):
+
+| Trainer running alongside | Self-play moves/s | Trainer steps/s | Trainer GPU step while sharing |
+|---|---|---|---|
+| None | 767.8 ± 2.4 | | |
+| f32, batch 256 | 586.3 ± 0.3 (−23.6%) | 9.2 | 49.6 ms |
+| bf16, channels-last, batch 256 | 653.6 ± 0.3 (−14.9%) | 10.2 | 29.7 ms |
+| bf16, channels-last, batch 1024 | 687.4 ± 2.8 (−10.5%) | 2.7 | 75.4 ms |
+
+The two take turns on the GPU, so self-play loses roughly the GPU time the trainer uses. bf16 with
+channels-last makes self-play 11% faster than with the f32 trainer, and batch 1024 makes it 17%
+faster. The larger batch takes 4 times fewer optimizer steps for the same data; whether that
+trains as well per position is not yet measured, so the default batch stays 256.
 
 **Board symmetries**, in both loops: a position without castling rights is equivalent to its
 mirror image, and a pawnless one to all eight rotations and reflections of the board. Each sampled
