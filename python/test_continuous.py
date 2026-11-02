@@ -399,3 +399,64 @@ def test_self_play_command_passes_the_exploration_constant():
     assert cont.ContinuousConfig().c_puct == 1.414
     cmd = cont.self_play_command(cont.ContinuousConfig(c_puct=2.2), "/w/p.txt", "/w/c.pth", "/d/g")
     assert cmd[cmd.index("--c-puct") + 1] == "2.2"
+
+
+class TestSidePositions:
+    """Side positions have a policy target and no value target (NaN)."""
+
+    def _model(self):
+        return cont.ContinuousConfig(num_blocks=1, hidden_dim=16, device="cpu", optimizer="adam",
+                                     precision="f32", channels_last=False)
+
+    def test_value_loss_skips_positions_without_a_value_target(self, tmp):
+        from train import batch_loss
+        cfg = self._model()
+        trainer = cont.make_trainer(cfg, os.path.join(tmp, "w"))
+        rng = np.random.default_rng(0)
+        n = 8
+        boards = torch.from_numpy(rng.standard_normal((n, 17, 8, 8)).astype(np.float32))
+        scalars = torch.zeros((n, 2))
+        policies = torch.full((n, 4672), 1.0 / 4672)
+        values = torch.from_numpy(rng.uniform(-1, 1, (n, 1)).astype(np.float32))
+        masked = values.clone()
+        masked[4:] = float("nan")
+        _, p_all, v_all, _ = batch_loss(trainer.model, boards, scalars, values, policies, "cpu")
+        loss, p_m, v_m, _ = batch_loss(trainer.model, boards, scalars, masked, policies, "cpu")
+        _, _, v_first, _ = batch_loss(trainer.model, boards[:4], scalars[:4], values[:4],
+                                      policies[:4], "cpu")
+        assert torch.isfinite(loss)
+        assert torch.allclose(p_m, p_all)  # every position keeps its policy target
+        assert torch.allclose(v_m, v_first)  # value loss averaged over the 4 with a target
+        loss.backward()
+        assert all(torch.isfinite(p.grad).all() for p in trainer.model.parameters()
+                   if p.grad is not None)
+
+    def test_a_batch_of_only_side_positions_trains_the_policy_alone(self, tmp):
+        from train import batch_loss
+        trainer = cont.make_trainer(self._model(), os.path.join(tmp, "w"))
+        n = 4
+        boards = torch.randn((n, 17, 8, 8))
+        values = torch.full((n, 1), float("nan"))
+        loss, p, v, _ = batch_loss(trainer.model, boards, torch.zeros((n, 2)), values,
+                                   torch.full((n, 4672), 1.0 / 4672), "cpu")
+        assert torch.isfinite(loss) and v.item() == 0.0
+        assert torch.allclose(loss, p)
+
+    def test_symmetry_transforms_keep_a_missing_value_missing(self):
+        from augmentation import random_transform
+        rng = np.random.default_rng(0)
+        board = np.zeros((17, 8, 8), dtype=np.float32)  # no pawns, no castling: 8 images
+        board[5, 0, 4] = 1.0
+        board[11, 7, 3] = 1.0
+        policy = np.full(4672, 1.0 / 4672, dtype=np.float32)
+        for _ in range(16):
+            _, _, value, _ = random_transform(board, 0.0, float("nan"), policy, rng)
+            assert np.isnan(value)
+
+    def test_self_play_command_passes_the_side_position_settings(self):
+        assert cont.ContinuousConfig().side_fraction == 0.0
+        assert cont.ContinuousConfig().side_two_moves == 0.5
+        cmd = cont.self_play_command(cont.ContinuousConfig(side_fraction=0.5, side_two_moves=0.25),
+                                     "/w/p.txt", "/w/c.pth", "/d/g")
+        assert cmd[cmd.index("--side-fraction") + 1] == "0.5"
+        assert cmd[cmd.index("--side-two-moves") + 1] == "0.25"

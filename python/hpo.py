@@ -8,7 +8,7 @@ first trial (the default settings) fixed at 0. A Gaussian-process optimizer
 
 Usage:
   python python/hpo.py --work-dir runs/hpo --phase start   # default, repeat, hand-picked, Sobol
-  python python/hpo.py --work-dir runs/hpo --phase bo --n-bo 15
+  python python/hpo.py --work-dir runs/hpo --phase bo --n-bo 16
   python python/hpo.py --work-dir runs/hpo --phase table
 The ledger (trials.jsonl, matches.jsonl) makes every phase resumable.
 """
@@ -35,15 +35,19 @@ SPACE = {
     "tau_decay": (0.8, 0.95, False, float),
     "c_puct": (1.0, 3.0, True, float),
     "window": (100_000, 1_000_000, True, int),
+    "side_fraction": (0.0, 1.0, False, float),
+    "side_two_moves": (0.0, 1.0, False, float),
 }
 DEFAULTS = {"lr": 0.02, "replay_ratio": 4.0, "simulations_per_move": 200,
-            "tau_decay": 0.9, "c_puct": 1.414, "window": 200_000}
+            "tau_decay": 0.9, "c_puct": 1.414, "window": 200_000,
+            "side_fraction": 0.0, "side_two_moves": 0.5}
 ANCHOR = "t00_default"
 # (name, settings, Dirichlet noise at the root). Root noise is not tuned; one
 # trial at the defaults checks whether it helps.
 HAND_PICKED = [
     ("t02_root_noise", dict(DEFAULTS), 0.25),
     ("t03_more_data", dict(DEFAULTS, replay_ratio=2.0, simulations_per_move=100), 0.0),
+    ("t04_side_positions", dict(DEFAULTS, side_fraction=0.5), 0.0),
 ]
 
 
@@ -55,7 +59,7 @@ def _from_unit(u):
     return params
 
 
-def starting_trials(n_sobol=6, seed=0):
+def starting_trials(n_sobol=8, seed=0):
     """The default settings, the defaults again with another seed (to measure
     run-to-run noise), hand-picked settings, and n_sobol space-filling points."""
     from scipy.stats import qmc
@@ -78,6 +82,7 @@ def trial_config(params, seed, work_dir, syzygy_path, self_play_bin, dirichlet_e
         lr=params["lr"], replay_ratio=params["replay_ratio"],
         simulations_per_move=params["simulations_per_move"],
         tau_decay=params["tau_decay"], c_puct=params["c_puct"], window=params["window"],
+        side_fraction=params["side_fraction"], side_two_moves=params["side_two_moves"],
         dirichlet_epsilon=dirichlet_epsilon,
     )
 
@@ -240,8 +245,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--work-dir", required=True)
     p.add_argument("--phase", choices=["start", "bo", "table"], required=True)
-    p.add_argument("--n-sobol", type=int, default=6)
-    p.add_argument("--n-bo", type=int, default=15)
+    p.add_argument("--n-sobol", type=int, default=8)
+    p.add_argument("--n-bo", type=int, default=16)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--syzygy", default="/data/syzygy")
     p.add_argument("--self-play-bin", required=False, default="")

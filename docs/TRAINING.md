@@ -78,7 +78,7 @@ engines are rated jointly with a Bradley–Terry fit, with standard errors from 
 in each match. Each engine plays with the exploration constant it was trained with. Starting
 trials: the defaults, the defaults with another seed, the defaults with Dirichlet noise at the root
 (ε = 0.25; root noise is not tuned, and this trial checks whether it helps), fewer simulations with
-more data, and six Sobol points; after that, Optuna's Gaussian-process sampler proposes each trial
+more data, the defaults with side positions at half of all moves, and eight Sobol points; after that, Optuna's Gaussian-process sampler proposes each trial
 from the ratings so far. The ledger (`trials.jsonl`, `matches.jsonl`) lets an interrupted search
 resume.
 
@@ -90,6 +90,8 @@ resume.
 | Temperature decay per move | 0.8–0.95 |
 | Exploration constant in PUCT (default 1.414) | 1–3, log scale |
 | Window (positions kept) | 100,000–1,000,000, log scale |
+| Fraction of moves with a side position | 0–1 |
+| Share of side positions two random moves away | 0–1 |
 
 With 1,024 games in flight, self-play alone runs at 707 moves/s, compared with 768 at 1,920 and
 561 at 512 (one run each), and the first games finish after about 110 s rather than 200 s.

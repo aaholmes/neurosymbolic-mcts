@@ -132,21 +132,31 @@ def test_a_trial_whose_training_fails_is_not_recorded(tmp):
     assert search.trials() == {}
 
 
-class TestSixSettings:
-    def test_the_space_tunes_exploration_and_window_but_not_root_noise(self):
+class TestEightSettings:
+    def test_the_space_tunes_exploration_window_and_side_positions_but_not_root_noise(self):
         assert set(hpo.SPACE) == {"lr", "replay_ratio", "simulations_per_move", "tau_decay",
-                                  "c_puct", "window"}
+                                  "c_puct", "window", "side_fraction", "side_two_moves"}
         assert hpo.SPACE["c_puct"][:3] == (1.0, 3.0, True)
         assert hpo.SPACE["window"][:3] == (100_000, 1_000_000, True)
         assert hpo.SPACE["window"][3] is int
         assert hpo.SPACE["simulations_per_move"][:2] == (100, 400)
+        assert hpo.SPACE["side_fraction"][:3] == (0.0, 1.0, False)
+        assert hpo.SPACE["side_two_moves"][:3] == (0.0, 1.0, False)
         assert hpo.DEFAULTS["c_puct"] == 1.414 and hpo.DEFAULTS["window"] == 200_000
+        assert hpo.DEFAULTS["side_fraction"] == 0.0 and hpo.DEFAULTS["side_two_moves"] == 0.5
 
-    def test_six_sobol_points_and_the_root_noise_check_stay_in_the_starting_trials(self):
+    def test_eight_sobol_points_and_the_hand_picked_checks_are_the_starting_trials(self):
         trials = hpo.starting_trials()
-        assert sum(t["name"].startswith("sobol") for t in trials) == 6
+        assert sum(t["name"].startswith("sobol") for t in trials) == 8
         noise = [t for t in trials if t["name"] == "t02_root_noise"]
         assert noise and noise[0]["epsilon"] == 0.25
+        side = [t for t in trials if t["name"] == "t04_side_positions"]
+        assert side and side[0]["params"] == dict(hpo.DEFAULTS, side_fraction=0.5)
+
+    def test_trial_config_sets_the_side_positions(self):
+        params = dict(hpo.DEFAULTS, side_fraction=0.4, side_two_moves=0.3)
+        cfg = hpo.trial_config(params, 0, "/r", "/tb", "/bin/sp")
+        assert (cfg.side_fraction, cfg.side_two_moves) == (0.4, 0.3)
 
     def test_trial_config_sets_exploration_window_and_root_noise(self):
         params = dict(hpo.DEFAULTS, c_puct=2.0, window=500_000)

@@ -158,3 +158,78 @@ pub fn c_puct_arg(args: &[String], flag: &str) -> Result<f64, String> {
         _ => Err(format!("{flag} needs a positive number, not {value:?}")),
     }
 }
+
+/// The value target of a position with no game result (a side position):
+/// the trainer skips its value loss.
+pub const NO_VALUE: f32 = f32::NAN;
+
+/// Side positions: at a fraction of main-line moves, one or two random moves
+/// are played from the position and the result is searched once, for a policy
+/// target only. The game continues from the main-line position.
+///
+/// A random move is usually a blunder. After one, the side to move plays from
+/// an advantage; after two, it may instead play from a disadvantage after its
+/// own blunder, or from a neutral but different position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SidePositions {
+    /// Probability that a main-line move gets a side position.
+    pub fraction: f64,
+    /// Probability that a side position is two random moves away, not one.
+    pub two_moves: f64,
+}
+
+impl Default for SidePositions {
+    fn default() -> Self {
+        Self {
+            fraction: 0.0,
+            two_moves: 0.5,
+        }
+    }
+}
+
+impl SidePositions {
+    /// Both settings must be probabilities.
+    pub fn new(fraction: f64, two_moves: f64) -> Result<Self, String> {
+        for (name, p) in [("side fraction", fraction), ("two-move share", two_moves)] {
+            if !(0.0..=1.0).contains(&p) {
+                return Err(format!("{name} must be between 0 and 1, not {p}"));
+            }
+        }
+        Ok(Self {
+            fraction,
+            two_moves,
+        })
+    }
+
+    /// How many random moves lead to this move's side position: 0 for none.
+    pub fn random_moves<R: Rng>(&self, rng: &mut R) -> u32 {
+        if self.fraction <= 0.0 || rng.gen::<f64>() >= self.fraction {
+            0
+        } else if rng.gen::<f64>() < self.two_moves {
+            2
+        } else {
+            1
+        }
+    }
+}
+
+/// The position after `n` uniformly random legal moves from `board`, or None
+/// if the game ends on the way (no legal move, or checkmate or stalemate at
+/// the end), since such a position has nothing to search.
+pub fn random_line<R: Rng>(
+    board: &Board,
+    n: u32,
+    move_gen: &crate::move_generation::MoveGen,
+    rng: &mut R,
+) -> Option<Board> {
+    let mut current = board.clone();
+    for _ in 0..n {
+        let moves = crate::mcts::node::MctsNode::get_legal_moves(&current, move_gen);
+        if moves.is_empty() {
+            return None;
+        }
+        current = current.apply_move_to_board(moves[rng.gen_range(0..moves.len())]);
+    }
+    let (mate, stalemate) = current.is_checkmate_or_stalemate(move_gen);
+    (!mate && !stalemate).then_some(current)
+}

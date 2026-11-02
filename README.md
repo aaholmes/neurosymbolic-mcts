@@ -64,9 +64,29 @@ engine already plays reasonably. The baseline, as in AlphaZero, uses the network
 Moves are selected with AlphaZero's rule (PUCT, which adds to each move's average value a bonus
 that grows with the network's prior and shrinks with visits). Two additions keep the search from
 ignoring moves the network rates low: every capture, check and fork gets one visit before the rule
-applies, and so does every move at the root. The network is trained to predict the root's visit
-counts minus one, so a move whose only visit showed it was bad gets no weight in that target.
-Details: [docs/SEARCH.md](docs/SEARCH.md).
+applies, and so does every move at the root. Details: [docs/SEARCH.md](docs/SEARCH.md).
+
+## How self-play generates training data
+
+Each position in a self-play game gives the network two targets: a policy target from the search
+and a value target from the game's result.
+
+- **Policy target: visits minus one.** Every root move gets one visit, which is the price of
+  evaluating it, so one visit is subtracted from each move's count. A move whose only visit showed
+  it was bad gets no weight.
+- **Move played: sampled from the same counts.** The move is drawn in proportion to
+  (visits − 1)^(1/τ). The temperature τ starts at 1 (proportional to the counts) and decays each
+  move toward 0 (the most-visited move), so openings vary and later play follows the search.
+- **Side positions** (an alternative to AlphaZero's root noise, being tested). At some moves, one
+  or two random moves are played from the position, and the result is searched once; the game
+  itself continues from the main line. A random move is usually a blunder, so the network learns
+  to play on from an advantage after the opponent blunders, and, with two random moves, also from
+  a disadvantage after its own blunder. These positions have no game result, so they train the
+  policy only. AlphaZero's Dirichlet noise on the
+  root priors is also available, and is off by default.
+- **Board symmetries.** A position without castling rights equals its mirror image, and a pawnless
+  one equals all eight rotations and reflections. Each position is trained on one image drawn at
+  random, so every position counts once whatever its symmetry.
 
 ## Tech stack and how the parts fit together
 
@@ -110,28 +130,25 @@ Two loops are available ([docs/TRAINING.md](docs/TRAINING.md)):
 - **Tuning** (`python/hpo.py`): 1-hour continuous runs from scratch, each played over 800 games
   with up to five earlier runs and rated jointly by Elo (a Bradley–Terry fit with bootstrap
   standard errors). A Gaussian-process optimizer proposes each new run's settings from the ratings
-  so far. The first ten runs are in progress, including the default settings twice with
-  different seeds to measure how much two identical runs differ.
+  so far. The first thirteen runs are in progress, including the default settings twice with
+  different seeds to measure how much two identical runs differ, and the defaults with side
+  positions added.
 
-Self-play varies its games by sampling each move played in proportion to the root's visit counts
-minus one, raised to the power 1/τ. The temperature τ falls over the game, so openings vary and
-later moves are close to the search's choice. Dirichlet noise can also be mixed into the root's
-priors at every move, as in AlphaZero, so a few random moves are searched in depth; it is off by
-default.
-
-Positions with board symmetries (mirror images without castling rights, all eight rotations and
-reflections without pawns) are trained on one randomly drawn equivalent image, so every position
-counts once whatever its symmetry.
+Each new weights version starts a fresh inference server inside the running self-play process.
+Two bugs made long runs fail: a server loading or shutting down while another recorded a CUDA
+graph could break that recording and freeze self-play, and each retired server kept about 75 MiB
+of GPU memory. Loading and release now wait for any recording to finish, each retired worker frees
+its cuDNN state and graph memory, and a run stops if no game finishes for five minutes.
 
 ## Next steps
 
 1. **Choose the settings for a 12-hour continuous run in standard chess.** If the two runs with
    default settings land within about 50 Elo of each other, 1-hour runs can rank settings, and
-   about 15 runs proposed by the optimizer follow. They tune six settings: learning rate, replay
-   ratio, simulations per move, the temperature's decay, the exploration constant in PUCT and the
-   number of positions the trainer keeps. One hour favours
-   settings that learn fast early, so the best two or three are rerun for 4 hours to check that
-   their order holds before the 12-hour run.
+   about 16 runs proposed by the optimizer follow. They tune eight settings: learning rate, replay
+   ratio, simulations per move, the temperature's decay, the exploration constant in PUCT, the
+   number of positions the trainer keeps, and how often side positions are added and how many
+   random moves away they are. One hour favours settings that learn fast early, so the best two or
+   three are rerun for 4 hours to check that their order holds before the 12-hour run.
 2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap
    interval on the Elo difference. Whether exact endings help training is not yet measured.
 3. **Make the quiescence search cheaper**, so the full classical search fits in standard chess.

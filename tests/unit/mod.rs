@@ -48,6 +48,7 @@ mod see_tests;
 mod selection_optimization_tests;
 mod selection_tests;
 mod self_play_loop_tests;
+mod side_position_tests;
 mod simulation_tests;
 mod tactical_detection_tests;
 mod tactical_mcts_tests;

@@ -78,6 +78,10 @@ class ContinuousConfig:
     inference_batch_size: int = 128
     inference_workers: int = 4
     c_puct: float = 1.414  # exploration constant in the search's PUCT rule
+    # Side positions: at this fraction of moves, 1 or 2 random moves off the main line
+    # (2 with probability side_two_moves) are searched once for a policy-only sample
+    side_fraction: float = 0.0
+    side_two_moves: float = 0.5
     # Move played: sampled in proportion to (visits - 1)^(1/tau),
     # tau = tau0 * tau_decay^(move - 1), at least tau_min (0 plays the most-visited move)
     tau0: float = 1.0
@@ -339,6 +343,7 @@ def self_play_command(cfg, pointer, first_weights, games_dir):
         "--dirichlet-alpha", str(cfg.dirichlet_alpha),
         "--dirichlet-epsilon", str(cfg.dirichlet_epsilon),
         "--c-puct", str(cfg.c_puct),
+        "--side-fraction", str(cfg.side_fraction), "--side-two-moves", str(cfg.side_two_moves),
         "--watch", pointer,
     ]
     if cfg.qsearch != "extended":

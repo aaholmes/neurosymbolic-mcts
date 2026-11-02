@@ -3,6 +3,7 @@
 //! This binary plays games of the engine against itself to generate training data
 //! for the neural network. It outputs binary files compatible with the Python training script.
 
+use kingfisher::board::Board;
 use kingfisher::boardstack::BoardStack;
 use kingfisher::egtb::{Ending, ExactEndings};
 use kingfisher::mcts::{
@@ -15,8 +16,8 @@ use kingfisher::search::mate_search;
 use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
 use kingfisher::training_data::{
-    game_filename, policy_target, sample_with_temperature, save_binary_data, temperature,
-    TrainingSample,
+    game_filename, policy_target, random_line, sample_with_temperature, save_binary_data,
+    temperature, SidePositions, TrainingSample, NO_VALUE,
 };
 use kingfisher::transposition::TranspositionTable;
 use kingfisher::weights_watch::WatchedModel;
@@ -143,6 +144,14 @@ fn main() {
         tau_min: f64_arg("--tau-min", 0.0),
         dirichlet_alpha: f64_arg("--dirichlet-alpha", 0.3),
         dirichlet_epsilon: f64_arg("--dirichlet-epsilon", 0.0),
+        side: SidePositions::new(
+            f64_arg("--side-fraction", 0.0),
+            f64_arg("--side-two-moves", 0.5),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2)
+        }),
     };
 
     let qsearch_variant = args
@@ -368,6 +377,10 @@ fn play_game(
     // Use BoardStack for repetition and 50-move detection (Phase 3)
     let mut board_stack = BoardStack::new();
     let mut samples = Vec::new();
+    let mut side_samples = Vec::new();
+    // Side positions draw from their own stream, so the main line's moves do
+    // not depend on whether side positions are on.
+    let mut side_rng = StdRng::seed_from_u64(seed ^ 0x51DE_0000_51DE_0000);
     let mut move_count = 0;
     let mut previous_root = None;
     let mut early_outcome: Option<f32> = None;
@@ -451,38 +464,49 @@ fn play_game(
             break; // Game Over
         }
 
-        // Prepare Sample (Value unknown yet)
-        let mut policy_dist = Vec::new();
-        let mut policy_moves = Vec::new();
-        for (mv, prob) in policy_target(&result.root_policy) {
-            let relative_mv = if board.w_to_move {
-                mv
-            } else {
-                mv.flip_vertical()
-            };
-            policy_dist.push((move_to_index(relative_mv) as u16, prob));
-            policy_moves.push((mv, prob));
-        }
-
-        let q = qsearch_inputs(
+        // The game's result fills in the value target once the game ends.
+        samples.push(make_sample(
             &board,
+            &result.root_policy,
+            0.0,
             &move_gen,
-            &config.pesto,
+            &config,
             qsearch_variant,
             enable_material,
-        );
-        let (q_result, qsearch_completed) = (q.score, q.completed);
-        let material_scalar = q_result;
+        ));
 
-        samples.push(TrainingSample {
-            board: board.clone(),
-            policy: policy_dist,
-            policy_moves,
-            value_target: 0.0, // Placeholder
-            material_scalar,
-            qsearch_completed,
-            w_to_move: board.w_to_move,
-        });
+        // A side position: one or two random moves from here, searched once
+        // for a policy target. The game goes on from the main line.
+        let n_random = exploration.side.random_moves(&mut side_rng);
+        if n_random > 0 {
+            if let Some(side_board) = random_line(&board, n_random, &move_gen, &mut side_rng) {
+                if exact
+                    .game_result(&side_board, &move_gen, enable_koth)
+                    .is_none()
+                {
+                    let mut side_config = config.clone();
+                    side_config.noise_seed = side_rng.gen();
+                    let side_result = tactical_mcts_search_for_training_with_reuse(
+                        side_board.clone(),
+                        &move_gen,
+                        side_config,
+                        None,
+                        &mut transposition_table,
+                    );
+                    if side_result.best_move.is_some() {
+                        side_samples.push(make_sample(
+                            &side_board,
+                            &side_result.root_policy,
+                            NO_VALUE,
+                            &move_gen,
+                            &config,
+                            qsearch_variant,
+                            enable_material,
+                        ));
+                    }
+                }
+            }
+        }
 
         // Play a move sampled at a temperature that falls over the game
         let tau = temperature(
@@ -767,7 +791,49 @@ fn play_game(
         println!();
     }
 
+    // Side positions keep their missing value target and follow the main line.
+    samples.extend(side_samples);
     samples
+}
+
+/// A training sample at `board`: the policy target from the root's visits,
+/// the classical score inputs, and `value_target`.
+fn make_sample(
+    board: &Board,
+    root_policy: &[(Move, u32)],
+    value_target: f32,
+    move_gen: &MoveGen,
+    config: &TacticalMctsConfig,
+    qsearch_variant: QSearchVariant,
+    enable_material: bool,
+) -> TrainingSample {
+    let mut policy = Vec::new();
+    let mut policy_moves = Vec::new();
+    for (mv, prob) in policy_target(root_policy) {
+        let relative_mv = if board.w_to_move {
+            mv
+        } else {
+            mv.flip_vertical()
+        };
+        policy.push((move_to_index(relative_mv) as u16, prob));
+        policy_moves.push((mv, prob));
+    }
+    let q = qsearch_inputs(
+        board,
+        move_gen,
+        &config.pesto,
+        qsearch_variant,
+        enable_material,
+    );
+    TrainingSample {
+        board: board.clone(),
+        policy,
+        policy_moves,
+        value_target,
+        material_scalar: q.score,
+        qsearch_completed: q.completed,
+        w_to_move: board.w_to_move,
+    }
 }
 
 /// How self-play chooses the move played, and the noise mixed into each
@@ -780,4 +846,6 @@ struct Exploration {
     tau_min: f64,
     dirichlet_alpha: f64,
     dirichlet_epsilon: f64,
+    /// Extra searches one or two random moves off the main line, for policy targets.
+    side: SidePositions,
 }

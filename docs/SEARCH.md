@@ -78,6 +78,17 @@ at every move's search, as in AlphaZero (`--dirichlet-epsilon`, `--dirichlet-alp
 random root moves are searched in depth; it is off by default. Evaluation games keep their own
 scheme (`--explore-base` in `evaluate_models`) and never add noise.
 
+Side positions (`--side-fraction F`, `--side-two-moves P`, both off by default) add training
+positions just off the main line. At a fraction F of moves, one random move (or two, with
+probability P) is played from the position, and the result is searched once; the game goes on
+from the main line. A random move is usually a blunder. After one random move, the side to move
+plays from an advantage, its opponent having just blundered; after two, it may instead play from a
+disadvantage after its own blunder, or from a neutral but different position if the two moves
+roughly cancel. So the network learns to play both sides of a position after a blunder. These positions have no game result, so they train the policy only: their
+value target is saved as NaN and the trainer leaves them out of the value loss. Each side search
+costs as much as a main-line search, so with F = 0.5 a game yields about 1.5 times as many
+positions for the same number of moves. Whether this helps training is not yet measured.
+
 After each move the subtree under the move played is kept for the next search. Its visits count
 toward the next move's budget, so "200 simulations per move" means the root reaches 200 visits,
 not that 200 new simulations run.
