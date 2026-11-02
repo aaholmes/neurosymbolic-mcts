@@ -58,6 +58,7 @@ mod training_tests;
 mod transposition_tests;
 mod tree_reuse_tests;
 mod utils_tests;
+mod policy_target_tests;
 mod value_target_tests;
 mod weights_watch_tests;
 
