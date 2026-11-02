@@ -264,12 +264,26 @@ thread_local! {
     static FUSED_PLANS: Leaked<HashMap<FusedKey, FusedPlan>> = leaked();
 }
 
-/// A thread-local cache that is never dropped. Releasing a cuDNN handle while
-/// another thread records a CUDA graph can invalidate that recording, and the
-/// release can itself fail and panic during thread teardown, which aborts the
-/// process. Inference threads exit only at shutdown, so nothing is lost by
-/// leaving their handles to the driver.
+/// A thread-local cache that is not dropped when its thread exits. Releasing a
+/// cuDNN handle while another thread records a CUDA graph can invalidate that
+/// recording, and the release can itself fail and panic during thread teardown,
+/// which aborts the process. A thread that exits before the process does calls
+/// [`release_thread_state`] instead.
 type Leaked<T> = ManuallyDrop<RefCell<T>>;
+
+/// Free this thread's cuDNN handles, plans and workspaces, while no other
+/// thread records a CUDA graph. Call it before a thread that ran convolutions
+/// exits early, such as the inference worker of a retired server; each one
+/// holds about 17 MiB of GPU memory.
+pub fn release_thread_state() {
+    let _setup = crate::nn::cuda_setup_lock();
+    // Plans before the handles they were made with.
+    FUSED_PLANS.with(|m| m.borrow_mut().clear());
+    PLANS.with(|m| m.borrow_mut().clear());
+    WORKSPACES.with(|m| m.borrow_mut().clear());
+    RAW_HANDLES.with(|m| m.borrow_mut().clear());
+    HANDLES.with(|m| m.borrow_mut().clear());
+}
 
 fn leaked<T: Default>() -> Leaked<T> {
     ManuallyDrop::new(RefCell::new(T::default()))

@@ -335,3 +335,60 @@ fn servers_load_and_retire_while_others_record_graphs() {
     let unanswered: usize = games.into_iter().map(|h| h.join().unwrap()).sum();
     assert_eq!(unanswered, 0, "requests without an answer");
 }
+
+/// Free GPU memory, in MiB.
+fn free_mib() -> f64 {
+    use candle_core::cuda::cudarc::driver::sys;
+    // Memory freed asynchronously stays in the device's pool until trimmed.
+    unsafe {
+        let mut pool = std::ptr::null_mut();
+        sys::cuCtxSynchronize().result().unwrap();
+        sys::cuDeviceGetDefaultMemPool(&mut pool, 0)
+            .result()
+            .unwrap();
+        sys::cuMemPoolTrimTo(pool, 0).result().unwrap();
+    }
+    let (free, _total) = candle_core::cuda::cudarc::driver::result::mem_get_info().unwrap();
+    free as f64 / (1024.0 * 1024.0)
+}
+
+/// A retired server gives back its GPU memory, including each worker's cuDNN
+/// handles, plans and workspaces: with `--watch`, a long run retires hundreds.
+#[test]
+fn retired_servers_release_their_gpu_memory() {
+    use kingfisher::mcts::inference_server::InferenceServer;
+    let _serial = serial();
+    let _dev = own_stream(); // binds the CUDA context to this thread
+    let boards = positions();
+    let weights = std::env::var("KF_TEST_WEIGHTS")
+        .unwrap_or_else(|_| fixture().to_str().unwrap().to_string());
+    let cycle = || {
+        let server = InferenceServer::load(&weights, 4, 128).unwrap();
+        for n in [1, 9, 37, 64, 128, 200] {
+            let replies: Vec<_> = boards[..n]
+                .iter()
+                .map(|b| server.predict_async(b.clone(), true, 0.0))
+                .collect();
+            for r in replies {
+                assert!(r.recv().unwrap().is_some());
+            }
+        }
+        server.shutdown();
+    };
+    for _ in 0..2 {
+        cycle(); // first loads of kernels and libraries
+    }
+    let before = free_mib();
+    let rounds = 8;
+    for _ in 0..rounds {
+        cycle();
+        if std::env::var("KF_TEST_TRACE").is_ok() {
+            println!("free {:.1} MiB", free_mib());
+        }
+    }
+    let per_server = (before - free_mib()) / rounds as f64;
+    println!("GPU memory kept per retired server: {per_server:.1} MiB");
+    // Before workers freed their cuDNN state and graph memory, 67-78 MiB was
+    // kept; about 2 MiB still is, from a source not yet traced.
+    assert!(per_server < 5.0, "{per_server:.1} MiB per retired server");
+}

@@ -15,7 +15,7 @@ pub fn bucket(b: usize, cap: usize) -> usize {
 }
 
 #[cfg(feature = "cudnn")]
-pub use gpu::GraphCache;
+pub use gpu::{trim_graph_memory, GraphCache};
 
 #[cfg(feature = "cudnn")]
 mod gpu {
@@ -91,6 +91,19 @@ mod gpu {
             e.scalars.slice_set(scalars, 0, 0)?;
             e.graph.launch().map_err(candle_core::Error::wrap)?;
             Ok((e.logits.narrow(0, 0, b)?, e.value.narrow(0, 0, b)?.copy()?))
+        }
+    }
+
+    /// Return the memory of destroyed graphs to the driver. Memory a graph
+    /// allocates while recording stays reserved for graphs on the device, even
+    /// after the graph is destroyed, until this is called.
+    pub fn trim_graph_memory() {
+        let mut device = 0;
+        // SAFETY: plain driver calls on the current thread's context.
+        unsafe {
+            if sys::cuCtxGetDevice(&mut device).result().is_ok() {
+                let _ = sys::cuDeviceGraphMemTrim(device).result();
+            }
         }
     }
 

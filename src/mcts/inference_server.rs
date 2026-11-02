@@ -499,4 +499,9 @@ fn run_worker(
     #[cfg(feature = "cuda")]
     let _setup = crate::nn::cuda_setup_lock();
     drop(nn);
+    #[cfg(feature = "cudnn")]
+    {
+        crate::nn::cudnn_conv::release_thread_state();
+        crate::nn::graph_cache::trim_graph_memory();
+    }
 }
