@@ -291,3 +291,13 @@ class TestCheaperSteps:
 def test_continuous_training_defaults_to_bf16_channels_last():
     cfg = cont.ContinuousConfig()
     assert (cfg.precision, cfg.channels_last) == ("bf16", True)
+
+
+def test_self_play_command_passes_the_exploration_settings():
+    cfg = cont.ContinuousConfig(tau0=0.9, tau_decay=0.8, tau_min=0.05,
+                                dirichlet_alpha=0.3, dirichlet_epsilon=0.25)
+    cmd = cont.self_play_command(cfg, "/w/p.txt", "/w/cont_0.pth", "/d/games")
+    for flag, value in [("--tau0", "0.9"), ("--tau-decay", "0.8"), ("--tau-min", "0.05"),
+                        ("--dirichlet-alpha", "0.3"), ("--dirichlet-epsilon", "0.25")]:
+        assert cmd[cmd.index(flag) + 1] == value
+    assert "--explore-base" not in cmd

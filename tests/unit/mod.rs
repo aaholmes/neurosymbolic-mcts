@@ -13,6 +13,7 @@ mod evaluate_models_tests;
 mod exact_leaf_tests;
 mod experiment_config_tests;
 mod experiment_metrics_tests;
+mod exploration_tests;
 mod ext_qsearch_tests;
 mod fused_ops_tests;
 mod gives_check_tests;
