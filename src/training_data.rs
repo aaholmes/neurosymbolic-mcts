@@ -72,3 +72,29 @@ pub fn game_filename(dir: &str, timestamp: u64, game: usize, version: Option<u64
         None => format!("{dir}/game_{timestamp}_{game}.bin"),
     }
 }
+
+/// The policy training target from the root's visit counts, as move
+/// probabilities. One visit is removed from each move: the search gives every
+/// root move (and every capture, check and fork) a first visit, and a move
+/// whose only visit showed it was bad should get no weight. If no move has a
+/// second visit, the raw counts are used. Moves with no weight are left out.
+pub fn policy_target(root_policy: &[(Move, u32)]) -> Vec<(Move, f32)> {
+    let pruned: u32 = root_policy.iter().map(|(_, v)| v.saturating_sub(1)).sum();
+    let (counts, total): (Vec<(Move, u32)>, u32) = if pruned > 0 {
+        let c = root_policy
+            .iter()
+            .map(|(m, v)| (*m, v.saturating_sub(1)))
+            .collect();
+        (c, pruned)
+    } else {
+        (
+            root_policy.to_vec(),
+            root_policy.iter().map(|(_, v)| *v).sum(),
+        )
+    };
+    counts
+        .into_iter()
+        .filter(|(_, v)| *v > 0)
+        .map(|(m, v)| (m, v as f32 / total as f32))
+        .collect()
+}

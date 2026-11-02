@@ -1,7 +1,9 @@
 # Training
 
 Two loops are available. Both train on positions from self-play, with a policy target (the
-search's visit counts) and a value target (the game's result).
+search's visit counts at the root) and a value target (the game's result). The search visits every
+root move at least once, so the target and the choice of the move played both use each move's
+visits minus one: a move whose only visit showed it was bad gets no weight.
 
 **In generations** (`orchestrate.py`), as in AlphaGo Zero: self-play with the current model, train
 a candidate on a replay buffer, and accept the candidate only if it beats the current model.

@@ -59,10 +59,14 @@ $$V = \tanh(V_{\text{net}} + k \cdot \Delta M)$$
 
 where $V_{\text{net}}$ is the network's unbounded output and $k$ is a learned weight on the
 classical score. With no network, $V = \tanh(0.326 \cdot \Delta M)$, which is why the untrained
-engine already plays reasonably. The baseline, as in AlphaZero, uses the network alone. Moves are
-selected with AlphaZero's rule (PUCT, which adds to each move's average value a bonus that grows
-with the network's prior and shrinks with visits), with one change so that the network's top move
-is tried first on a node's first visit. Details: [docs/SEARCH.md](docs/SEARCH.md).
+engine already plays reasonably. The baseline, as in AlphaZero, uses the network alone.
+
+Moves are selected with AlphaZero's rule (PUCT, which adds to each move's average value a bonus
+that grows with the network's prior and shrinks with visits). Two additions keep the search from
+ignoring moves the network rates low: every capture, check and fork gets one visit before the rule
+applies, and so does every move at the root. The network is trained to predict the root's visit
+counts minus one, so a move whose only visit showed it was bad gets no weight in that target.
+Details: [docs/SEARCH.md](docs/SEARCH.md).
 
 ## Tech stack and how the parts fit together
 
@@ -125,10 +129,9 @@ counts once whatever its symmetry.
    [Wu, 2019](https://arxiv.org/abs/1902.10565)), judged by a training comparison.
 
 Later directions: a small learned evaluation inside quiescence search, as in Stockfish's
-efficiently updatable neural network (NNUE);
-network layers that connect squares a knight or queen move apart; tuning the training settings
-cheaply on saved data before full runs; and applying the tiered search to mathematical reasoning,
-with an automated theorem prover as the exact method.
+efficiently updatable neural network (NNUE); network layers that connect squares a knight or queen
+move apart; tuning the training settings cheaply on saved data before full runs; and applying the
+tiered search to mathematical reasoning, with an automated theorem prover as the exact method.
 
 ## Quick start
 

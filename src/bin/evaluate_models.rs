@@ -16,7 +16,7 @@ use kingfisher::mcts::{
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
 use kingfisher::tensor::move_to_index;
-use kingfisher::training_data::{save_binary_data, TrainingSample};
+use kingfisher::training_data::{policy_target, save_binary_data, TrainingSample};
 use kingfisher::transposition::TranspositionTable;
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -327,24 +327,24 @@ pub fn play_evaluation_game_with_servers(
         // Collect training data from MCTS root visit counts
         if collect_training_data {
             let root_ref = root.borrow();
-            let total_visits: u32 = root_ref.children.iter().map(|c| c.borrow().visits).sum();
+            let visits: Vec<(Move, u32)> = root_ref
+                .children
+                .iter()
+                .filter_map(|c| c.borrow().action.map(|mv| (mv, c.borrow().visits)))
+                .collect();
+            let target = policy_target(&visits);
 
-            if total_visits > 0 {
+            if !target.is_empty() {
                 let mut policy_dist = Vec::new();
                 let mut policy_moves = Vec::new();
-                for child in &root_ref.children {
-                    let cr = child.borrow();
-                    if let Some(mv) = cr.action {
-                        let relative_mv = if board.w_to_move {
-                            mv
-                        } else {
-                            mv.flip_vertical()
-                        };
-                        let idx = move_to_index(relative_mv) as u16;
-                        let prob = cr.visits as f32 / total_visits as f32;
-                        policy_dist.push((idx, prob));
-                        policy_moves.push((mv, prob));
-                    }
+                for (mv, prob) in target {
+                    let relative_mv = if board.w_to_move {
+                        mv
+                    } else {
+                        mv.flip_vertical()
+                    };
+                    policy_dist.push((move_to_index(relative_mv) as u16, prob));
+                    policy_moves.push((mv, prob));
                 }
 
                 // Each side's samples carry the inputs its own search gives the network.

@@ -38,6 +38,7 @@ mod neural_mcts_tests;
 mod nn_counter_tests;
 mod node_tests;
 mod pesto_qsearch_tests;
+mod policy_target_tests;
 mod position_classifier_tests;
 mod qsearch_inputs_tests;
 mod quiescence_tests;
@@ -58,7 +59,6 @@ mod training_tests;
 mod transposition_tests;
 mod tree_reuse_tests;
 mod utils_tests;
-mod policy_target_tests;
 mod value_target_tests;
 mod weights_watch_tests;
 

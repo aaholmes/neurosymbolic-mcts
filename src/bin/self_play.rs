@@ -14,7 +14,7 @@ use kingfisher::move_types::Move;
 use kingfisher::search::mate_search;
 use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
-use kingfisher::training_data::{game_filename, save_binary_data, TrainingSample};
+use kingfisher::training_data::{game_filename, policy_target, save_binary_data, TrainingSample};
 use kingfisher::transposition::TranspositionTable;
 use kingfisher::weights_watch::WatchedModel;
 use rand::rngs::StdRng;
@@ -417,21 +417,16 @@ fn play_game(
         }
 
         // Prepare Sample (Value unknown yet)
-        let total_visits: u32 = result.root_policy.iter().map(|(_, v)| *v).sum();
         let mut policy_dist = Vec::new();
         let mut policy_moves = Vec::new();
-        if total_visits > 0 {
-            for (mv, visits) in &result.root_policy {
-                let relative_mv = if board.w_to_move {
-                    *mv
-                } else {
-                    mv.flip_vertical()
-                };
-                let idx = move_to_index(relative_mv) as u16;
-                let prob = *visits as f32 / total_visits as f32;
-                policy_dist.push((idx, prob));
-                policy_moves.push((*mv, prob));
-            }
+        for (mv, prob) in policy_target(&result.root_policy) {
+            let relative_mv = if board.w_to_move {
+                mv
+            } else {
+                mv.flip_vertical()
+            };
+            policy_dist.push((move_to_index(relative_mv) as u16, prob));
+            policy_moves.push((mv, prob));
         }
 
         let q = qsearch_inputs(

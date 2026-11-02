@@ -63,6 +63,13 @@ whichever the move generator lists first. With $\max(N, 1)$ the bonus is proport
 network's prior $P(s,a)$ from the first visit, so the network's top choice is tried first. For
 $N \geq 1$ the two rules are identical.
 
+Before the rule applies, two kinds of moves get one visit each: every capture, check and fork at
+every node, and every move at the root. An unvisited move otherwise scores a draw plus a bonus
+proportional to its prior, so a quiet move the network rates low could go a whole search without a
+visit. The policy target is the root's visit counts minus one (`policy_target` in
+`src/training_data.rs`), and the move played in self-play is sampled from the same counts, so a
+move whose only visit showed it was bad gets no weight.
+
 After each move the subtree under the move played is kept for the next search. Its visits count
 toward the next move's budget, so "200 simulations per move" means the root reaches 200 visits,
 not that 200 new simulations run.
