@@ -301,3 +301,61 @@ def test_self_play_command_passes_the_exploration_settings():
                         ("--dirichlet-alpha", "0.3"), ("--dirichlet-epsilon", "0.25")]:
         assert cmd[cmd.index(flag) + 1] == value
     assert "--explore-base" not in cmd
+
+
+class TestLearningRateSchedule:
+    def test_cosine_falls_from_one_to_zero(self):
+        assert cont.lr_factor("cosine", 0.0) == 1.0
+        assert abs(cont.lr_factor("cosine", 0.5) - 0.5) < 1e-12
+        assert abs(cont.lr_factor("cosine", 1.0)) < 1e-12
+        assert abs(cont.lr_factor("cosine", 2.0)) < 1e-12
+
+    def test_constant_stays_at_one(self):
+        assert cont.lr_factor("constant", 0.7) == 1.0
+
+    def test_unknown_schedule_is_rejected(self):
+        with pytest.raises(ValueError):
+            cont.lr_factor("linear", 0.5)
+
+    def test_progress_uses_the_time_limit_or_else_the_step_limit(self):
+        cfg = cont.ContinuousConfig(max_seconds=100)
+        assert cont.run_progress(cfg, elapsed=25, steps=0) == 0.25
+        cfg = cont.ContinuousConfig(max_steps=200)
+        assert cont.run_progress(cfg, elapsed=25, steps=50) == 0.25
+        assert cont.run_progress(cont.ContinuousConfig(), elapsed=25, steps=50) == 0.0
+
+    def test_trainer_scales_every_learning_rate_including_muons_backend(self, tmp):
+        trainer = cont.Trainer(SeresNet(num_blocks=1, hidden_dim=16), os.path.join(tmp, "w"),
+                               optimizer="muon", lr=0.02, batch_size=8, device="cpu")
+        trainer.set_lr_factor(0.5)
+        assert trainer.optimizer.param_groups[0]["lr"] == 0.01
+        assert abs(trainer.optimizer.backend.param_groups[0]["lr"] - 0.001) < 1e-12
+        trainer.set_lr_factor(1.0)
+        assert trainer.optimizer.param_groups[0]["lr"] == 0.02
+
+
+class TestRunLimits:
+    def test_self_play_binary_replaces_cargo_run(self):
+        cfg = cont.ContinuousConfig(self_play_bin="/bin/sp")
+        cmd = cont.self_play_command(cfg, "/w/p.txt", "/w/cont_0.pth", "/d/games")
+        assert cmd[0] == "/bin/sp" and "cargo" not in cmd
+
+    def test_run_stops_at_the_time_limit_and_publishes_the_final_weights(self, tmp):
+        script = os.path.join(tmp, "fake_self_play.py")
+        with open(script, "w") as f:
+            f.write(FAKE_SELF_PLAY)
+        cfg = cont.ContinuousConfig(
+            work_dir=os.path.join(tmp, "run"), num_blocks=1, hidden_dim=16,
+            optimizer="adam", lr=1e-3, batch_size=8, replay_ratio=2.0,
+            min_positions=40, publish_every=1000, max_seconds=3, window=1000,
+            device="cpu", poll_seconds=0.05, lr_schedule="cosine",
+        )
+
+        def launch(cmd_cfg, pointer, first, games):
+            return __import__("subprocess").Popen([sys.executable, script, games, "5"])
+
+        summary = cont.run(cfg, launch=launch)
+        assert summary["steps"] == 25  # 100 positions x 2 / 8, then idle until the limit
+        assert summary["version"] == 1  # v0 at start, the final weights at the end
+        assert os.path.basename(summary["weights"]) == "cont_1.pth"
+        assert torch.load(summary["weights"], weights_only=False)["global_minibatch"] == 25
