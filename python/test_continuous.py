@@ -215,3 +215,79 @@ class TestRun:
         log = os.path.join(cfg.work_dir, "continuous_log.jsonl")
         lines = open(log).read().splitlines()
         assert len(lines) == 2
+
+
+def write_valid_game(path, n, rng=None):
+    """Random positions with policy targets that are probability distributions
+    and values in [-1, 1], so the loss is finite."""
+    rng = rng or np.random.default_rng(0)
+    data = rng.standard_normal((n, SAMPLE_SIZE_FLOATS)).astype(np.float32)
+    policy = rng.random((n, 4672)).astype(np.float32) ** 8
+    data[:, -4672:] = policy / policy.sum(axis=1, keepdims=True)
+    data[:, -4673] = rng.choice([-1.0, 0.0, 1.0], size=n)
+    data.tofile(path)
+
+
+class TestCheaperSteps:
+    """bf16 autocast and channels-last layout make the trainer's GPU step
+    cheaper; the weights stay f32 and are published in the layout Rust reads."""
+
+    def _window(self, tmp, n=40):
+        games = os.path.join(tmp, "games")
+        os.makedirs(games, exist_ok=True)
+        write_valid_game(os.path.join(games, "game_1_0_v0.bin"), n)
+        window = cont.GameWindow(os.path.join(tmp, "window"), capacity=1000)
+        window.ingest(games)
+        return window
+
+    def _trainer(self, tmp, **kw):
+        torch.manual_seed(0)
+        return cont.Trainer(SeresNet(num_blocks=1, hidden_dim=16), os.path.join(tmp, "weights"),
+                            optimizer="muon", lr=0.02, batch_size=8, device="cpu", seed=0, **kw)
+
+    def test_unknown_precision_is_rejected(self, tmp):
+        with pytest.raises(ValueError):
+            self._trainer(tmp, precision="f8")
+
+    def test_bf16_steps_train_and_keep_f32_weights(self, tmp):
+        window = self._window(tmp)
+        trainer = self._trainer(tmp, precision="bf16")
+        before = [p.detach().clone() for p in trainer.model.parameters()]
+        losses = trainer.train_steps(3, window)
+        assert np.isfinite(losses["loss"])
+        assert all(p.dtype == torch.float32 for p in trainer.model.parameters())
+        assert any(not torch.equal(a, b) for a, b in zip(before, trainer.model.parameters()))
+
+    def test_bf16_loss_is_close_to_f32_loss(self, tmp):
+        window = self._window(tmp)
+        f32 = self._trainer(tmp, precision="f32").train_steps(1, window)["loss"]
+        bf16 = self._trainer(tmp, precision="bf16").train_steps(1, window)["loss"]
+        assert abs(bf16 - f32) < 0.02 * abs(f32)
+
+    def test_channels_last_matches_the_default_layout(self, tmp):
+        window = self._window(tmp)
+        a = self._trainer(tmp).train_steps(2, window)["loss"]
+        b = self._trainer(tmp, channels_last=True).train_steps(2, window)["loss"]
+        assert abs(a - b) < 1e-4 * abs(a)
+
+    def test_channels_last_publishes_contiguous_weights(self, tmp):
+        window = self._window(tmp)
+        trainer = self._trainer(tmp, channels_last=True)
+        trainer.train_steps(1, window)
+        ckpt = torch.load(trainer.publish(), weights_only=False)
+        assert all(t.is_contiguous() for t in ckpt["model_state_dict"].values())
+
+    def test_config_reaches_the_trainer(self, tmp):
+        cfg = cont.ContinuousConfig(precision="bf16", channels_last=True)
+        assert (cfg.precision, cfg.channels_last) == ("bf16", True)
+        args = cont.parse_args(["--precision", "bf16", "--channels-last", "true"])
+        assert (args.precision, args.channels_last) == ("bf16", True)
+        trainer = cont.make_trainer(cont.ContinuousConfig(
+            num_blocks=1, hidden_dim=16, device="cpu", precision="bf16", channels_last=True),
+            os.path.join(tmp, "w"))
+        assert (trainer.precision, trainer.channels_last) == ("bf16", True)
+
+
+def test_continuous_training_defaults_to_bf16_channels_last():
+    cfg = cont.ContinuousConfig()
+    assert (cfg.precision, cfg.channels_last) == ("bf16", True)
