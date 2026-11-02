@@ -72,7 +72,14 @@ class ContinuousConfig:
     syzygy_path: str = ""
     inference_batch_size: int = 128
     inference_workers: int = 4
-    explore_base: float = 0.90
+    # Move played: sampled in proportion to (visits - 1)^(1/tau),
+    # tau = tau0 * tau_decay^(move - 1), at least tau_min (0 plays the most-visited move)
+    tau0: float = 1.0
+    tau_decay: float = 0.9
+    tau_min: float = 0.0
+    # Dirichlet noise mixed into each search's root priors (epsilon 0 = off)
+    dirichlet_alpha: float = 0.3
+    dirichlet_epsilon: float = 0.0
 
 
 def steps_owed(positions_generated, steps_done, replay_ratio, batch_size):
@@ -282,7 +289,11 @@ def self_play_command(cfg, pointer, first_weights, games_dir):
         "--inference-workers", str(cfg.inference_workers),
         "--seed-offset", str(cfg.seed * 10**9),
         "--threads", str(cfg.concurrent_games),
-        "--explore-base", str(cfg.explore_base),
+        "--tau0", str(cfg.tau0),
+        "--tau-decay", str(cfg.tau_decay),
+        "--tau-min", str(cfg.tau_min),
+        "--dirichlet-alpha", str(cfg.dirichlet_alpha),
+        "--dirichlet-epsilon", str(cfg.dirichlet_epsilon),
         "--watch", pointer,
     ]
     if cfg.qsearch != "extended":

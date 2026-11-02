@@ -3,6 +3,7 @@
 use crate::board::Board;
 use crate::move_types::Move;
 use crate::tensor::board_to_planes;
+use rand::Rng;
 use std::fs::File;
 use std::io::Write;
 
@@ -97,4 +98,45 @@ pub fn policy_target(root_policy: &[(Move, u32)]) -> Vec<(Move, f32)> {
         .filter(|(_, v)| *v > 0)
         .map(|(m, v)| (m, v as f32 / total as f32))
         .collect()
+}
+
+/// The temperature for choosing the move played at full move `move_number`
+/// (1 for the first): `tau0 * decay^(move_number - 1)`, never below `tau_min`.
+pub fn temperature(move_number: u32, tau0: f64, decay: f64, tau_min: f64) -> f64 {
+    (tau0 * decay.powi(move_number.saturating_sub(1) as i32)).max(tau_min)
+}
+
+/// The move to play: sampled in proportion to `(visits - 1)^(1/tau)`, the
+/// counts the policy target uses, so a move whose only visit was the forced
+/// first one is not played. `tau = 0`, or no move with a second visit, plays
+/// the most-visited move.
+pub fn sample_with_temperature(
+    root_policy: &[(Move, u32)],
+    tau: f64,
+    rng: &mut impl Rng,
+) -> Option<Move> {
+    let most_visited = root_policy.iter().max_by_key(|(_, v)| *v).map(|(m, _)| *m);
+    let top = root_policy.iter().map(|(_, v)| v.saturating_sub(1)).max()?;
+    if tau <= 0.0 || top == 0 {
+        return most_visited;
+    }
+    // Weights relative to the largest, in log space, so small tau cannot overflow.
+    let log_top = (top as f64).ln();
+    let weights: Vec<f64> = root_policy
+        .iter()
+        .map(|(_, v)| match v.saturating_sub(1) {
+            0 => 0.0,
+            c => (((c as f64).ln() - log_top) / tau).exp(),
+        })
+        .collect();
+    let mut x = rng.gen::<f64>() * weights.iter().sum::<f64>();
+    for ((m, _), w) in root_policy.iter().zip(&weights) {
+        if *w > 0.0 {
+            if x < *w {
+                return Some(*m);
+            }
+            x -= w;
+        }
+    }
+    most_visited
 }

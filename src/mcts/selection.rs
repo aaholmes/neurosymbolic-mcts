@@ -285,7 +285,7 @@ pub fn calculate_ucb_value(
 /// from the InferenceServer). Falls back to a synchronous InferenceServer call
 /// if the node has no cached policy but a server is available. Otherwise uses
 /// uniform priors (classical fallback).
-fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &TacticalMctsConfig) {
+pub(crate) fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &TacticalMctsConfig) {
     let mut node_ref = node.borrow_mut();
 
     if node_ref.policy_evaluated {

@@ -465,7 +465,6 @@ class Orchestrator:
             # One thread per game by default: threads bound the batch size
             threads = self.config.game_threads or self.config.games_per_generation
             cmd.extend(["--threads", str(threads)])
-            cmd.extend(["--explore-base", str(self.config.eval_explore_base)])
             if self.config.qsearch_variant != "extended":
                 cmd.extend(["--qsearch", self.config.qsearch_variant])
             cmd.extend(self._exact_ending_args())

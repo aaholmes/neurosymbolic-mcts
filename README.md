@@ -108,16 +108,26 @@ Two loops are available ([docs/TRAINING.md](docs/TRAINING.md)):
   GPU time per step by 43%, with training loss within 0.1% of f32 over 320 steps. This runs end
   to end but has not yet trained a model.
 
+Self-play varies its games by sampling each move played in proportion to the root's visit counts
+minus one, raised to the power 1/τ. The temperature τ falls over the game, so openings vary and
+later moves are close to the search's choice. Dirichlet noise can also be mixed into the root's
+priors at every move, as in AlphaZero, so a few random moves are searched in depth; it is off by
+default.
+
 Positions with board symmetries (mirror images without castling rights, all eight rotations and
 reflections without pawns) are trained on one randomly drawn equivalent image, so every position
 counts once whatever its symmetry.
 
 ## Next steps
 
-1. **Train continuously in standard chess**, compared with the generation loop at equal compute,
-   with a periodic match with a fixed reference to catch a collapse. Choose the replay ratio and
-   batch size by strength per hour: a lower ratio or a larger batch leaves self-play more of the
-   GPU (10% slower than alone at batch 1024, compared with 15% at 256) but may learn less per position.
+1. **Prepare a 12-hour continuous run in standard chess.** First, a match script that rates a
+   checkpoint at fixed time per move with an Elo interval, a decaying learning rate, and a 2-hour
+   pilot to show that continuous training improves at all. Then tune: Bayesian optimization of the
+   trainer's settings (learning rate, batch size, window, replay ratio) on the pilot's saved games,
+   scored by loss on later games, and short self-play runs, halved by Elo, for the temperature,
+   the root noise and simulations per move. A lower replay ratio or a larger batch leaves
+   self-play more of the GPU (10% slower than alone at batch 1024, compared with 15% at 256) but
+   may learn less per position.
 2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap
    interval on the Elo difference. Whether exact endings help training is not yet measured.
 3. **Make the quiescence search cheaper**, so the full classical search fits in standard chess.
@@ -130,8 +140,8 @@ counts once whatever its symmetry.
 
 Later directions: a small learned evaluation inside quiescence search, as in Stockfish's
 efficiently updatable neural network (NNUE); network layers that connect squares a knight or queen
-move apart; tuning the training settings cheaply on saved data before full runs; and applying the
-tiered search to mathematical reasoning, with an automated theorem prover as the exact method.
+move apart; and applying the tiered search to mathematical reasoning, with an automated theorem
+prover as the exact method.
 
 ## Quick start
 

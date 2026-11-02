@@ -30,6 +30,16 @@ All tunable parameters for the Caissawary training pipeline, organized by stage.
 | UCB formula | Q + c * P * sqrt(N_parent) / (1 + N_child) | -- | PUCT with NN prior P |
 | Unvisited Q | 0.0 | -- | Default Q for unexplored children |
 
+## Move Selection (Self-Play)
+
+| Parameter | Value | CLI Flag | Notes |
+|-----------|-------|----------|-------|
+| Temperature at move 1 | 1.0 | `--tau0` | Move played sampled in proportion to (visits - 1)^(1/tau) |
+| Temperature decay | 0.9 | `--tau-decay` | tau = tau0 * decay^(move_number - 1): 0.35 at move 11, 0.12 at move 21 |
+| Temperature floor | 0.0 | `--tau-min` | tau = 0 plays the most-visited move |
+| Root noise epsilon | 0.0 (off) | `--dirichlet-epsilon` | Root priors = (1 - eps) * prior + eps * Dirichlet(alpha), at every move's search |
+| Root noise alpha | 0.3 | `--dirichlet-alpha` | AlphaZero's value for chess |
+
 ## Move Selection (Evaluation Games)
 
 | Parameter | Value | CLI Flag | Notes |

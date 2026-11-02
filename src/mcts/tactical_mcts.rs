@@ -12,7 +12,7 @@ use crate::eval::PestoEval;
 use crate::mcts::inference_server::InferenceServer;
 use crate::mcts::node::{MctsNode, NodeOrigin};
 use crate::mcts::search_logger::{GateReason, SearchLogger};
-use crate::mcts::selection::select_child_with_tactical_priority;
+use crate::mcts::selection::{ensure_policy_evaluated, select_child_with_tactical_priority};
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use crate::search::koth_center_in_n_counted;
@@ -23,6 +23,8 @@ use crate::search::{
 use crate::search::{koth_best_move, koth_center_in_n};
 use crate::transposition::TranspositionTable;
 use crossbeam_channel::Receiver;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rand_distr::{Distribution, Gamma};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -145,6 +147,8 @@ pub struct TacticalMctsConfig {
     pub dirichlet_alpha: f64,
     /// Dirichlet noise epsilon (0.0 = disabled, 0.25 for chess training)
     pub dirichlet_epsilon: f64,
+    /// Seed for the root's Dirichlet noise, so a search can be reproduced
+    pub noise_seed: u64,
     /// Shuffle children after expansion to break move-generation-order bias
     /// Enable for training (self-play), disable for deterministic analysis/evaluation
     pub randomize_move_order: bool,
@@ -203,6 +207,7 @@ impl Default for TacticalMctsConfig {
             qsearch_variant: QSearchVariant::Extended,
             dirichlet_alpha: 0.0,
             dirichlet_epsilon: 0.0,
+            noise_seed: 0,
             randomize_move_order: false,
             pesto: PestoEval::new(),
             leaves_per_iteration: 1,
@@ -1323,6 +1328,15 @@ pub fn tactical_mcts_search_for_training_with_reuse(
     if root_node.borrow().children.is_empty() {
         evaluate_and_expand_node(root_node.clone(), move_gen, &mut stats, &config, logger);
     }
+    if config.dirichlet_epsilon > 0.0 && config.dirichlet_alpha > 0.0 {
+        ensure_policy_evaluated(root_node.clone(), &config);
+        apply_dirichlet_noise_with_rng(
+            &root_node,
+            config.dirichlet_alpha,
+            config.dirichlet_epsilon,
+            &mut StdRng::seed_from_u64(config.noise_seed),
+        );
+    }
 
     let mut iteration = 0;
     while iteration < config.max_iterations {
@@ -1398,16 +1412,27 @@ pub fn reuse_subtree(
 /// Mixes: prior = (1 - epsilon) * prior + epsilon * noise
 /// where noise ~ Dir(alpha, alpha, ..., alpha).
 pub fn apply_dirichlet_noise(root: &Rc<RefCell<MctsNode>>, alpha: f64, epsilon: f64) {
+    apply_dirichlet_noise_with_rng(root, alpha, epsilon, &mut rand::thread_rng());
+}
+
+/// `apply_dirichlet_noise` with a given random number generator. Moves are
+/// taken in sorted order, so a seeded generator reproduces the same noise.
+pub fn apply_dirichlet_noise_with_rng(
+    root: &Rc<RefCell<MctsNode>>,
+    alpha: f64,
+    epsilon: f64,
+    rng: &mut impl rand::Rng,
+) {
     let mut node = root.borrow_mut();
-    let moves: Vec<Move> = node.move_priorities.keys().cloned().collect();
+    let mut moves: Vec<Move> = node.move_priorities.keys().cloned().collect();
     if moves.is_empty() {
         return;
     }
+    moves.sort();
 
     // Generate Dirichlet noise via Gamma(alpha, 1) draws + normalization
-    let mut rng = rand::thread_rng();
     let gamma = Gamma::new(alpha, 1.0).unwrap();
-    let raw: Vec<f64> = (0..moves.len()).map(|_| gamma.sample(&mut rng)).collect();
+    let raw: Vec<f64> = (0..moves.len()).map(|_| gamma.sample(rng)).collect();
     let sum: f64 = raw.iter().sum();
     if sum == 0.0 {
         return;

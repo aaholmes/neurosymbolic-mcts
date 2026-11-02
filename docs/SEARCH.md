@@ -70,6 +70,14 @@ visit. The policy target is the root's visit counts minus one (`policy_target` i
 `src/training_data.rs`), and the move played in self-play is sampled from the same counts, so a
 move whose only visit showed it was bad gets no weight.
 
+The move played is sampled in proportion to $(n - 1)^{1/\tau}$, where the temperature
+$\tau = \tau_0 \cdot b^{m-1}$ at full move $m$ falls from 1 (proportional to the counts) toward 0
+(the most-visited move), so openings vary and later moves are close to the search's choice
+(`--tau0`, `--tau-decay`, `--tau-min`). Optionally, Dirichlet noise is mixed into the root's priors
+at every move's search, as in AlphaZero (`--dirichlet-epsilon`, `--dirichlet-alpha`), so a few
+random root moves are searched in depth; it is off by default. Evaluation games keep their own
+scheme (`--explore-base` in `evaluate_models`) and never add noise.
+
 After each move the subtree under the move played is kept for the next search. Its visits count
 toward the next move's budget, so "200 simulations per move" means the root reaches 200 visits,
 not that 200 new simulations run.

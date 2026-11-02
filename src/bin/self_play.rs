@@ -14,7 +14,10 @@ use kingfisher::move_types::Move;
 use kingfisher::search::mate_search;
 use kingfisher::search::{koth_best_move, koth_center_in_3};
 use kingfisher::tensor::move_to_index;
-use kingfisher::training_data::{game_filename, policy_target, save_binary_data, TrainingSample};
+use kingfisher::training_data::{
+    game_filename, policy_target, sample_with_temperature, save_binary_data, temperature,
+    TrainingSample,
+};
 use kingfisher::transposition::TranspositionTable;
 use kingfisher::weights_watch::WatchedModel;
 use rand::rngs::StdRng;
@@ -112,12 +115,31 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let explore_base: f64 = args
-        .iter()
-        .position(|a| a == "--explore-base")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.80);
+    let f64_arg = |name: &str, default: f64| -> f64 {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .map(|v| {
+                v.parse().unwrap_or_else(|_| {
+                    eprintln!("{name} needs a number, not {v:?}");
+                    std::process::exit(2)
+                })
+            })
+            .unwrap_or(default)
+    };
+    if args.iter().any(|a| a == "--explore-base") {
+        eprintln!("--explore-base is replaced by --tau0, --tau-decay and --tau-min");
+        std::process::exit(2);
+    }
+    // The move played is sampled in proportion to (visits - 1)^(1/tau), with
+    // tau = tau0 * tau_decay^(move - 1), at least tau_min; root noise is off by default.
+    let exploration = Exploration {
+        tau0: f64_arg("--tau0", 1.0),
+        tau_decay: f64_arg("--tau-decay", 0.9),
+        tau_min: f64_arg("--tau-min", 0.0),
+        dirichlet_alpha: f64_arg("--dirichlet-alpha", 0.3),
+        dirichlet_epsilon: f64_arg("--dirichlet-epsilon", 0.0),
+    };
 
     let qsearch_variant = args
         .iter()
@@ -143,7 +165,14 @@ fn main() {
     println!("   Exact Endings: {}", exact.describe());
     println!("   Log Games: {}", log_games);
     println!("   Inference Batch Size: {}", inference_batch_size);
-    println!("   Explore Base: {}", explore_base);
+    println!(
+        "   Temperature: {} x {}^(move-1), at least {}",
+        exploration.tau0, exploration.tau_decay, exploration.tau_min
+    );
+    println!(
+        "   Root Dirichlet noise: epsilon {}, alpha {}",
+        exploration.dirichlet_epsilon, exploration.dirichlet_alpha
+    );
 
     // Game threads (named kf-game-N); with KF_INFER_CPUS they keep off those CPUs
     let infer_cpus = kingfisher::mcts::inference_server::inference_cpus_from_env();
@@ -231,7 +260,7 @@ fn main() {
             enable_tier1,
             enable_material,
             verbose,
-            explore_base,
+            &exploration,
             qsearch_variant,
             &exact,
         );
@@ -300,7 +329,7 @@ fn play_game(
     enable_tier1: bool,
     enable_material: bool,
     verbose: bool,
-    explore_base: f64,
+    exploration: &Exploration,
     qsearch_variant: QSearchVariant,
     exact: &ExactEndings,
 ) -> Vec<TrainingSample> {
@@ -319,8 +348,8 @@ fn play_game(
         use_neural_policy: has_nn,
         inference_server,
         logger: None,
-        dirichlet_alpha: 0.0,
-        dirichlet_epsilon: 0.0,
+        dirichlet_alpha: exploration.dirichlet_alpha,
+        dirichlet_epsilon: exploration.dirichlet_epsilon,
         enable_koth,
         enable_tier1_gate: enable_tier1,
         enable_material_value: enable_material,
@@ -404,10 +433,12 @@ fn play_game(
         // Try to reuse subtree from previous search (Phase 2)
         let reused_root = previous_root.take();
 
+        let mut move_config = config.clone();
+        move_config.noise_seed = rng.gen();
         let result = tactical_mcts_search_for_training_with_reuse(
             board.clone(),
             &move_gen,
-            config.clone(),
+            move_config,
             reused_root,
             &mut transposition_table,
         );
@@ -449,15 +480,15 @@ fn play_game(
             w_to_move: board.w_to_move,
         });
 
-        // Play Move — proportional-or-greedy with decaying exploration
-        let move_number = (move_count / 2) + 1;
-        let explore_prob = explore_base.powi(move_number - 1);
-        let selected_move = if rng.gen::<f64>() < explore_prob {
-            sample_proportional(&result.root_policy, &mut rng)
-                .unwrap_or_else(|| result.best_move.unwrap())
-        } else {
-            select_greedy(&result.root_policy).unwrap_or_else(|| result.best_move.unwrap())
-        };
+        // Play a move sampled at a temperature that falls over the game
+        let tau = temperature(
+            (move_count / 2) as u32 + 1,
+            exploration.tau0,
+            exploration.tau_decay,
+            exploration.tau_min,
+        );
+        let selected_move = sample_with_temperature(&result.root_policy, tau, &mut rng)
+            .unwrap_or_else(|| result.best_move.unwrap());
 
         if verbose {
             game_moves.push(selected_move.to_san(&board, &move_gen));
@@ -735,28 +766,12 @@ fn play_game(
     samples
 }
 
-/// Sample a move proportionally from visit counts (visits-1 distribution).
-/// Falls back to greedy if all moves have 0 or 1 visit.
-fn sample_proportional(policy: &[(Move, u32)], rng: &mut impl Rng) -> Option<Move> {
-    if policy.is_empty() {
-        return None;
-    }
-    let total: u32 = policy.iter().map(|(_, v)| v.saturating_sub(1)).sum();
-    if total == 0 {
-        return select_greedy(policy);
-    }
-    let threshold = rng.gen_range(0..total);
-    let mut cumulative = 0u32;
-    for (mv, visits) in policy {
-        cumulative += visits.saturating_sub(1);
-        if cumulative > threshold {
-            return Some(*mv);
-        }
-    }
-    policy.last().map(|(mv, _)| *mv)
-}
-
-/// Select the most-visited move.
-fn select_greedy(policy: &[(Move, u32)]) -> Option<Move> {
-    policy.iter().max_by_key(|(_, v)| *v).map(|(mv, _)| *mv)
+/// How self-play chooses the move played, and the noise mixed into each
+/// search's root priors.
+struct Exploration {
+    tau0: f64,
+    tau_decay: f64,
+    tau_min: f64,
+    dirichlet_alpha: f64,
+    dirichlet_epsilon: f64,
 }
