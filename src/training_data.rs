@@ -140,3 +140,21 @@ pub fn sample_with_temperature(
     }
     most_visited
 }
+
+/// The exploration constant in the search's PUCT rule, unless set by a flag.
+pub const DEFAULT_C_PUCT: f64 = 1.414;
+
+/// The positive number after `flag` in `args`, or [`DEFAULT_C_PUCT`] if the flag
+/// is absent; an error if its value is missing, not a number, or not positive.
+pub fn c_puct_arg(args: &[String], flag: &str) -> Result<f64, String> {
+    let Some(i) = args.iter().position(|a| a == flag) else {
+        return Ok(DEFAULT_C_PUCT);
+    };
+    let value = args
+        .get(i + 1)
+        .ok_or_else(|| format!("{flag} needs a value"))?;
+    match value.parse::<f64>() {
+        Ok(c) if c > 0.0 && c.is_finite() => Ok(c),
+        _ => Err(format!("{flag} needs a positive number, not {value:?}")),
+    }
+}

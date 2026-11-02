@@ -34,7 +34,8 @@ class TestStartingTrials:
         trials = hpo.starting_trials(n_sobol=5, seed=0)
         assert trials[0]["name"] == hpo.ANCHOR
         assert trials[0]["params"] == hpo.DEFAULTS
-        repeats = [t for t in trials if t["params"] == hpo.DEFAULTS]
+        repeats = [t for t in trials
+                   if t["params"] == hpo.DEFAULTS and not t.get("epsilon")]
         assert len(repeats) == 2 and repeats[0]["seed"] != repeats[1]["seed"]
 
     def test_sobol_points_fill_the_space(self):
@@ -129,3 +130,33 @@ def test_a_trial_whose_training_fails_is_not_recorded(tmp):
     with pytest.raises(RuntimeError):
         search.run_trials([{"name": hpo.ANCHOR, "params": dict(hpo.DEFAULTS), "seed": 0}])
     assert search.trials() == {}
+
+
+class TestSixSettings:
+    def test_the_space_tunes_exploration_and_window_but_not_root_noise(self):
+        assert set(hpo.SPACE) == {"lr", "replay_ratio", "simulations_per_move", "tau_decay",
+                                  "c_puct", "window"}
+        assert hpo.SPACE["c_puct"][:3] == (1.0, 3.0, True)
+        assert hpo.SPACE["window"][:3] == (100_000, 1_000_000, True)
+        assert hpo.SPACE["window"][3] is int
+        assert hpo.SPACE["simulations_per_move"][:2] == (100, 400)
+        assert hpo.DEFAULTS["c_puct"] == 1.414 and hpo.DEFAULTS["window"] == 200_000
+
+    def test_six_sobol_points_and_the_root_noise_check_stay_in_the_starting_trials(self):
+        trials = hpo.starting_trials()
+        assert sum(t["name"].startswith("sobol") for t in trials) == 6
+        noise = [t for t in trials if t["name"] == "t02_root_noise"]
+        assert noise and noise[0]["epsilon"] == 0.25
+
+    def test_trial_config_sets_exploration_window_and_root_noise(self):
+        params = dict(hpo.DEFAULTS, c_puct=2.0, window=500_000)
+        cfg = hpo.trial_config(params, 0, "/r", "/tb", "/bin/sp")
+        assert (cfg.c_puct, cfg.window, cfg.dirichlet_epsilon) == (2.0, 500_000, 0.0)
+        cfg = hpo.trial_config(params, 0, "/r", "/tb", "/bin/sp", dirichlet_epsilon=0.25)
+        assert cfg.dirichlet_epsilon == 0.25
+
+    def test_each_engine_plays_with_its_own_exploration_constant(self):
+        cmd = hpo.match_command("/w/a.pth", "/w/b.pth", 40, 200, 7, "/tb", "/bin/ev",
+                                a_c_puct=2.5, b_c_puct=1.2)
+        assert cmd[cmd.index("--candidate-c-puct") + 1] == "2.5"
+        assert cmd[cmd.index("--current-c-puct") + 1] == "1.2"

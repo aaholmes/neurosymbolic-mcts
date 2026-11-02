@@ -134,6 +134,10 @@ fn main() {
     // The move played is sampled in proportion to (visits - 1)^(1/tau), with
     // tau = tau0 * tau_decay^(move - 1), at least tau_min; root noise is off by default.
     let exploration = Exploration {
+        c_puct: kingfisher::training_data::c_puct_arg(&args, "--c-puct").unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2)
+        }),
         tau0: f64_arg("--tau0", 1.0),
         tau_decay: f64_arg("--tau-decay", 0.9),
         tau_min: f64_arg("--tau-min", 0.0),
@@ -344,7 +348,7 @@ fn play_game(
         max_iterations: simulations,
         time_limit: Duration::from_secs(60),
         mate_search_depth: if enable_tier1 { 5 } else { 0 },
-        exploration_constant: 1.414,
+        exploration_constant: exploration.c_puct,
         use_neural_policy: has_nn,
         inference_server,
         logger: None,
@@ -769,6 +773,8 @@ fn play_game(
 /// How self-play chooses the move played, and the noise mixed into each
 /// search's root priors.
 struct Exploration {
+    /// The exploration constant in the search's PUCT rule.
+    c_puct: f64,
     tau0: f64,
     tau_decay: f64,
     tau_min: f64,

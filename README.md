@@ -110,7 +110,7 @@ Two loops are available ([docs/TRAINING.md](docs/TRAINING.md)):
 - **Tuning** (`python/hpo.py`): 1-hour continuous runs from scratch, each played over 800 games
   with up to five earlier runs and rated jointly by Elo (a Bradley–Terry fit with bootstrap
   standard errors). A Gaussian-process optimizer proposes each new run's settings from the ratings
-  so far. The first nine runs are in progress, including the default settings twice with
+  so far. The first ten runs are in progress, including the default settings twice with
   different seeds to measure how much two identical runs differ.
 
 Self-play varies its games by sampling each move played in proportion to the root's visit counts
@@ -127,8 +127,9 @@ counts once whatever its symmetry.
 
 1. **Choose the settings for a 12-hour continuous run in standard chess.** If the two runs with
    default settings land within about 50 Elo of each other, 1-hour runs can rank settings, and
-   about 12 runs proposed by the optimizer follow. They tune five settings: learning rate, replay
-   ratio, simulations per move, the temperature's decay and the root noise. One hour favours
+   about 15 runs proposed by the optimizer follow. They tune six settings: learning rate, replay
+   ratio, simulations per move, the temperature's decay, the exploration constant in PUCT and the
+   number of positions the trainer keeps. One hour favours
    settings that learn fast early, so the best two or three are rerun for 4 hours to check that
    their order holds before the 12-hour run.
 2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap

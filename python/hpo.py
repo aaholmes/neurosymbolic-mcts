@@ -8,7 +8,7 @@ first trial (the default settings) fixed at 0. A Gaussian-process optimizer
 
 Usage:
   python python/hpo.py --work-dir runs/hpo --phase start   # default, repeat, hand-picked, Sobol
-  python python/hpo.py --work-dir runs/hpo --phase bo --n-bo 12
+  python python/hpo.py --work-dir runs/hpo --phase bo --n-bo 15
   python python/hpo.py --work-dir runs/hpo --phase table
 The ledger (trials.jsonl, matches.jsonl) makes every phase resumable.
 """
@@ -33,14 +33,17 @@ SPACE = {
     "replay_ratio": (1.0, 8.0, True, float),
     "simulations_per_move": (100, 400, False, int),
     "tau_decay": (0.8, 0.95, False, float),
-    "dirichlet_epsilon": (0.0, 0.25, False, float),
+    "c_puct": (1.0, 3.0, True, float),
+    "window": (100_000, 1_000_000, True, int),
 }
 DEFAULTS = {"lr": 0.02, "replay_ratio": 4.0, "simulations_per_move": 200,
-            "tau_decay": 0.9, "dirichlet_epsilon": 0.0}
+            "tau_decay": 0.9, "c_puct": 1.414, "window": 200_000}
 ANCHOR = "t00_default"
+# (name, settings, Dirichlet noise at the root). Root noise is not tuned; one
+# trial at the defaults checks whether it helps.
 HAND_PICKED = [
-    ("t02_root_noise", dict(DEFAULTS, dirichlet_epsilon=0.25)),
-    ("t03_more_data", dict(DEFAULTS, replay_ratio=2.0, simulations_per_move=100)),
+    ("t02_root_noise", dict(DEFAULTS), 0.25),
+    ("t03_more_data", dict(DEFAULTS, replay_ratio=2.0, simulations_per_move=100), 0.0),
 ]
 
 
@@ -52,20 +55,20 @@ def _from_unit(u):
     return params
 
 
-def starting_trials(n_sobol=5, seed=0):
+def starting_trials(n_sobol=6, seed=0):
     """The default settings, the defaults again with another seed (to measure
     run-to-run noise), hand-picked settings, and n_sobol space-filling points."""
     from scipy.stats import qmc
     trials = [{"name": ANCHOR, "params": dict(DEFAULTS), "seed": 0},
               {"name": "t01_default_seed1", "params": dict(DEFAULTS), "seed": 1}]
-    trials += [{"name": n, "params": p, "seed": 0} for n, p in HAND_PICKED]
+    trials += [{"name": n, "params": p, "seed": 0, "epsilon": eps} for n, p, eps in HAND_PICKED]
     points = qmc.Sobol(d=len(SPACE), scramble=True, seed=seed).random(n_sobol)
     trials += [{"name": f"sobol{i}", "params": _from_unit(u), "seed": 0}
                for i, u in enumerate(points)]
     return trials
 
 
-def trial_config(params, seed, work_dir, syzygy_path, self_play_bin):
+def trial_config(params, seed, work_dir, syzygy_path, self_play_bin, dirichlet_epsilon=0.0):
     """A 1-hour continuous run from scratch, with the learning rate decaying to 0."""
     from continuous import ContinuousConfig
     return ContinuousConfig(
@@ -74,13 +77,17 @@ def trial_config(params, seed, work_dir, syzygy_path, self_play_bin):
         self_play_bin=self_play_bin, concurrent_games=1024,
         lr=params["lr"], replay_ratio=params["replay_ratio"],
         simulations_per_move=params["simulations_per_move"],
-        tau_decay=params["tau_decay"], dirichlet_epsilon=params["dirichlet_epsilon"],
+        tau_decay=params["tau_decay"], c_puct=params["c_puct"], window=params["window"],
+        dirichlet_epsilon=dirichlet_epsilon,
     )
 
 
-def match_command(a_weights, b_weights, games, sims, seed_offset, syzygy_path, evaluate_bin):
-    """Both engines search as in training: the network, forced mates and endgame tables."""
+def match_command(a_weights, b_weights, games, sims, seed_offset, syzygy_path, evaluate_bin,
+                  a_c_puct=DEFAULTS["c_puct"], b_c_puct=DEFAULTS["c_puct"]):
+    """Both engines search as in training: the network, forced mates and endgame
+    tables, each with the exploration constant it was trained with."""
     cmd = [evaluate_bin, a_weights, b_weights, str(games), str(sims),
+           "--candidate-c-puct", str(a_c_puct), "--current-c-puct", str(b_c_puct),
            "--disable-tier1", "--disable-material", "--mate-in", "0", "--mate-checks", "5",
            "--no-save-training-data", "--seed-offset", str(seed_offset),
            "--threads", str(games), "--batch-size", "128", "--inference-workers", "4"]
@@ -205,7 +212,8 @@ def real_train(args):
     def train(trial, work_dir):
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir)  # an interrupted run starts again from scratch
-        cfg = trial_config(trial["params"], trial["seed"], work_dir, args.syzygy, args.self_play_bin)
+        cfg = trial_config(trial["params"], trial["seed"], work_dir, args.syzygy,
+                           args.self_play_bin, trial.get("epsilon", 0.0))
         summary = run(cfg)
         engine = os.path.join(args.work_dir, "engines", trial["name"] + ".pth")
         os.makedirs(os.path.dirname(engine), exist_ok=True)
@@ -219,7 +227,8 @@ def real_play(args):
 
     def play(a, b, games, seed_offset):
         cmd = match_command(a["weights"], b["weights"], games, args.eval_sims, seed_offset,
-                            args.syzygy, args.evaluate_bin)
+                            args.syzygy, args.evaluate_bin,
+                            a["params"]["c_puct"], b["params"]["c_puct"])
         out = subprocess.run(cmd, env=get_rust_env(), capture_output=True, text=True)
         with open(os.path.join(args.work_dir, "matches.log"), "a") as f:
             f.write(f"$ {' '.join(cmd)}\n{out.stdout[-2000:]}{out.stderr[-2000:]}\n")
@@ -231,8 +240,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--work-dir", required=True)
     p.add_argument("--phase", choices=["start", "bo", "table"], required=True)
-    p.add_argument("--n-sobol", type=int, default=5)
-    p.add_argument("--n-bo", type=int, default=12)
+    p.add_argument("--n-sobol", type=int, default=6)
+    p.add_argument("--n-bo", type=int, default=15)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--syzygy", default="/data/syzygy")
     p.add_argument("--self-play-bin", required=False, default="")

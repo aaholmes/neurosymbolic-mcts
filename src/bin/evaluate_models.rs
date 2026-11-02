@@ -25,7 +25,7 @@ use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -248,7 +248,7 @@ pub fn play_evaluation_game_with_servers(
         max_iterations: simulations,
         time_limit: Duration::from_secs(120),
         mate_search_depth: if candidate_enable_tier1 { 5 } else { 0 },
-        exploration_constant: 1.414,
+        exploration_constant: f64::from_bits(CANDIDATE_C_PUCT.load(Ordering::Relaxed)),
         use_neural_policy: candidate_has_nn,
         inference_server: candidate_server.clone(),
         logger: None,
@@ -268,7 +268,7 @@ pub fn play_evaluation_game_with_servers(
         max_iterations: simulations,
         time_limit: Duration::from_secs(120),
         mate_search_depth: if current_enable_tier1 { 5 } else { 0 },
-        exploration_constant: 1.414,
+        exploration_constant: f64::from_bits(CURRENT_C_PUCT.load(Ordering::Relaxed)),
         use_neural_policy: current_has_nn,
         inference_server: current_server.clone(),
         logger: None,
@@ -898,6 +898,10 @@ fn parse_arg_f64(args: &[String], flag: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// Each side's PUCT exploration constant, as f64 bits, set once from the command line in main.
+static CANDIDATE_C_PUCT: AtomicU64 = AtomicU64::new(0x3FF6_9FBE_76C8_B439); // 1.414
+static CURRENT_C_PUCT: AtomicU64 = AtomicU64::new(0x3FF6_9FBE_76C8_B439);
+
 /// Leaves per MCTS iteration for each side, set once from the command line in main.
 static CANDIDATE_LEAVES: AtomicU32 = AtomicU32::new(1);
 /// Set once from the mate search flags and --syzygy in main; off when unset (as in tests).
@@ -952,6 +956,16 @@ fn main() {
     };
 
     let explore_base: f64 = parse_arg_f64(&args, "--explore-base", DEFAULT_EXPLORE_BASE);
+    for (flag, side) in [
+        ("--candidate-c-puct", &CANDIDATE_C_PUCT),
+        ("--current-c-puct", &CURRENT_C_PUCT),
+    ] {
+        let c = kingfisher::training_data::c_puct_arg(&args, flag).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2)
+        });
+        side.store(c.to_bits(), Ordering::Relaxed);
+    }
 
     let qsearch_variant = args
         .iter()

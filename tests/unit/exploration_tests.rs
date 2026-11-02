@@ -146,3 +146,34 @@ fn root_noise_is_reproducible_from_its_seed() {
     assert_eq!(root_priors(0.25, 7), root_priors(0.25, 7));
     assert_ne!(root_priors(0.25, 7), root_priors(0.25, 8));
 }
+
+fn args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn c_puct_defaults_to_the_constant_used_so_far() {
+    use kingfisher::training_data::{c_puct_arg, DEFAULT_C_PUCT};
+    assert_eq!(DEFAULT_C_PUCT, 1.414);
+    assert_eq!(c_puct_arg(&args(&["sp", "10"]), "--c-puct"), Ok(1.414));
+}
+
+#[test]
+fn c_puct_is_read_from_its_flag() {
+    use kingfisher::training_data::c_puct_arg;
+    let a = args(&["ev", "--candidate-c-puct", "2.5", "--current-c-puct", "1.1"]);
+    assert_eq!(c_puct_arg(&a, "--candidate-c-puct"), Ok(2.5));
+    assert_eq!(c_puct_arg(&a, "--current-c-puct"), Ok(1.1));
+}
+
+#[test]
+fn c_puct_must_be_a_positive_number() {
+    use kingfisher::training_data::c_puct_arg;
+    for bad in ["abc", "0", "-1", "nan"] {
+        assert!(
+            c_puct_arg(&args(&["sp", "--c-puct", bad]), "--c-puct").is_err(),
+            "{bad}"
+        );
+    }
+    assert!(c_puct_arg(&args(&["sp", "--c-puct"]), "--c-puct").is_err());
+}

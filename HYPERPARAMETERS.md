@@ -19,7 +19,7 @@ All tunable parameters for the Caissawary training pipeline, organized by stage.
 | Parameter | Value | CLI Flag | Notes |
 |-----------|-------|----------|-------|
 | Simulations | 800 | `--simulations-per-move` | Per-move budget (self-play and eval) |
-| Exploration (c) | 1.414 | -- | PUCT constant (sqrt(2)) |
+| Exploration (c) | 1.414 | `--c-puct` (`--candidate-c-puct`, `--current-c-puct` in `evaluate_models`) | PUCT constant (sqrt(2)); tuned in `python/hpo.py` |
 | Mate search depth | 5 | -- | Max depth in plies; disabled if `--disable-tier1` |
 | Exhaustive mate depth | 0 | -- | Depths ≤ N: all legal moves; > N: checks-only. Default 0 = all checks-only |
 | Mate search nodes | 100,000 | -- | Node budget per search |

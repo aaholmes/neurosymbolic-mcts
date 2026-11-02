@@ -77,6 +77,7 @@ class ContinuousConfig:
     self_play_bin: str = ""  # a built self_play binary; "" = cargo run
     inference_batch_size: int = 128
     inference_workers: int = 4
+    c_puct: float = 1.414  # exploration constant in the search's PUCT rule
     # Move played: sampled in proportion to (visits - 1)^(1/tau),
     # tau = tau0 * tau_decay^(move - 1), at least tau_min (0 plays the most-visited move)
     tau0: float = 1.0
@@ -337,6 +338,7 @@ def self_play_command(cfg, pointer, first_weights, games_dir):
         "--tau-min", str(cfg.tau_min),
         "--dirichlet-alpha", str(cfg.dirichlet_alpha),
         "--dirichlet-epsilon", str(cfg.dirichlet_epsilon),
+        "--c-puct", str(cfg.c_puct),
         "--watch", pointer,
     ]
     if cfg.qsearch != "extended":

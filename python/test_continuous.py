@@ -393,3 +393,9 @@ class TestStall:
         assert not cont.stalled(now=1500.0, last_game=1000.0, paused_s=400.0, stall_seconds=300)
         assert cont.stalled(now=1500.0, last_game=1000.0, paused_s=100.0, stall_seconds=300)
         assert not cont.stalled(now=1500.0, last_game=1000.0, paused_s=0.0, stall_seconds=0)
+
+
+def test_self_play_command_passes_the_exploration_constant():
+    assert cont.ContinuousConfig().c_puct == 1.414
+    cmd = cont.self_play_command(cont.ContinuousConfig(c_puct=2.2), "/w/p.txt", "/w/c.pth", "/d/g")
+    assert cmd[cmd.index("--c-puct") + 1] == "2.2"

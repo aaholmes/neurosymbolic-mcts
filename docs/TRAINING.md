@@ -75,8 +75,10 @@ flight, the learning rate decaying to 0 on a cosine. Its final weights then play
 simulations per move with both sides searching as in training, split among the first trial (the
 default settings, fixed at 0 Elo) and up to four engines spread across the current ratings. All
 engines are rated jointly with a Bradley–Terry fit, with standard errors from resampling the games
-in each match. Starting trials: the defaults, the defaults with another seed, two hand-picked
-settings and five Sobol points; after that, Optuna's Gaussian-process sampler proposes each trial
+in each match. Each engine plays with the exploration constant it was trained with. Starting
+trials: the defaults, the defaults with another seed, the defaults with Dirichlet noise at the root
+(ε = 0.25; root noise is not tuned, and this trial checks whether it helps), fewer simulations with
+more data, and six Sobol points; after that, Optuna's Gaussian-process sampler proposes each trial
 from the ratings so far. The ledger (`trials.jsonl`, `matches.jsonl`) lets an interrupted search
 resume.
 
@@ -86,7 +88,8 @@ resume.
 | Replay ratio | 1–8, log scale |
 | Simulations per move | 100–400 |
 | Temperature decay per move | 0.8–0.95 |
-| Root noise ε | 0–0.25 |
+| Exploration constant in PUCT (default 1.414) | 1–3, log scale |
+| Window (positions kept) | 100,000–1,000,000, log scale |
 
 With 1,024 games in flight, self-play alone runs at 707 moves/s, compared with 768 at 1,920 and
 561 at 512 (one run each), and the first games finish after about 110 s rather than 200 s.
