@@ -69,6 +69,28 @@ channels-last makes self-play 11% faster than with the f32 trainer, and batch 10
 faster. The larger batch takes 4 times fewer optimizer steps for the same data; whether that
 trains as well per position is not yet measured, so the default batch stays 256.
 
+**Tuning** (`python/hpo.py`, ratings in `python/ratings.py`). Each trial trains a network from
+scratch for one hour: network-only search with forced mates and endgame tables, 1,024 games in
+flight, the learning rate decaying to 0 on a cosine. Its final weights then play 800 games, at 200
+simulations per move with both sides searching as in training, split among the first trial (the
+default settings, fixed at 0 Elo) and up to four engines spread across the current ratings. All
+engines are rated jointly with a Bradley–Terry fit, with standard errors from resampling the games
+in each match. Starting trials: the defaults, the defaults with another seed, two hand-picked
+settings and five Sobol points; after that, Optuna's Gaussian-process sampler proposes each trial
+from the ratings so far. The ledger (`trials.jsonl`, `matches.jsonl`) lets an interrupted search
+resume.
+
+| Setting | Range |
+|---|---|
+| Learning rate (Muon) | 0.005–0.05, log scale |
+| Replay ratio | 1–8, log scale |
+| Simulations per move | 100–400 |
+| Temperature decay per move | 0.8–0.95 |
+| Root noise ε | 0–0.25 |
+
+With 1,024 games in flight, self-play alone runs at 707 moves/s, compared with 768 at 1,920 and
+561 at 512 (one run each), and the first games finish after about 110 s rather than 200 s.
+
 **Board symmetries**, in both loops: a position without castling rights is equivalent to its
 mirror image, and a pawnless one to all eight rotations and reflections of the board. Each sampled
 position is trained on one of its equivalent images, drawn at random, so every position counts

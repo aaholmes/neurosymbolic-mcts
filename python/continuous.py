@@ -14,6 +14,7 @@ Usage: python python/continuous.py --work-dir runs/continuous [options]
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import signal
@@ -57,6 +58,8 @@ class ContinuousConfig:
     max_owed: int = 0  # pause self-play beyond this many owed steps (0 = 4 * publish_every)
     keep_published: int = 5
     max_steps: int = 0  # 0 = no limit
+    max_seconds: float = 0.0  # wall-clock limit for the run, 0 = no limit
+    lr_schedule: str = "constant"  # "cosine" decays to 0 over max_seconds (or else max_steps)
     max_positions: int = 0  # 0 = no limit
     poll_seconds: float = 1.0
     # Self-play
@@ -70,6 +73,7 @@ class ContinuousConfig:
     mate_checks: int = 5
     mate_quiet: int = 0
     syzygy_path: str = ""
+    self_play_bin: str = ""  # a built self_play binary; "" = cargo run
     inference_batch_size: int = 128
     inference_workers: int = 4
     # Move played: sampled in proportion to (visits - 1)^(1/tau),
@@ -80,6 +84,24 @@ class ContinuousConfig:
     # Dirichlet noise mixed into each search's root priors (epsilon 0 = off)
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.0
+
+
+def lr_factor(schedule, progress):
+    """The learning rate's multiplier at `progress` (0 to 1) through the run."""
+    if schedule == "constant":
+        return 1.0
+    if schedule == "cosine":
+        return 0.5 * (1.0 + math.cos(math.pi * min(1.0, max(0.0, progress))))
+    raise ValueError(f"unknown learning-rate schedule {schedule!r}")
+
+
+def run_progress(cfg, elapsed, steps):
+    """How far through the run, from the time limit if there is one, else the step limit."""
+    if cfg.max_seconds:
+        return elapsed / cfg.max_seconds
+    if cfg.max_steps:
+        return steps / cfg.max_steps
+    return 0.0
 
 
 def steps_owed(positions_generated, steps_done, replay_ratio, batch_size):
@@ -186,6 +208,10 @@ class Trainer:
         if channels_last:
             self.model = self.model.to(memory_format=torch.channels_last)
         self.optimizer = make_optimizer(self.model, optimizer, lr)
+        self._groups = list(self.optimizer.param_groups)
+        if getattr(self.optimizer, "backend", None) is not None:
+            self._groups += self.optimizer.backend.param_groups
+        self._base_lrs = [g["lr"] for g in self._groups]
         self.weights_dir = weights_dir
         self.pointer = os.path.join(weights_dir, "published.txt")
         self.batch_size = batch_size
@@ -196,6 +222,11 @@ class Trainer:
         self.steps = 0
         self.version = -1
         os.makedirs(weights_dir, exist_ok=True)
+
+    def set_lr_factor(self, factor):
+        """Scale every learning rate, Muon's backend optimizer included, from its initial value."""
+        for group, base in zip(self._groups, self._base_lrs):
+            group["lr"] = base * factor
 
     def resume(self, path):
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
@@ -275,8 +306,9 @@ def make_trainer(cfg, weights_dir):
 def self_play_command(cfg, pointer, first_weights, games_dir):
     """The Rust self-play command: many games, each with the newest weights."""
     from orchestrate import RUST_NN_FEATURES, exact_ending_args
-    cmd = [
-        "cargo", "run", "--release", "--features", RUST_NN_FEATURES, "--bin", "self_play", "--",
+    launcher = [cfg.self_play_bin] if cfg.self_play_bin else [
+        "cargo", "run", "--release", "--features", RUST_NN_FEATURES, "--bin", "self_play", "--"]
+    cmd = launcher + [
         str(10**9),  # games: run until stopped
         str(cfg.simulations_per_move),
         games_dir,
@@ -344,10 +376,32 @@ def run(cfg, launch=launch_self_play):
     paused, paused_since, paused_total = False, 0.0, 0.0
     last_publish = trainer.steps
     losses = {}
+
+    def publish_and_log():
+        nonlocal last_publish
+        trainer.publish()
+        last_publish = trainer.steps
+        entry = {
+            "version": trainer.version,
+            "steps": trainer.steps,
+            "positions_generated": generated,
+            "games": games,
+            "window_positions": window.positions(),
+            "mean_game_lag_versions": lag_total / games if games else None,
+            "elapsed_s": round(time.time() - start, 1),
+            "paused_s": round(paused_total + (time.time() - paused_since if paused else 0), 1),
+            "lr": trainer.optimizer.param_groups[0]["lr"],
+            **losses,
+        }
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        print(json.dumps(entry), flush=True)
+
     proc = launch(cfg, trainer.pointer, first, games_dir)
     try:
         while not (cfg.max_steps and trainer.steps - start_steps >= cfg.max_steps) and \
-                not (cfg.max_positions and generated >= cfg.max_positions):
+                not (cfg.max_positions and generated >= cfg.max_positions) and \
+                not (cfg.max_seconds and time.time() - start >= cfg.max_seconds):
             added, versions = window.ingest(games_dir)
             generated += added
             games += len(versions)
@@ -375,27 +429,17 @@ def run(cfg, launch=launch_self_play):
                 continue
 
             n = min(owed, cfg.publish_every - (trainer.steps - last_publish))
+            trainer.set_lr_factor(lr_factor(cfg.lr_schedule, run_progress(
+                cfg, time.time() - start, trainer.steps - start_steps)))
             losses = trainer.train_steps(n, window)
             if trainer.steps - last_publish >= cfg.publish_every:
-                trainer.publish()
-                last_publish = trainer.steps
-                entry = {
-                    "version": trainer.version,
-                    "steps": trainer.steps,
-                    "positions_generated": generated,
-                    "games": games,
-                    "window_positions": window.positions(),
-                    "mean_game_lag_versions": lag_total / games if games else None,
-                    "elapsed_s": round(time.time() - start, 1),
-                    "paused_s": round(paused_total + (time.time() - paused_since if paused else 0), 1),
-                    **losses,
-                }
-                with open(log_path, "a") as f:
-                    f.write(json.dumps(entry) + "\n")
-                print(json.dumps(entry), flush=True)
+                publish_and_log()
     finally:
         stop(proc, paused)
-    return {"steps": trainer.steps, "version": trainer.version,
+    if trainer.steps > last_publish:
+        publish_and_log()
+    weights = os.path.join(weights_dir, f"cont_{trainer.version}.pth")
+    return {"steps": trainer.steps, "version": trainer.version, "weights": weights,
             "positions_generated": generated, "games": games}
 
 

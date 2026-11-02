@@ -105,8 +105,13 @@ Two loops are available ([docs/TRAINING.md](docs/TRAINING.md)):
   each new game uses the newest weights, and the trainer trains on a sliding window of recent
   games so that each position is used a fixed number of times on average (the replay ratio). The
   trainer runs in 16-bit floating point (bf16) with the channels-last memory layout, which cuts its
-  GPU time per step by 43%, with training loss within 0.1% of f32 over 320 steps. This runs end
-  to end but has not yet trained a model.
+  GPU time per step by 43%, with training loss within 0.1% of f32 over 320 steps. A run can stop
+  after a set time, with the learning rate decaying to 0 over it.
+- **Tuning** (`python/hpo.py`): 1-hour continuous runs from scratch, each played over 800 games
+  with up to five earlier runs and rated jointly by Elo (a Bradley–Terry fit with bootstrap
+  standard errors). A Gaussian-process optimizer proposes each new run's settings from the ratings
+  so far. The first nine runs are in progress, including the default settings twice with
+  different seeds to measure how much two identical runs differ.
 
 Self-play varies its games by sampling each move played in proportion to the root's visit counts
 minus one, raised to the power 1/τ. The temperature τ falls over the game, so openings vary and
@@ -120,14 +125,12 @@ counts once whatever its symmetry.
 
 ## Next steps
 
-1. **Prepare a 12-hour continuous run in standard chess.** First, a match script that rates a
-   checkpoint at fixed time per move with an Elo interval, a decaying learning rate, and a 2-hour
-   pilot to show that continuous training improves at all. Then tune: Bayesian optimization of the
-   trainer's settings (learning rate, batch size, window, replay ratio) on the pilot's saved games,
-   scored by loss on later games, and short self-play runs, halved by Elo, for the temperature,
-   the root noise and simulations per move. A lower replay ratio or a larger batch leaves
-   self-play more of the GPU (10% slower than alone at batch 1024, compared with 15% at 256) but
-   may learn less per position.
+1. **Choose the settings for a 12-hour continuous run in standard chess.** If the two runs with
+   default settings land within about 50 Elo of each other, 1-hour runs can rank settings, and
+   about 12 runs proposed by the optimizer follow. They tune five settings: learning rate, replay
+   ratio, simulations per move, the temperature's decay and the root noise. One hour favours
+   settings that learn fast early, so the best two or three are rerun for 4 hours to check that
+   their order holds before the 12-hour run.
 2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap
    interval on the Elo difference. Whether exact endings help training is not yet measured.
 3. **Make the quiescence search cheaper**, so the full classical search fits in standard chess.
