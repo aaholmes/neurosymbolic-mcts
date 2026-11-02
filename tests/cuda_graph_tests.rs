@@ -293,3 +293,45 @@ fn workers_record_graphs_while_others_serve() {
         assert_eq!(server.shutdown().len(), 4);
     }
 }
+
+/// As in self-play with `--watch`: a new server loads for each weights version
+/// while games still use the older ones, whose workers keep recording graphs
+/// for new batch sizes, and each old server shuts down when its last game ends.
+/// Every request to every server is answered.
+#[test]
+fn servers_load_and_retire_while_others_record_graphs() {
+    use kingfisher::mcts::inference_server::InferenceServer;
+    use std::sync::Arc;
+    let _serial = serial();
+    let boards = Arc::new(positions());
+    let weights = std::env::var("KF_TEST_WEIGHTS")
+        .unwrap_or_else(|_| fixture().to_str().unwrap().to_string());
+    let mut games = Vec::new();
+    for version in 0..12u64 {
+        let server = Arc::new(InferenceServer::load(&weights, 4, 128).unwrap());
+        // Two "games" per version, each sending batches of many sizes.
+        for g in 0..2u64 {
+            let server = server.clone();
+            let boards = boards.clone();
+            games.push(std::thread::spawn(move || {
+                let mut rng = StdRng::seed_from_u64(version * 2 + g);
+                let mut unanswered = 0;
+                for _ in 0..15 {
+                    let n = rng.gen_range(1..=boards.len());
+                    let replies: Vec<_> = boards[..n]
+                        .iter()
+                        .map(|b| server.predict_async(b.clone(), true, 0.0))
+                        .collect();
+                    unanswered += replies
+                        .into_iter()
+                        .filter(|r| !matches!(r.recv(), Ok(Some(_))))
+                        .count();
+                }
+                unanswered
+            }));
+        }
+        drop(server);
+    }
+    let unanswered: usize = games.into_iter().map(|h| h.join().unwrap()).sum();
+    assert_eq!(unanswered, 0, "requests without an answer");
+}

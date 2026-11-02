@@ -192,6 +192,10 @@ impl InferenceServer {
         batch_size: usize,
         idle_window: Duration,
     ) -> Result<Self, String> {
+        // Uploading weights while another server's worker records a CUDA graph
+        // makes that recording fail, so loading waits for any recording to end.
+        #[cfg(feature = "cuda")]
+        let _setup = crate::nn::cuda_setup_lock();
         let nns = (0..workers.max(1))
             .map(|_| {
                 let mut nn = NeuralNetPolicy::new_on_own_stream();
@@ -490,4 +494,9 @@ fn run_worker(
         println!("Server CPUs: {:?}", s.cpus);
     }
     println!("🛑 Inference Server Worker shutting down.");
+    // Freeing the weights, graphs and stream while another server's worker
+    // records a CUDA graph makes that recording fail.
+    #[cfg(feature = "cuda")]
+    let _setup = crate::nn::cuda_setup_lock();
+    drop(nn);
 }

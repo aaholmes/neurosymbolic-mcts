@@ -359,3 +359,37 @@ class TestRunLimits:
         assert summary["version"] == 1  # v0 at start, the final weights at the end
         assert os.path.basename(summary["weights"]) == "cont_1.pth"
         assert torch.load(summary["weights"], weights_only=False)["global_minibatch"] == 25
+
+
+class TestStall:
+    def test_run_raises_when_no_game_finishes_for_stall_seconds(self, tmp):
+        script = os.path.join(tmp, "fake_self_play.py")
+        with open(script, "w") as f:
+            f.write(FAKE_SELF_PLAY)  # 5 games, then nothing
+        cfg = cont.ContinuousConfig(
+            work_dir=os.path.join(tmp, "run"), num_blocks=1, hidden_dim=16,
+            optimizer="adam", lr=1e-3, batch_size=8, replay_ratio=2.0,
+            min_positions=40, publish_every=1000, max_seconds=60, window=1000,
+            device="cpu", poll_seconds=0.05, stall_seconds=2,
+        )
+        procs = []
+
+        def launch(cmd_cfg, pointer, first, games):
+            p = __import__("subprocess").Popen([sys.executable, script, games, "5"])
+            procs.append(p)
+            return p
+
+        start = __import__("time").time()
+        with pytest.raises(cont.SelfPlayStalled):
+            cont.run(cfg, launch=launch)
+        assert __import__("time").time() - start < 20, "must not wait for the time limit"
+        assert procs[0].poll() is not None, "self-play must be stopped"
+
+    def test_stall_check_defaults_to_five_minutes(self):
+        assert cont.ContinuousConfig().stall_seconds == 300
+
+    def test_stall_check_ignores_time_spent_paused(self):
+        # Paused for 400 s of the last 500 s without a game: 100 s running, no stall.
+        assert not cont.stalled(now=1500.0, last_game=1000.0, paused_s=400.0, stall_seconds=300)
+        assert cont.stalled(now=1500.0, last_game=1000.0, paused_s=100.0, stall_seconds=300)
+        assert not cont.stalled(now=1500.0, last_game=1000.0, paused_s=0.0, stall_seconds=0)

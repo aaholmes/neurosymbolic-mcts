@@ -62,6 +62,7 @@ class ContinuousConfig:
     lr_schedule: str = "constant"  # "cosine" decays to 0 over max_seconds (or else max_steps)
     max_positions: int = 0  # 0 = no limit
     poll_seconds: float = 1.0
+    stall_seconds: float = 300.0  # stop if self-play runs this long without finishing a game (0 = never)
     # Self-play
     concurrent_games: int = 128
     simulations_per_move: int = 200
@@ -115,6 +116,16 @@ def should_pause(paused, owed, max_owed):
     if owed > max_owed:
         return True
     return paused and owed > 0
+
+
+class SelfPlayStalled(RuntimeError):
+    """Self-play ran for stall_seconds without finishing a game."""
+
+
+def stalled(now, last_game, paused_s, stall_seconds):
+    """Whether self-play has run, not counting time paused, for stall_seconds
+    since the last game finished."""
+    return bool(stall_seconds) and now - last_game - paused_s >= stall_seconds
 
 
 def write_published(pointer, version, path):
@@ -398,6 +409,7 @@ def run(cfg, launch=launch_self_play):
         print(json.dumps(entry), flush=True)
 
     proc = launch(cfg, trainer.pointer, first, games_dir)
+    last_game, paused_at_last_game = time.time(), 0.0
     try:
         while not (cfg.max_steps and trainer.steps - start_steps >= cfg.max_steps) and \
                 not (cfg.max_positions and generated >= cfg.max_positions) and \
@@ -406,6 +418,13 @@ def run(cfg, launch=launch_self_play):
             generated += added
             games += len(versions)
             lag_total += sum(trainer.version - v for v in versions)
+            paused_now = paused_total + (time.time() - paused_since if paused else 0)
+            if versions:
+                last_game, paused_at_last_game = time.time(), paused_now
+            elif stalled(time.time(), last_game, paused_now - paused_at_last_game,
+                         cfg.stall_seconds):
+                raise SelfPlayStalled(
+                    f"no game finished in {cfg.stall_seconds:.0f} s of self-play")
 
             ready = window.positions() >= cfg.min_positions
             owed = steps_owed(generated, trainer.steps - start_steps,

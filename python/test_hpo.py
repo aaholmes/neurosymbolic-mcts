@@ -119,3 +119,13 @@ class TestSearch:
         assert all(table[n]["se"] >= 0 for n in table)
         assert os.path.exists(os.path.join(tmp, "trials.jsonl"))
         assert os.path.exists(os.path.join(tmp, "matches.jsonl"))
+
+
+def test_a_trial_whose_training_fails_is_not_recorded(tmp):
+    def train(trial, work_dir):
+        raise RuntimeError("self-play stalled")
+
+    search = hpo.Search(tmp, train=train, play=lambda *a: (1, 1, 1))
+    with pytest.raises(RuntimeError):
+        search.run_trials([{"name": hpo.ANCHOR, "params": dict(hpo.DEFAULTS), "seed": 0}])
+    assert search.trials() == {}
