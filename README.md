@@ -31,9 +31,13 @@ theorem prover.
   preliminary: compute was not matched (the classical search is extra), the two runs are linked by
   a single 100-game match, and the untrained engine already plays about as well as the trained
   baseline, so part of the gap is a head start. Details: [docs/VARIANT_RESULT.md](docs/VARIANT_RESULT.md).
-- **Standard chess**, the intended test: a 30-generation pilot of the network-only engine, with
-  forced mates and endgame tables as exact endings, ran cleanly. Candidates kept beating the current
-  model, but the acceptance test accepted only 4 of 30, which motivated continuous training (below).
+- **Training settings for standard chess**, the intended test, tuned on the network-only engine
+  with forced mates and endgame tables as exact endings. Each of 29 runs so far trained from
+  scratch for one hour on one GPU. The best rates 191 ± 8 Elo above the default settings, and five
+  others are within 21 Elo of it. They all train each position about once rather than 4 times, at a
+  learning rate 1.7–2.5 times the default, so more of the GPU goes to self-play: 1.8 times as many
+  games in the hour. One hour favours settings that learn fast early, and the best of 29 runs is
+  likely rated somewhat high, so the best settings are next rerun for longer.
 - **Self-play speed** (200 simulations per move, one RTX 5060 Ti): **765 moves per second**, up
   from about 65 at the start, through custom GPU kernels, half precision, CUDA graphs and many
   search threads sharing a few batching threads ([docs/THROUGHPUT.md](docs/THROUGHPUT.md)). With
@@ -75,17 +79,14 @@ and a value target from the game's result.
   evaluating it, so one visit is subtracted from each move's count. A move whose only visit showed
   it was bad gets no weight.
 - **Move played: sampled from the same counts.** The move is drawn in proportion to
-  (visits − 1)^(1/τ). The temperature τ starts at 1 (proportional to the counts) and decays each
-  move toward 0 (the most-visited move), so openings vary and later play follows the search.
-- **Side positions** (tested as an alternative to AlphaZero's root noise). At some moves, one
-  or two random moves are played from the position, and the result is searched once; the game
-  itself continues from the main line. A random move is usually a blunder, so the network learns
-  to play on from an advantage after the opponent blunders, and, with two random moves, also from
-  a disadvantage after its own blunder. These positions have no game result, so they train the
-  policy only. Each is searched with the full number of simulations, so at half of all moves
-  self-play finished about half as many games in an hour, and the engine rated 120 ± 11 Elo below
-  the defaults. AlphaZero's Dirichlet noise on the root priors also lost, by 63 ± 8 Elo. Both are
-  off by default.
+  (visits − 1)^(1/τ). The temperature τ starts at 1 (in proportion to the counts) and halves every
+  few moves, toward always playing the most-visited move, so openings vary and later play follows
+  the search. Five of the six best tuning runs halve it every 5–13 moves; the one run at 3 rated
+  far lower.
+- **Exploration that did not help.** AlphaZero's random (Dirichlet) noise on the root priors lost
+  56 ± 6 Elo. So did searching side positions, one or two random moves off the main line, to
+  teach the network to play on after a blunder: at half of all moves they halved the games played
+  in an hour and lost 112 ± 8 Elo. Both are off by default.
 - **Board symmetries.** A position without castling rights equals its mirror image, and a pawnless
   one equals all eight rotations and reflections. Each position is trained on one image drawn at
   random, so every position counts once whatever its symmetry.
@@ -96,7 +97,7 @@ and a value target from the game's result.
 |---|---|---|
 | Search engine (`src/`) | Rust | Board representation, move generation, the three tiers, MCTS, self-play and evaluation |
 | Network inference (`src/nn/`) | Rust, [candle](https://github.com/huggingface/candle), cuDNN, custom CUDA kernels | Runs the network on the GPU in batches collected from all search threads |
-| Training (`python/`) | Python, PyTorch | Defines and trains the network, and runs the training loop |
+| Training and tuning (`python/`) | Python, PyTorch, Optuna | Defines and trains the network, runs the training loop and the settings search |
 | GPU-only search (`cuda/`) | CUDA C++ | An experimental version that runs the whole search in one GPU kernel ([BENCHMARKS.md](BENCHMARKS.md)) |
 
 Python runs the loop: it starts the Rust self-play binary, which writes training positions to disk,
@@ -122,18 +123,25 @@ Why this split:
 Two loops are available ([docs/TRAINING.md](docs/TRAINING.md)):
 
 - **In generations** (`python/orchestrate.py`), as in AlphaGo Zero: train a candidate on recent
-  games and keep it only if it beats the current model in a sequential probability ratio test.
+  games and keep it only if it beats the current model in a sequential probability ratio test. In
+  a 30-generation pilot in standard chess, candidates kept beating the current model but the test
+  accepted only 4, which motivated the continuous loop.
 - **Continuously** (`python/continuous.py`), as in AlphaZero and KataGo: self-play never stops,
   each new game uses the newest weights, and the trainer trains on a sliding window of recent
   games so that each position is used a fixed number of times on average (the replay ratio). The
   trainer runs in 16-bit floating point (bf16) with the channels-last memory layout, which cuts its
   GPU time per step by 43%, with training loss within 0.1% of f32 over 320 steps. A run can stop
   after a set time, with the learning rate decaying to 0 over it.
-- **Tuning** (`python/hpo.py`): 1-hour continuous runs from scratch, each played over 800 games
-  with up to five earlier runs and rated jointly by Elo (a Bradley–Terry fit with bootstrap
-  standard errors). A Gaussian-process optimizer proposes each new run's settings from the ratings
-  so far. Two runs with the default settings and different seeds rated 12 ± 7 Elo apart, so
-  1-hour runs can separate settings that differ by more than about 25 Elo.
+
+**Tuning** (`python/hpo.py`) searches six settings: learning rate, replay ratio, simulations per
+move, how fast the temperature halves, the exploration constant in PUCT, and the window size. Each
+run trains from scratch for one hour, then plays 800 games with up to five earlier runs, and all
+runs are rated jointly by Elo (a Bradley–Terry fit with bootstrap standard errors). A
+Gaussian-process optimizer (Optuna) proposes each new run from the ratings so far. Two runs at the
+default settings with different seeds rated 20 ± 5 Elo apart, so differences of a few tens of
+Elo between single runs may be seed noise. Runs past the first ranges did no better, and the optimizer kept
+proposing settings at the range limits, where its model is least certain; it now proposes only
+inside narrower ranges around the best runs, while its model is still fitted on every run.
 
 Each new weights version starts a fresh inference server inside the running self-play process.
 Two bugs made long runs fail: a server loading or shutting down while another recorded a CUDA
@@ -143,12 +151,11 @@ its cuDNN state and graph memory, and a run stops if no game finishes for five m
 
 ## Next steps
 
-1. **Choose the settings for a 12-hour continuous run in standard chess.** Eight 1-hour
-   runs at spread-out settings are in progress, then about 16 proposed by the optimizer.
-   They tune six settings: learning rate, replay ratio, simulations per move, the temperature's
-   decay, the exploration constant in PUCT, and the number of positions the trainer keeps. One
-   hour favours settings that learn fast early, so the best two or three are rerun for 4 hours to
-   check that their order holds before the 12-hour run.
+1. **Choose the settings for a 12-hour continuous run in standard chess.** Thirteen more 1-hour
+   runs inside the narrower ranges are queued. The best settings and the defaults are then rerun
+   for 4 hours, with two seeds and a fixed opponent as a reference, to check that the 1-hour order
+   holds. Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a
+   mixed value target) are listed in [docs/TRAINING.md](docs/TRAINING.md#next-experiments).
 2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap
    interval on the Elo difference. Whether exact endings help training is not yet measured.
 3. **Make the quiescence search cheaper**, so the full classical search fits in standard chess.
@@ -156,8 +163,6 @@ its cuDNN state and graph memory, and a run stops if no game finishes for five m
    (static exchange evaluation, delta pruning, a size cap) should shrink it at least 10×.
 4. **The full engine versus the network alone in standard chess at equal wall-clock time**,
    including the untrained engine, to separate a head start from better learning.
-5. **Full searches on only some moves** (playout cap randomization,
-   [Wu, 2019](https://arxiv.org/abs/1902.10565)), judged by a training comparison.
 
 Later directions: a small learned evaluation inside quiescence search, as in Stockfish's
 efficiently updatable neural network (NNUE); network layers that connect squares a knight or queen
@@ -182,7 +187,7 @@ About 1,400 tests in Rust, CUDA and Python. All build options, settings, binarie
 - [docs/SEARCH.md](docs/SEARCH.md): the tiers, the value function and move selection in full
 - [docs/THROUGHPUT.md](docs/THROUGHPUT.md): how self-play went from 65 to 765 moves per second
 - [docs/MATE_SEARCH.md](docs/MATE_SEARCH.md): the mate search speed-ups and move orders tried
-- [docs/TRAINING.md](docs/TRAINING.md): both training loops and their settings
+- [docs/TRAINING.md](docs/TRAINING.md): both training loops, their settings and the tuning results
 - [docs/VARIANT_RESULT.md](docs/VARIANT_RESULT.md): the first result, with all ratings
 - [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md): what was tried, what failed, and why
 
