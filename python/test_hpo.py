@@ -83,7 +83,7 @@ class TestSuggest:
         rng = np.random.default_rng(0)
         observed = [(t["params"], float(rng.normal())) for t in hpo.starting_trials(5, 0)]
         params = hpo.suggest(observed, seed=0)
-        assert set(params) == set(hpo.SPACE)
+        assert set(params) == set(hpo.DEFAULTS)
         assert in_space(params)
 
 
@@ -132,26 +132,54 @@ def test_a_trial_whose_training_fails_is_not_recorded(tmp):
     assert search.trials() == {}
 
 
-class TestEightSettings:
-    def test_the_space_tunes_exploration_window_and_side_positions_but_not_root_noise(self):
+class TestSixSettings:
+    def test_the_space_tunes_exploration_and_window_but_not_side_positions_or_root_noise(self):
         assert set(hpo.SPACE) == {"lr", "replay_ratio", "simulations_per_move", "tau_decay",
-                                  "c_puct", "window", "side_fraction", "side_two_moves"}
+                                  "c_puct", "window"}
         assert hpo.SPACE["c_puct"][:3] == (1.0, 3.0, True)
         assert hpo.SPACE["window"][:3] == (100_000, 1_000_000, True)
         assert hpo.SPACE["window"][3] is int
         assert hpo.SPACE["simulations_per_move"][:2] == (100, 400)
-        assert hpo.SPACE["side_fraction"][:3] == (0.0, 1.0, False)
-        assert hpo.SPACE["side_two_moves"][:3] == (0.0, 1.0, False)
         assert hpo.DEFAULTS["c_puct"] == 1.414 and hpo.DEFAULTS["window"] == 200_000
         assert hpo.DEFAULTS["side_fraction"] == 0.0 and hpo.DEFAULTS["side_two_moves"] == 0.5
 
     def test_eight_sobol_points_and_the_hand_picked_checks_are_the_starting_trials(self):
         trials = hpo.starting_trials()
-        assert sum(t["name"].startswith("sobol") for t in trials) == 8
+        sobol = [t for t in trials if t["name"].startswith("sobol")]
+        assert len(sobol) == 8
+        # New names, so the ledger does not take them for the earlier eight-setting points.
+        assert not {t["name"] for t in sobol} & {f"sobol{i}" for i in range(8)}
+        assert all(t["params"]["side_fraction"] == 0.0 for t in sobol)
+        assert all(set(t["params"]) == set(hpo.DEFAULTS) for t in sobol)
         noise = [t for t in trials if t["name"] == "t02_root_noise"]
         assert noise and noise[0]["epsilon"] == 0.25
         side = [t for t in trials if t["name"] == "t04_side_positions"]
         assert side and side[0]["params"] == dict(hpo.DEFAULTS, side_fraction=0.5)
+
+    def test_the_optimizer_sees_only_trials_with_the_fixed_settings(self):
+        d = dict(hpo.DEFAULTS)
+        trials = {
+            "t00_default": {"params": d},
+            "t02_root_noise": {"params": d, "epsilon": 0.25},
+            "t04_side_positions": {"params": dict(d, side_fraction=0.5)},
+            "sobol6d_0": {"params": dict(d, lr=0.01)},
+        }
+        table = {n: {"elo": float(i), "se": 1.0} for i, n in enumerate(trials)}
+        observed = hpo.observed_for_bo(trials, table)
+        assert [p["lr"] for p, _ in observed] == [0.02, 0.01]
+        assert [e for _, e in observed] == [0.0, 3.0]
+        assert all(set(p) == set(hpo.SPACE) for p, _ in observed)
+
+    def test_proposed_trials_keep_side_positions_off(self, tmp):
+        def play(a, b, games, seed_offset):
+            return games // 2, games // 2, 0
+        search = hpo.Search(tmp, train=lambda t, w: w + ".pth", play=play,
+                            games_per_engine=20, opponents=2)
+        search.run_trials(hpo.starting_trials(n_sobol=2)[:2])
+        search.run_bo(1)
+        bo = search.trials()["bo00"]
+        assert bo["params"]["side_fraction"] == 0.0
+        assert set(bo["params"]) == set(hpo.DEFAULTS)
 
     def test_trial_config_sets_the_side_positions(self):
         params = dict(hpo.DEFAULTS, side_fraction=0.4, side_two_moves=0.3)

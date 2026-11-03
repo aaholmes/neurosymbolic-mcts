@@ -77,13 +77,15 @@ and a value target from the game's result.
 - **Move played: sampled from the same counts.** The move is drawn in proportion to
   (visits − 1)^(1/τ). The temperature τ starts at 1 (proportional to the counts) and decays each
   move toward 0 (the most-visited move), so openings vary and later play follows the search.
-- **Side positions** (an alternative to AlphaZero's root noise, being tested). At some moves, one
+- **Side positions** (tested as an alternative to AlphaZero's root noise). At some moves, one
   or two random moves are played from the position, and the result is searched once; the game
   itself continues from the main line. A random move is usually a blunder, so the network learns
   to play on from an advantage after the opponent blunders, and, with two random moves, also from
   a disadvantage after its own blunder. These positions have no game result, so they train the
-  policy only. AlphaZero's Dirichlet noise on the
-  root priors is also available, and is off by default.
+  policy only. Each is searched with the full number of simulations, so at half of all moves
+  self-play finished about half as many games in an hour, and the engine rated 120 ± 11 Elo below
+  the defaults. AlphaZero's Dirichlet noise on the root priors also lost, by 63 ± 8 Elo. Both are
+  off by default.
 - **Board symmetries.** A position without castling rights equals its mirror image, and a pawnless
   one equals all eight rotations and reflections. Each position is trained on one image drawn at
   random, so every position counts once whatever its symmetry.
@@ -130,9 +132,8 @@ Two loops are available ([docs/TRAINING.md](docs/TRAINING.md)):
 - **Tuning** (`python/hpo.py`): 1-hour continuous runs from scratch, each played over 800 games
   with up to five earlier runs and rated jointly by Elo (a Bradley–Terry fit with bootstrap
   standard errors). A Gaussian-process optimizer proposes each new run's settings from the ratings
-  so far. The first thirteen runs are in progress, including the default settings twice with
-  different seeds to measure how much two identical runs differ, and the defaults with side
-  positions added.
+  so far. Two runs with the default settings and different seeds rated 12 ± 7 Elo apart, so
+  1-hour runs can separate settings that differ by more than about 25 Elo.
 
 Each new weights version starts a fresh inference server inside the running self-play process.
 Two bugs made long runs fail: a server loading or shutting down while another recorded a CUDA
@@ -142,13 +143,12 @@ its cuDNN state and graph memory, and a run stops if no game finishes for five m
 
 ## Next steps
 
-1. **Choose the settings for a 12-hour continuous run in standard chess.** If the two runs with
-   default settings land within about 50 Elo of each other, 1-hour runs can rank settings, and
-   about 16 runs proposed by the optimizer follow. They tune eight settings: learning rate, replay
-   ratio, simulations per move, the temperature's decay, the exploration constant in PUCT, the
-   number of positions the trainer keeps, and how often side positions are added and how many
-   random moves away they are. One hour favours settings that learn fast early, so the best two or
-   three are rerun for 4 hours to check that their order holds before the 12-hour run.
+1. **Choose the settings for a 12-hour continuous run in standard chess.** Eight 1-hour
+   runs at spread-out settings are in progress, then about 16 proposed by the optimizer.
+   They tune six settings: learning rate, replay ratio, simulations per move, the temperature's
+   decay, the exploration constant in PUCT, and the number of positions the trainer keeps. One
+   hour favours settings that learn fast early, so the best two or three are rerun for 4 hours to
+   check that their order holds before the 12-hour run.
 2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap
    interval on the Elo difference. Whether exact endings help training is not yet measured.
 3. **Make the quiescence search cheaper**, so the full classical search fits in standard chess.

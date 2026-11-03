@@ -35,12 +35,13 @@ SPACE = {
     "tau_decay": (0.8, 0.95, False, float),
     "c_puct": (1.0, 3.0, True, float),
     "window": (100_000, 1_000_000, True, int),
-    "side_fraction": (0.0, 1.0, False, float),
-    "side_two_moves": (0.0, 1.0, False, float),
 }
 DEFAULTS = {"lr": 0.02, "replay_ratio": 4.0, "simulations_per_move": 200,
             "tau_decay": 0.9, "c_puct": 1.414, "window": 200_000,
             "side_fraction": 0.0, "side_two_moves": 0.5}
+# Side positions are off in every tuned trial: at half of all moves they cost
+# about half the games and lost 120 Elo in one hour.
+FIXED = {"side_fraction": 0.0, "side_two_moves": 0.5}
 ANCHOR = "t00_default"
 # (name, settings, Dirichlet noise at the root). Root noise is not tuned; one
 # trial at the defaults checks whether it helps.
@@ -52,7 +53,7 @@ HAND_PICKED = [
 
 
 def _from_unit(u):
-    params = {}
+    params = dict(FIXED)
     for (name, (lo, hi, log, kind)), x in zip(SPACE.items(), u):
         v = float(np.exp(np.log(lo) + x * (np.log(hi) - np.log(lo)))) if log else lo + x * (hi - lo)
         params[name] = int(round(v)) if kind is int else min(hi, max(lo, round(v, 5)))
@@ -67,7 +68,7 @@ def starting_trials(n_sobol=8, seed=0):
               {"name": "t01_default_seed1", "params": dict(DEFAULTS), "seed": 1}]
     trials += [{"name": n, "params": p, "seed": 0, "epsilon": eps} for n, p, eps in HAND_PICKED]
     points = qmc.Sobol(d=len(SPACE), scramble=True, seed=seed).random(n_sobol)
-    trials += [{"name": f"sobol{i}", "params": _from_unit(u), "seed": 0}
+    trials += [{"name": f"sobol6d_{i}", "params": _from_unit(u), "seed": 0}
                for i, u in enumerate(points)]
     return trials
 
@@ -118,8 +119,21 @@ def suggest(observed, seed):
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.GPSampler(seed=seed))
     for params, value in observed:
-        study.add_trial(optuna.trial.create_trial(params=params, distributions=dists, value=value))
-    return dict(study.ask(dists).params)
+        tuned = {n: params[n] for n in SPACE}
+        study.add_trial(optuna.trial.create_trial(params=tuned, distributions=dists, value=value))
+    return dict(FIXED, **study.ask(dists).params)
+
+
+def observed_for_bo(trials, table):
+    """(tuned settings, Elo) for the rated trials run with the fixed settings and
+    no root noise; the others measured something the optimizer cannot change."""
+    out = []
+    for name, r in table.items():
+        t = trials.get(name)
+        if t is None or t.get("epsilon") or any(t["params"].get(k) != v for k, v in FIXED.items()):
+            continue
+        out.append(({n: t["params"][n] for n in SPACE}, r["elo"]))
+    return out
 
 
 def _read_jsonl(path):
@@ -197,7 +211,7 @@ class Search:
         for i in range(n):
             table = self.ratings()
             done = self.trials()
-            observed = [(done[name]["params"], r["elo"]) for name, r in table.items() if name in done]
+            observed = observed_for_bo(done, table)
             k = sum(1 for name in done if name.startswith("bo"))
             params = suggest(observed, seed=seed + k)
             self.run_trials([{"name": f"bo{k:02d}", "params": params, "seed": 100 + k}])
