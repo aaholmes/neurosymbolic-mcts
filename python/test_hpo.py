@@ -134,12 +134,19 @@ def test_a_trial_whose_training_fails_is_not_recorded(tmp):
 
 class TestSixSettings:
     def test_the_space_tunes_exploration_and_window_but_not_side_positions_or_root_noise(self):
-        assert set(hpo.SPACE) == {"lr", "replay_ratio", "simulations_per_move", "tau_decay",
+        assert set(hpo.SPACE) == {"lr", "replay_ratio", "simulations_per_move", "tau_half_life",
                                   "c_puct", "window"}
-        assert hpo.SPACE["c_puct"][:3] == (1.0, 3.0, True)
+        # Widened after the first optimizer runs all sat at the high learning rate, low
+        # replay ratio and low exploration bounds.
+        assert hpo.SPACE["lr"][:3] == (0.005, 0.2, True)
+        assert hpo.SPACE["replay_ratio"][:3] == (0.25, 8.0, True)
+        assert hpo.SPACE["c_puct"][:3] == (0.5, 3.0, True)
         assert hpo.SPACE["window"][:3] == (100_000, 1_000_000, True)
         assert hpo.SPACE["window"][3] is int
         assert hpo.SPACE["simulations_per_move"][:2] == (100, 400)
+        # Moves for the temperature to halve, capped near a game's length (about 50 moves),
+        # beyond which longer half-lives change play very little.
+        assert hpo.SPACE["tau_half_life"][:3] == (3.0, 60.0, True)
         assert hpo.DEFAULTS["c_puct"] == 1.414 and hpo.DEFAULTS["window"] == 200_000
         assert hpo.DEFAULTS["side_fraction"] == 0.0 and hpo.DEFAULTS["side_two_moves"] == 0.5
 
@@ -198,3 +205,87 @@ class TestSixSettings:
                                 a_c_puct=2.5, b_c_puct=1.2)
         assert cmd[cmd.index("--candidate-c-puct") + 1] == "2.5"
         assert cmd[cmd.index("--current-c-puct") + 1] == "1.2"
+
+
+class TestTemperatureHalfLife:
+    def test_the_defaults_keep_a_decay_of_0_9_per_move(self):
+        cfg = hpo.trial_config(dict(hpo.DEFAULTS), 0, "/r", "/tb", "/bin/sp")
+        assert cfg.tau_decay == pytest.approx(0.9)
+
+    def test_a_half_life_sets_the_decay_per_move(self):
+        cfg = hpo.trial_config(dict(hpo.DEFAULTS, tau_half_life=10.0), 0, "/r", "/tb", "/bin/sp")
+        assert cfg.tau_decay ** 10 == pytest.approx(0.5)
+
+    def test_trials_recorded_with_a_decay_still_run_with_it(self):
+        params = {k: v for k, v in hpo.DEFAULTS.items() if k != "tau_half_life"}
+        cfg = hpo.trial_config(dict(params, tau_decay=0.95), 0, "/r", "/tb", "/bin/sp")
+        assert cfg.tau_decay == 0.95
+
+    def test_the_optimizer_sees_earlier_decays_as_half_lives(self):
+        old = {k: v for k, v in hpo.DEFAULTS.items() if k != "tau_half_life"}
+        trials = {"t00_default": {"params": dict(old, tau_decay=0.95)},
+                  "bo09": {"params": dict(hpo.DEFAULTS, tau_half_life=50.0)}}
+        table = {"t00_default": {"elo": 0.0}, "bo09": {"elo": 5.0}}
+        observed = dict((round(e), p) for p, e in hpo.observed_for_bo(trials, table))
+        assert observed[0]["tau_half_life"] == pytest.approx(13.513, abs=1e-3)
+        assert observed[5]["tau_half_life"] == 50.0
+        assert all(set(p) == set(hpo.SPACE) for p in observed.values())
+
+
+def in_proposal_ranges(params):
+    for name, (lo, hi) in hpo.PROPOSE.items():
+        # The log-scale round trip can land 1 ulp past a bound.
+        assert lo * (1 - 1e-9) <= params[name] <= hi * (1 + 1e-9), (name, params[name])
+    return True
+
+
+class TestNarrowerProposals:
+    """New trials are proposed in narrower ranges around the best runs, while the model is
+    still fitted on every rated run, including those outside the narrower ranges."""
+
+    def test_the_proposal_ranges_lie_inside_the_space(self):
+        assert hpo.PROPOSE == {"lr": (0.02, 0.1), "replay_ratio": (0.5, 2.0),
+                               "simulations_per_move": (100, 250), "tau_half_life": (4.0, 40.0),
+                               "c_puct": (0.6, 2.0), "window": (150_000, 1_000_000)}
+        for name, (lo, hi) in hpo.PROPOSE.items():
+            assert hpo.SPACE[name][0] <= lo < hi <= hpo.SPACE[name][1], name
+
+    def _observed(self, n=16, best=None):
+        rng = np.random.default_rng(1)
+        observed = [(t["params"], float(rng.normal(0, 50)))
+                    for t in hpo.starting_trials(n - 5, 0)]
+        if best is not None:
+            observed.append((best, 300.0))
+        return observed
+
+    def test_proposals_stay_in_the_narrower_ranges(self):
+        for seed in range(3):
+            params = hpo.suggest(self._observed(), seed=seed)
+            assert in_space(params)
+            assert in_proposal_ranges(params)
+
+    def test_proposals_stay_in_range_when_the_best_run_lies_outside_it(self):
+        best = dict(lr=0.2, replay_ratio=0.25, simulations_per_move=400, tau_half_life=60.0,
+                    c_puct=3.0, window=100_000)
+        params = hpo.suggest(self._observed(best=best), seed=0)
+        assert in_proposal_ranges(params)
+        assert isinstance(params["window"], int)
+        assert isinstance(params["simulations_per_move"], int)
+
+    def test_the_model_is_fitted_on_runs_outside_the_narrower_ranges(self):
+        outside = dict(lr=0.005, replay_ratio=8.0, simulations_per_move=400, tau_half_life=3.0,
+                       c_puct=3.0, window=100_000)
+        observed = self._observed() + [(outside, -400.0)]
+        study = hpo.bo_study(observed, seed=0)
+        assert len(study.trials) == len(observed)
+        assert study.trials[-1].params == outside
+
+    def test_the_optimizer_itself_proposes_inside_the_ranges_before_any_clipping(self):
+        best = dict(lr=0.2, replay_ratio=0.25, simulations_per_move=400, tau_half_life=60.0,
+                    c_puct=3.0, window=100_000)
+        for seed in range(3):
+            params = hpo.bo_study(self._observed(best=best), seed).ask(hpo._distributions()).params
+            assert in_proposal_ranges(params)
+            # Clipping would leave most settings exactly on a bound.
+            on_bound = sum(params[n] in PROPOSE_BOUNDS for n, PROPOSE_BOUNDS in hpo.PROPOSE.items())
+            assert on_bound < len(hpo.PROPOSE)

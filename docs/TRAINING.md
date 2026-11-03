@@ -86,17 +86,29 @@ Results of the starting trials (Elo relative to the defaults, standard errors fr
 the defaults with seed 1, +12 ± 7; fewer simulations with more data, −9 ± 9; root noise, −63 ± 8;
 side positions at half of all moves, −120 ± 11. Each side position is searched with the full 200
 simulations, so that trial finished 12,852 games in the hour compared with 24,723 at the defaults.
-Side positions were then fixed off, and eight new Sobol points cover the remaining six settings. The ledger (`trials.jsonl`, `matches.jsonl`) lets an interrupted search
-resume.
+Side positions were then fixed off, and eight new Sobol points cover the remaining six settings.
+The first three runs the optimizer proposed rated 103–205 Elo above the defaults, all at the
+highest learning rate and lowest replay ratio allowed, and two at the lowest exploration constant.
+A replay ratio of 1 leaves most of the GPU to self-play, which then plays 1.5–2 times as many games
+in the hour. The ranges for those three settings were then widened to those below. The ledger
+(`trials.jsonl`, `matches.jsonl`) lets an interrupted search resume.
 
 | Setting | Range |
 |---|---|
-| Learning rate (Muon) | 0.005–0.05, log scale |
-| Replay ratio | 1–8, log scale |
+| Learning rate (Muon) | 0.005–0.2, log scale |
+| Replay ratio | 0.25–8, log scale |
 | Simulations per move | 100–400 |
-| Temperature decay per move | 0.8–0.95 |
-| Exploration constant in PUCT (default 1.414) | 1–3, log scale |
+| Moves for the temperature to halve (decay 0.79–0.989 per move; 0.8–0.95 before) | 3–60, log scale |
+| Exploration constant in PUCT (default 1.414) | 0.5–3, log scale |
 | Window (positions kept) | 100,000–1,000,000, log scale |
+
+Runs past the old limits did no better: learning rates 0.1 and 0.2 rated about 120 Elo, replay
+ratios below 0.5 rated −73 and +59, and no run beat the best at the old limits (+191 ± 8). The
+optimizer kept proposing runs at the limits, where its model is least certain. From trial
+`bo13`, new trials are proposed only inside narrower ranges around the best runs (learning rate
+0.02–0.1, replay ratio 0.5–2, 100–250 simulations, half-life 4–40 moves, exploration constant
+0.6–2, window 150,000–1,000,000), while the model is still fitted on every rated run in the
+ranges above, so runs outside the narrower ranges still inform it.
 
 With 1,024 games in flight, self-play alone runs at 707 moves/s, compared with 768 at 1,920 and
 561 at 512 (one run each), and the first games finish after about 110 s rather than 200 s.
@@ -106,6 +118,44 @@ mirror image, and a pawnless one to all eight rotations and reflections of the b
 position is trained on one of its equivalent images, drawn at random, so every position counts
 once whatever its symmetry and repeated draws see different images. Adding every image instead
 would count a pawnless ending eight times as often as a position with castling rights.
+
+## Next experiments
+
+The best 1-hour settings so far rate about 200 Elo above the defaults, mostly because a replay
+ratio near 1 leaves the GPU to self-play, which then plays 1.5–2 times as many games. These ratings
+only compare the runs with each other, and one hour rewards fast early learning, so the result may
+shrink in longer runs. Each experiment below is a matched comparison at the best settings with two
+seeds, not another setting for the optimizer, which already has six settings and seed noise of
+about 14 Elo per run.
+
+1. **4-hour reruns** of the best one or two settings and the defaults, each also played with a
+   fixed opponent (the pilot's `gen_28`, or the classical alpha-beta engine), to check that the
+   order holds and to measure strength on a reference that does not change.
+2. **Full searches on only some moves** (playout cap randomization,
+   [Wu, 2019](https://arxiv.org/abs/1902.10565)): a full search on about a quarter of moves and a
+   quick one on the rest, with policy targets recorded only from full searches. Games per hour
+   mattered most in the tuning runs, and this raises them.
+3. **Network size**: 10 blocks of 128 channels, or 6 of 192, compared with 6 of 128, at 4 hours.
+   A larger network plays fewer games per hour, so 1-hour runs would always favour the smaller one.
+4. **Gumbel AlphaZero** ([Danihelka et al., ICLR 2022](https://iclr.cc/virtual/2022/poster/6418)) in
+   place of PUCT at the root, temperature and root noise: actions are sampled without replacement,
+   and the policy target comes from the search's value estimates. Its authors report clear gains
+   when planning with few simulations. It is a larger change to the search.
+5. **A value target mixing the search's value and the game's result**, so that positions in drawn
+   games still carry a signal once most games are draws.
+
+Lower priority:
+
+- **Root noise in place of the temperature schedule**: root noise lost 60 Elo at the defaults, and
+  every root move already gets one visit, which covers part of its purpose.
+- **Simpler variants of PUCT** (an exploration constant that grows with visits, or a lower first
+  estimate for unvisited moves): the forced first visit to every root move and tactical move
+  already plays part of their role.
+- **Batch size 1024** (self-play 5% faster in the profile above) **and the learning rate
+  schedule's form**: small expected gains.
+- **How deep the exact search goes** (mate search settings other than C5) is the project's main
+  research question, not a setting to tune; it is tested by matched runs with and without exact
+  endings once the settings are fixed.
 
 ```bash
 python python/orchestrate.py --enable-koth \

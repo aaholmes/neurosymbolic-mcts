@@ -14,6 +14,7 @@ The ledger (trials.jsonl, matches.jsonl) makes every phase resumable.
 """
 
 import argparse
+import math
 import json
 import os
 import re
@@ -29,15 +30,21 @@ import ratings as rating_fit
 
 # name: (low, high, log scale, type)
 SPACE = {
-    "lr": (0.005, 0.05, True, float),
-    "replay_ratio": (1.0, 8.0, True, float),
+    "lr": (0.005, 0.2, True, float),
+    "replay_ratio": (0.25, 8.0, True, float),
     "simulations_per_move": (100, 400, False, int),
-    "tau_decay": (0.8, 0.95, False, float),
-    "c_puct": (1.0, 3.0, True, float),
+    # Moves for the temperature to halve (decay per move = 0.5 ** (1 / half-life)). Capped near a
+    # game's length (about 50 moves), beyond which longer half-lives change play very little.
+    "tau_half_life": (3.0, 60.0, True, float),
+    "c_puct": (0.5, 3.0, True, float),
     "window": (100_000, 1_000_000, True, int),
 }
+# New trials are proposed only inside these narrower ranges around the best runs; the model
+# is still fitted on every rated run in SPACE, so runs outside them still inform it.
+PROPOSE = {"lr": (0.02, 0.1), "replay_ratio": (0.5, 2.0), "simulations_per_move": (100, 250),
+           "tau_half_life": (4.0, 40.0), "c_puct": (0.6, 2.0), "window": (150_000, 1_000_000)}
 DEFAULTS = {"lr": 0.02, "replay_ratio": 4.0, "simulations_per_move": 200,
-            "tau_decay": 0.9, "c_puct": 1.414, "window": 200_000,
+            "tau_half_life": math.log(0.5) / math.log(0.9), "c_puct": 1.414, "window": 200_000,
             "side_fraction": 0.0, "side_two_moves": 0.5}
 # Side positions are off in every tuned trial: at half of all moves they cost
 # about half the games and lost 120 Elo in one hour.
@@ -73,6 +80,17 @@ def starting_trials(n_sobol=8, seed=0):
     return trials
 
 
+def half_life(decay):
+    return math.log(0.5) / math.log(decay)
+
+
+def tau_decay(params):
+    """The decay per move; trials recorded before the half-life was tuned give it directly."""
+    if "tau_decay" in params:
+        return params["tau_decay"]
+    return 0.5 ** (1.0 / params["tau_half_life"])
+
+
 def trial_config(params, seed, work_dir, syzygy_path, self_play_bin, dirichlet_epsilon=0.0):
     """A 1-hour continuous run from scratch, with the learning rate decaying to 0."""
     from continuous import ContinuousConfig
@@ -82,7 +100,7 @@ def trial_config(params, seed, work_dir, syzygy_path, self_play_bin, dirichlet_e
         self_play_bin=self_play_bin, concurrent_games=1024,
         lr=params["lr"], replay_ratio=params["replay_ratio"],
         simulations_per_move=params["simulations_per_move"],
-        tau_decay=params["tau_decay"], c_puct=params["c_puct"], window=params["window"],
+        tau_decay=tau_decay(params), c_puct=params["c_puct"], window=params["window"],
         side_fraction=params["side_fraction"], side_two_moves=params["side_two_moves"],
         dirichlet_epsilon=dirichlet_epsilon,
     )
@@ -109,19 +127,67 @@ def parse_match(stdout):
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
-def suggest(observed, seed):
-    """The next settings from a Gaussian-process model of (params, Elo) pairs."""
+def _distributions():
+    import optuna
+    return {n: optuna.distributions.IntDistribution(lo, hi) if kind is int
+            else optuna.distributions.FloatDistribution(lo, hi, log=log)
+            for n, (lo, hi, log, kind) in SPACE.items()}
+
+
+def _narrow_sampler(seed):
+    """Optuna's GPSampler (version 4.7), fitted on the whole space, whose expected-improvement
+    maximization is limited to the PROPOSE box. Overrides a method Optuna documents as
+    overridable but not stable across versions."""
+    import optuna
+    from optuna._gp import search_space as gp_space
+    from scipy.optimize import minimize
+
+    class NarrowGPSampler(optuna.samplers.GPSampler):
+        def _optimize_acqf(self, acqf, best_params):
+            ss = acqf.search_space
+            box = np.array([
+                gp_space._normalize_one_param(np.array(PROPOSE[n], dtype=float),
+                                              ss._scale_types[i], tuple(ss._bounds[i]),
+                                              ss._steps[i])
+                for i, n in enumerate(ss._optuna_search_space)])  # Optuna's order, not SPACE's
+            rng = self._rng.rng
+            xs = box[:, 0] + rng.rand(2048, len(box)) * (box[:, 1] - box[:, 0])
+            starts = list(xs[np.argsort(acqf.eval_acqf_no_grad(xs))[-8:]])
+            if best_params is not None:
+                starts += [np.clip(b, box[:, 0], box[:, 1]) for b in best_params]
+            best_x, best_f = None, -np.inf
+            for x0 in starts:
+                def neg(x):
+                    f, g = acqf.eval_acqf_with_grad(x)
+                    return -f, -g
+                res = minimize(neg, x0, jac=True, method="L-BFGS-B", bounds=box)
+                if -res.fun > best_f:
+                    best_x, best_f = res.x, -res.fun
+            return best_x
+
+    return NarrowGPSampler(seed=seed)
+
+
+def bo_study(observed, seed):
+    """An Optuna study holding every observed (params, Elo) pair, with the narrow sampler."""
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    dists = {n: optuna.distributions.IntDistribution(lo, hi) if kind is int
-             else optuna.distributions.FloatDistribution(lo, hi, log=log)
-             for n, (lo, hi, log, kind) in SPACE.items()}
-    study = optuna.create_study(direction="maximize",
-                                sampler=optuna.samplers.GPSampler(seed=seed))
+    dists = _distributions()
+    study = optuna.create_study(direction="maximize", sampler=_narrow_sampler(seed))
     for params, value in observed:
         tuned = {n: params[n] for n in SPACE}
         study.add_trial(optuna.trial.create_trial(params=tuned, distributions=dists, value=value))
-    return dict(FIXED, **study.ask(dists).params)
+    return study
+
+
+def suggest(observed, seed):
+    """The next settings from a Gaussian-process model of (params, Elo) pairs, inside PROPOSE
+    (fewer than 10 observations: Optuna samples at random from the whole space)."""
+    params = bo_study(observed, seed).ask(_distributions()).params
+    if len(observed) >= 10:
+        for n, (lo, hi) in PROPOSE.items():  # rounding a whole number can step past a bound
+            params[n] = type(params[n])(min(max(params[n], lo), hi))
+    return dict(FIXED, **params)
 
 
 def observed_for_bo(trials, table):
@@ -132,7 +198,9 @@ def observed_for_bo(trials, table):
         t = trials.get(name)
         if t is None or t.get("epsilon") or any(t["params"].get(k) != v for k, v in FIXED.items()):
             continue
-        out.append(({n: t["params"][n] for n in SPACE}, r["elo"]))
+        p = dict(t["params"])
+        p.setdefault("tau_half_life", half_life(p.get("tau_decay", 0.9)))
+        out.append(({n: p[n] for n in SPACE}, r["elo"]))
     return out
 
 

@@ -43,6 +43,10 @@ class TestStepsOwed:
     def test_never_negative(self):
         assert cont.steps_owed(100, 50, replay_ratio=1.0, batch_size=64) == 0
 
+    def test_a_replay_ratio_below_one_trains_on_a_fraction_of_positions(self):
+        assert cont.steps_owed(1000, 0, replay_ratio=0.25, batch_size=100) == 2
+        assert cont.steps_owed(1000, 2, replay_ratio=0.25, batch_size=100) == 0
+
 
 class TestPause:
     def test_pauses_when_too_far_behind(self):
