@@ -43,10 +43,15 @@ except the first.
   settings differed by 50–120 Elo, so the order within the top group is not yet established.
 - **Self-play speed**: 765 moves per second with the network alone (200 simulations per move), up
   from about 65, through custom GPU kernels, half precision, CUDA graphs and many search threads
-  sharing a few batching threads ([docs/THROUGHPUT.md](docs/THROUGHPUT.md)). With the classical
-  search on, it reaches 1,000 moves per second (one run each, untrained network), because it runs
-  on the CPU while the GPU runs the network, and positions it solves exactly need no network call:
-  network calls per move fell from 41.6 to 29.6.
+  sharing a few batching threads ([docs/THROUGHPUT.md](docs/THROUGHPUT.md)).
+- **An engine whose network supplies only move priors runs twice as fast in self-play.** When a
+  leaf's value comes from the classical search alone (the long-term goal below), the network is
+  needed only when a simulation first has to choose among a node's children, not at every leaf.
+  Requesting priors then gives the same search with 4.5 network calls per move instead of 29.7,
+  and 1,942 moves per second instead of 998 (untrained network, 200 simulations per move, two runs
+  per arm, identical games). Only about 2% of simulations need new priors, probably because the forced
+  first visits to every root move and every capture, check and fork create many leaves that are
+  never revisited. The engine is then limited by the CPU (91% busy) while the GPU is busy 29% of the time.
 - **The classical search made cheaper.** The mate search is 3.7× faster at its default depth
   ([docs/MATE_SEARCH.md](docs/MATE_SEARCH.md)). The quiescence search is 2.2× faster with
   identical scores and about 24× faster with standard pruning, which changes the value of 4% of
@@ -159,15 +164,19 @@ In order of priority:
 
 1. **Whether the pruned quiescence search changes playing strength**: a match of the tiered engine
    with exact and pruned quiescence, same network and seeds.
-2. **A 12-hour continuous run of the network-only engine** with the best 1-hour settings, its
+2. **Whether Tier 1 shortens the search**, before comparing engines: with Tier 1 on, the search for a
+   move stops early once a root move averages a value above 0.99, which the classical score alone
+   can reach with a large material lead. Simulations per move with and without it show whether
+   matched runs are trying equally hard.
+3. **A 12-hour continuous run of the network-only engine** with the best 1-hour settings, its
    checkpoints rated hourly with a fixed opponent, to see whether the 1-hour settings hold.
-3. **Repeat the top 1-hour runs with new seeds**, since runs with similar settings differed by more
+4. **Repeat the top 1-hour runs with new seeds**, since runs with similar settings differed by more
    than two default runs with different seeds did.
-4. **Three matched 4-hour runs from scratch, two seeds each**: the network alone, the full tiered
+5. **Three matched 4-hour runs from scratch, two seeds each**: the network alone, the full tiered
    engine, and the tiered engine training only the policy (below), rated with a fixed opponent and
    with bootstrap intervals on the differences. This measures whether exact endings and the
    classical score help training, and whether a learned value is worth its noise.
-5. **Only if the policy-only engine is close or ahead**: tune its settings, then a 12-hour run.
+6. **Only if the policy-only engine is close or ahead**: tune its settings, then a 12-hour run.
 
 Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a mixed
 value target) are listed in [docs/TRAINING.md](docs/TRAINING.md#next-experiments).
@@ -183,6 +192,10 @@ choice of moves to search, and averaging values in MCTS makes a weak evaluation 
 minimax search. How high that ceiling is has not been measured. A learned evaluation such as
 Stockfish's NNUE would raise it, but would no longer be learning from scratch on limited compute
 ([docs/TRAINING.md](docs/TRAINING.md#long-term-goal-training-only-the-policy)).
+
+The policy-only engine is implemented (`self_play --policy-only revisit`) and needs about a sixth of
+the network calls (Results). With the GPU mostly idle, it could afford a policy network several
+times larger, and a cheaper quiescence search would raise its speed directly.
 
 Later directions: network layers that connect squares a knight or queen move apart, and applying
 the tiered search to mathematical reasoning, with an automated theorem prover as the exact method.

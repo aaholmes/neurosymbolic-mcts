@@ -76,7 +76,7 @@ pub fn select_child_with_tactical_priority(
     }
 
     // Phase 2: All tactical moves explored, use UCB with policy values
-    select_ucb_with_policy(node, config, move_gen, logger, depth)
+    select_ucb_with_policy(node, config, move_gen, stats, logger, depth)
 }
 
 /// Ensure the node has been expanded with all child nodes.
@@ -156,11 +156,12 @@ fn select_ucb_with_policy(
     node: Rc<RefCell<MctsNode>>,
     config: &TacticalMctsConfig,
     _move_gen: &MoveGen,
+    stats: &mut TacticalMctsStats,
     logger: Option<&Arc<SearchLogger>>,
     depth: usize,
 ) -> Option<Rc<RefCell<MctsNode>>> {
     // Ensure policy has been evaluated
-    ensure_policy_evaluated(node.clone(), config);
+    ensure_policy_evaluated(node.clone(), config, stats);
 
     let node_ref = node.borrow();
     if node_ref.children.is_empty() {
@@ -285,7 +286,11 @@ pub fn calculate_ucb_value(
 /// from the InferenceServer). Falls back to a synchronous InferenceServer call
 /// if the node has no cached policy but a server is available. Otherwise uses
 /// uniform priors (classical fallback).
-pub(crate) fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &TacticalMctsConfig) {
+pub(crate) fn ensure_policy_evaluated(
+    node: Rc<RefCell<MctsNode>>,
+    config: &TacticalMctsConfig,
+    stats: &mut TacticalMctsStats,
+) {
     let mut node_ref = node.borrow_mut();
 
     if node_ref.policy_evaluated {
@@ -320,6 +325,7 @@ pub(crate) fn ensure_policy_evaluated(node: Rc<RefCell<MctsNode>>, config: &Tact
     //    head is independent of q_result (which only enters the value path via v_fc).
     if config.enable_tier3_neural {
         if let Some(ref server) = config.inference_server {
+            stats.nn_requests += 1;
             let receiver = server.predict_legal_async(
                 node_ref.state.clone(),
                 moves_to_prioritize.clone(),

@@ -291,6 +291,42 @@ impl InferenceServer {
         }
     }
 
+    /// Creates a mock server whose priors are fixed by the position and move
+    /// (not uniform), with v_logit 0.0, so searches using it can be compared.
+    pub fn new_mock_hashed() -> Self {
+        use std::hash::{Hash, Hasher};
+        let (request_sender, request_receiver) = unbounded::<PredictRequest>();
+        thread::spawn(move || loop {
+            match request_receiver.recv() {
+                Ok(req) => {
+                    let policy = match &req.moves {
+                        Some(moves) => {
+                            let fen = req.board.to_fen().unwrap_or_default();
+                            let raw: Vec<f32> = moves
+                                .iter()
+                                .map(|mv| {
+                                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                                    (&fen, mv).hash(&mut h);
+                                    1.0 + (h.finish() % 100) as f32
+                                })
+                                .collect();
+                            let sum: f32 = raw.iter().sum();
+                            raw.iter().map(|r| r / sum).collect()
+                        }
+                        None => vec![0.0; 4672],
+                    };
+                    let _ = req.response_sender.send(Some((policy, 0.0, 0.5)));
+                }
+                Err(_) => break,
+            }
+        });
+        InferenceServer {
+            request_sender,
+            stats: Vec::new(),
+            workers: Vec::new(),
+        }
+    }
+
     /// Creates a mock server that returns uniform policy and 0.0 v_logit.
     pub fn new_mock_uniform() -> Self {
         Self::new_mock_biased(0.0)

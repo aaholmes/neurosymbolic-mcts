@@ -167,6 +167,37 @@ pub struct TacticalMctsConfig {
     /// network evaluation. Not used in King of the Hill, where the tables'
     /// results do not hold.
     pub tablebase: Option<crate::egtb::Tablebase>,
+    /// The policy-only engine: a leaf's value is the classical score alone,
+    /// tanh(CLASSICAL_K·ΔM), and the network supplies only priors, requested
+    /// at the time given. None = the full engine (network value and priors at
+    /// every leaf the classical tiers do not solve).
+    pub policy_only: Option<PolicyTiming>,
+}
+
+/// When the policy-only engine asks the network for a node's priors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyTiming {
+    /// At every leaf, as the full engine does.
+    AtLeaf,
+    /// Only when a simulation first has to choose among the node's children
+    /// by their priors. Most leaves are never revisited, so most never need them.
+    OnRevisit,
+}
+
+impl PolicyTiming {
+    /// `--policy-only leaf|revisit` from command-line arguments; None without the flag.
+    pub fn from_args(args: &[String]) -> Result<Option<Self>, String> {
+        let Some(i) = args.iter().position(|a| a == "--policy-only") else {
+            return Ok(None);
+        };
+        match args.get(i + 1).map(String::as_str) {
+            Some("leaf") => Ok(Some(Self::AtLeaf)),
+            Some("revisit") => Ok(Some(Self::OnRevisit)),
+            other => Err(format!(
+                "--policy-only needs leaf or revisit, not {other:?}"
+            )),
+        }
+    }
 }
 
 impl TacticalMctsConfig {
@@ -212,6 +243,7 @@ impl Default for TacticalMctsConfig {
             pesto: PestoEval::new(),
             leaves_per_iteration: 1,
             leaf_mate: crate::egtb::MateSearch::OFF,
+            policy_only: None,
             tablebase: None,
         }
     }
@@ -317,6 +349,8 @@ pub struct TacticalMctsStats {
     pub mates_found: u32,
     pub tactical_moves_explored: u32,
     pub nn_policy_evaluations: u32,
+    /// Requests sent to the network, for a leaf or for priors on demand
+    pub nn_requests: u32,
     pub search_time: Duration,
     pub nodes_expanded: u32,
     pub tt_mate_hits: u32,
@@ -961,7 +995,8 @@ fn begin_leaf_evaluation(
         // 2. Batched Inference — NN now returns raw v_logit (unbounded)
         if config.enable_tier3_neural {
             if let Some(server) = &config.inference_server {
-                if config.use_neural_policy {
+                if config.use_neural_policy && config.policy_only != Some(PolicyTiming::OnRevisit) {
+                    stats.nn_requests += 1;
                     let started = Instant::now();
                     let moves = legal_moves(&node_ref.state, move_gen);
                     let receiver = server.predict_legal_async(
@@ -1009,8 +1044,11 @@ fn finish_leaf_evaluation(
         pending.receiver.recv()
     };
     if let Ok(Some((policy, nn_v_logit, k))) = reply {
-        v_logit = nn_v_logit as f64;
-        k_val = k;
+        // The policy-only engine keeps the classical value: only the priors are used.
+        if config.policy_only.is_none() {
+            v_logit = nn_v_logit as f64;
+            k_val = k;
+        }
         if policy.len() == pending.moves.len() {
             node_ref.nn_priors = Some(pending.moves.into_iter().zip(policy).collect());
         }
@@ -1329,7 +1367,7 @@ pub fn tactical_mcts_search_for_training_with_reuse(
         evaluate_and_expand_node(root_node.clone(), move_gen, &mut stats, &config, logger);
     }
     if config.dirichlet_epsilon > 0.0 && config.dirichlet_alpha > 0.0 {
-        ensure_policy_evaluated(root_node.clone(), &config);
+        ensure_policy_evaluated(root_node.clone(), &config, &mut stats);
         apply_dirichlet_noise_with_rng(
             &root_node,
             config.dirichlet_alpha,

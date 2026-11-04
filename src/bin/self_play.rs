@@ -8,7 +8,7 @@ use kingfisher::boardstack::BoardStack;
 use kingfisher::egtb::{Ending, ExactEndings};
 use kingfisher::mcts::{
     qsearch_inputs, reuse_subtree, tactical_mcts_search_for_training_with_reuse, InferenceServer,
-    QSearchVariant, TacticalMctsConfig,
+    PolicyTiming, QSearchVariant, TacticalMctsConfig,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
@@ -31,6 +31,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Set once from --leaves-per-game in main.
 static LEAVES_PER_GAME: AtomicU32 = AtomicU32::new(1);
+/// `--policy-only leaf|revisit`: leaf values from the classical score alone.
+static POLICY_ONLY: std::sync::OnceLock<Option<PolicyTiming>> = std::sync::OnceLock::new();
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -161,6 +163,16 @@ fn main() {
         .and_then(|v| QSearchVariant::from_str(v))
         .unwrap_or(QSearchVariant::Extended);
 
+    let policy_only = PolicyTiming::from_args(&args).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
+    if policy_only.is_some() && !enable_material {
+        eprintln!("--policy-only needs the classical score (material) on");
+        std::process::exit(2);
+    }
+    POLICY_ONLY.set(policy_only).expect("set once");
+
     let exact = ExactEndings::from_args(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2)
@@ -173,6 +185,7 @@ fn main() {
     println!("   Model Path: {:?}", model_path);
     println!("   KOTH Mode: {}", enable_koth);
     println!("   Tier1 Gate: {}", enable_tier1);
+    println!("   Policy only: {:?}", policy_only);
     println!("   Material Value: {}", enable_material);
     println!("   Q-Search: {}", qsearch_variant.name());
     println!("   Exact Endings: {}", exact.describe());
@@ -370,6 +383,7 @@ fn play_game(
         randomize_move_order: true,
         qsearch_variant,
         leaves_per_iteration: LEAVES_PER_GAME.load(Ordering::Relaxed),
+        policy_only: POLICY_ONLY.get().copied().flatten(),
         ..Default::default()
     });
     let mut transposition_table = TranspositionTable::new();

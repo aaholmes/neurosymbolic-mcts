@@ -28,7 +28,7 @@ pub use self::search_logger::{GateReason, SearchLogger, SelectionReason, Verbosi
 pub use self::tactical_mcts::{
     apply_dirichlet_noise, qsearch_inputs, reuse_subtree, tactical_mcts_search,
     tactical_mcts_search_for_training, tactical_mcts_search_for_training_with_reuse,
-    tactical_mcts_search_with_tt, MctsTrainingResult, QSearchVariant, QsearchInputs,
+    tactical_mcts_search_with_tt, MctsTrainingResult, PolicyTiming, QSearchVariant, QsearchInputs,
     StatsAccumulator, TacticalMctsConfig, TacticalMctsStats, TimingAccumulator,
 };
 
