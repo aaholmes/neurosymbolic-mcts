@@ -44,14 +44,13 @@ except the first.
 - **Self-play speed**: 765 moves per second with the network alone (200 simulations per move), up
   from about 65, through custom GPU kernels, half precision, CUDA graphs and many search threads
   sharing a few batching threads ([docs/THROUGHPUT.md](docs/THROUGHPUT.md)).
-- **An engine whose network supplies only move priors runs twice as fast in self-play.** When a
-  leaf's value comes from the classical search alone (the long-term goal below), the network is
-  needed only when a simulation first has to choose among a node's children, not at every leaf.
-  Requesting priors then gives the same search with 4.5 network calls per move instead of 29.7,
-  and 1,942 moves per second instead of 998 (untrained network, 200 simulations per move, two runs
-  per arm, identical games). Only about 2% of simulations need new priors, probably because the forced
-  first visits to every root move and every capture, check and fork create many leaves that are
-  never revisited. The engine is then limited by the CPU (91% busy) while the GPU is busy 29% of the time.
+- **The policy-only engine runs twice as fast in self-play.** Its leaf values need no network, so
+  a node's priors are requested only when a simulation first has to choose among its children.
+  This gives the same search with 4.5 network calls per move instead of 29.7, and 1,942 moves per
+  second instead of 998 (untrained network, 200 simulations per move, two runs per arm, identical
+  games). Only about 2% of simulations need new priors, probably because the forced first visits
+  to every root move and every capture, check and fork create many leaves that are never
+  revisited. The CPU is then the limit (91% busy) while the GPU is busy 29% of the time.
 - **The classical search made cheaper.** The mate search is 3.7× faster at its default depth
   ([docs/MATE_SEARCH.md](docs/MATE_SEARCH.md)). The quiescence search is 2.2× faster with
   identical scores and about 24× faster with standard pruning, which changes the value of 4% of
@@ -68,7 +67,7 @@ position in standard chess, on one CPU thread for Tiers 1 and 2:
 | Tier | Method | Result | Cost |
 |---|---|---|---|
 | 1 | Exact search for a forced mate in up to 5 moves in which every attacking move gives check, and endgame tables (Syzygy) for positions with 5 or fewer pieces | Proven win, loss or draw | 12 µs (mate search) |
-| 2 | Quiescence search: captures, promotions, replies to check and one quiet check or fork per side are played out, threats are tested by letting the side to move pass, and the quiet position is scored with a standard hand-tuned evaluation (PeSTO) | Heuristic score ΔM | 150 µs (median 24 µs) |
+| 2 | Quiescence search: captures, promotions, replies to check and one quiet check or fork per side in each line are played out, threats are tested by letting the side to move pass, and the quiet position is scored with a standard hand-tuned evaluation (PeSTO) | Heuristic score ΔM | 150 µs (median 24 µs) |
 | 3 | Neural network (a 6-block residual network, about 2M parameters) | Learned value and move priors | 13 µs of GPU time in a batch of 128 |
 
 A position solved in Tier 1 is terminal, so its proven value propagates up the tree without being
@@ -81,7 +80,16 @@ $$V = \tanh(V_{\text{net}} + k \cdot \Delta M)$$
 
 where $V_{\text{net}}$ is the network's unbounded output and $k$ is a learned weight on the
 classical score. With no network, $V = \tanh(0.326 \cdot \Delta M)$, which is why the untrained
-engine already plays reasonably. The baseline, as in AlphaZero, uses the network alone.
+engine already plays reasonably.
+
+Three engines are compared:
+
+- **Network only** (the baseline, as in AlphaZero): $V = \tanh(V_{\text{net}})$, with forced mates
+  and endgame tables still ending games with their exact result.
+- **Full engine**: all three tiers, with the value above.
+- **Policy-only engine** (`--policy-only revisit`): Tiers 1 and 2 give the value,
+  $V = \tanh(0.326 \cdot \Delta M)$, and the network supplies only which moves to search. This
+  is the long-term goal described under Next steps.
 
 Moves are selected with AlphaZero's rule (PUCT, which adds to each move's average value a bonus
 that grows with the network's prior and shrinks with visits). Two additions keep the search from
