@@ -46,9 +46,10 @@ fn max_virtual_loss(node: &Rc<RefCell<MctsNode>>) -> u32 {
 const MIDDLEGAME: &str = "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4";
 
 /// Root child visit counts with one leaf per iteration, recorded before
-/// leaves_per_iteration existed (mock uniform network, no move shuffling).
+/// leaves_per_iteration existed (mock uniform network, no move shuffling), and
+/// re-recorded when the quiescence search began pruning, which moved one visit.
 const K1_ROOT_VISITS: &[u32] = &[
-    1, 1, 1, 1, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1, 236, 13, 1, 1, 1, 1, 1, 1, 7, 2, 6, 1, 1, 1, 1, 5, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1, 237, 13, 1, 1, 1, 1, 1, 1, 7, 1, 6, 1, 1, 1, 1, 5, 1,
     1, 1,
 ];
 

@@ -6,15 +6,15 @@ Each position is handled by the cheapest method that can evaluate it:
 
 | Tier | Method | Result | Mean cost |
 |---|---|---|---|
-| 1 | Exact search for a forced mate in up to 5 moves (checking moves only); in King of the Hill also a forced king march to the centre in up to 3 | Proven value | 132–149 µs³ |
-| 2 | Quiescence search: captures and promotions are played out until the position is quiet, with all replies to check, one quiet check or fork per side, and a test for threats made by letting the side to move pass; the quiet position is scored with PeSTO, a standard hand-tuned evaluation of material and piece placement | Heuristic value | 8 µs |
-| 3 | Neural network | Learned value | 1,346 µs |
+| 1 | Exact search for a forced mate in up to 5 moves (checking moves only), and endgame tables (Syzygy) for 5 pieces or fewer; in King of the Hill also a forced king march to the centre in up to 3 | Proven value | 12 µs (mate search) |
+| 2 | Quiescence search: captures and promotions are played out until the position is quiet, with all replies to check, one quiet check or fork per side, and a test for threats made by letting the side to move pass; the quiet position is scored with PeSTO, a standard hand-tuned evaluation of material and piece placement | Heuristic value | 150 µs (median 24 µs) |
+| 3 | Neural network | Learned value | 13 µs of GPU time per position in a batch of 128 |
 
-Costs were measured with `profile_engine` (4 games played one after another,
-200 simulations per move). The Tier 3 cost is the time per network call as the search sees it,
-including up to 0.5 ms that the inference server waits for other requests to fill a batch.
-
-³ Measured before the mate search was sped up ([MATE_SEARCH.md](MATE_SEARCH.md)), so the current cost is lower.
+Tier 1 and 2 costs are per position on one CPU thread, in standard chess: the mate search on
+pilot games extended by random moves (`mate_bench`), the quiescence search on self-play leaves
+(`qsearch_bench`; [MATE_SEARCH.md](MATE_SEARCH.md), [QUIESCENCE.md](QUIESCENCE.md)).
+The Tier 3 cost is GPU time per position (`nn_bench`, f16); a search thread also waits for its
+batch to fill, but other search threads use the CPU meanwhile.
 
 A position evaluated exactly in Tier 1 is terminal, like checkmate or stalemate, so its proven value
 propagates up the tree without being averaged with approximate evaluations of its children.

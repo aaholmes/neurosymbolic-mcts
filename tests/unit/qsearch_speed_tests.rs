@@ -4,8 +4,10 @@
 use kingfisher::boardstack::BoardStack;
 use kingfisher::eval::PestoEval;
 use kingfisher::move_generation::MoveGen;
-use kingfisher::search::qsearch_bench::{answer_checksum, percentile};
-use kingfisher::search::quiescence::forced_ext_pesto_balance_counted;
+use kingfisher::search::qsearch_bench::{answer_checksum, parse_config, percentile};
+use kingfisher::search::quiescence::{
+    forced_ext_pesto_balance_counted, forced_ext_pesto_balance_with, ExtConfig,
+};
 use kingfisher::search::quiescence_reference::forced_ext_pesto_balance_reference;
 
 use crate::common::board_from_fen;
@@ -23,14 +25,15 @@ fn the_fixture_holds_100_leaves() {
 }
 
 #[test]
-fn the_search_returns_the_reference_score_on_every_leaf() {
+fn the_exact_search_returns_the_reference_score_on_every_leaf() {
     let (mg, pesto) = (MoveGen::new(), PestoEval::new());
     for fen in leaves() {
         let board = board_from_fen(fen);
-        let (s, c, _, _) = forced_ext_pesto_balance_counted(
+        let (s, c, _, _) = forced_ext_pesto_balance_with(
             &mut BoardStack::with_board(board.clone()),
             &mg,
             &pesto,
+            &ExtConfig::exact(),
         );
         let (rs, rc, _, _) =
             forced_ext_pesto_balance_reference(&mut BoardStack::with_board(board), &mg, &pesto);
@@ -49,10 +52,11 @@ fn the_threat_probe_is_skipped_where_it_cannot_change_the_score() {
     let (mut now, mut reference) = (0u64, 0u64);
     for fen in leaves() {
         let board = board_from_fen(fen);
-        now += forced_ext_pesto_balance_counted(
+        now += forced_ext_pesto_balance_with(
             &mut BoardStack::with_board(board.clone()),
             &mg,
             &pesto,
+            &ExtConfig::exact(),
         )
         .2 as u64;
         reference +=
@@ -123,4 +127,94 @@ fn capture_generation_matches_the_capture_list_of_full_generation() {
         }
     }
     assert!(n > 300);
+}
+
+fn total_positions(cfg: &ExtConfig) -> u64 {
+    let (mg, pesto) = (MoveGen::new(), PestoEval::new());
+    leaves()
+        .into_iter()
+        .map(|fen| {
+            let mut stack = BoardStack::with_board(board_from_fen(fen));
+            forced_ext_pesto_balance_with(&mut stack, &mg, &pesto, cfg).2 as u64
+        })
+        .sum()
+}
+
+#[test]
+fn the_default_prunes_with_one_probe_per_side_delta_200_and_losing_captures() {
+    let d = ExtConfig::default();
+    assert!(d.probe_once && d.see_prune);
+    assert_eq!((d.delta_margin_cp, d.max_depth), (Some(200), 20));
+    let e = ExtConfig::exact();
+    assert!(!e.probe_once && !e.see_prune);
+    assert_eq!((e.delta_margin_cp, e.max_depth), (None, 20));
+}
+
+#[test]
+fn the_default_config_is_the_current_search() {
+    let (mg, pesto) = (MoveGen::new(), PestoEval::new());
+    for fen in leaves() {
+        let board = board_from_fen(fen);
+        let with = forced_ext_pesto_balance_with(
+            &mut BoardStack::with_board(board.clone()),
+            &mg,
+            &pesto,
+            &ExtConfig::default(),
+        );
+        let counted =
+            forced_ext_pesto_balance_counted(&mut BoardStack::with_board(board), &mg, &pesto);
+        assert_eq!(with, counted, "{fen}");
+    }
+}
+
+#[test]
+fn each_pruning_rule_searches_fewer_positions() {
+    let base = total_positions(&ExtConfig::exact());
+    for name in ["probe1", "delta200", "see", "d12"] {
+        let n = total_positions(&parse_config(name).unwrap());
+        assert!(n < base, "{name}: {n} positions searched, default {base}");
+    }
+}
+
+#[test]
+fn a_lower_depth_limit_is_respected() {
+    let (mg, pesto) = (MoveGen::new(), PestoEval::new());
+    let cfg = parse_config("d6").unwrap();
+    for fen in leaves() {
+        let mut stack = BoardStack::with_board(board_from_fen(fen));
+        assert!(
+            forced_ext_pesto_balance_with(&mut stack, &mg, &pesto, &cfg).3 <= 6,
+            "{fen}"
+        );
+    }
+}
+
+#[test]
+fn all_pruning_still_wins_a_hanging_queen_and_sees_a_defended_one() {
+    let (mg, pesto) = (MoveGen::new(), PestoEval::new());
+    let cfg = parse_config("probe1+delta200+see+d12").unwrap();
+    let score = |fen: &str| {
+        forced_ext_pesto_balance_with(
+            &mut BoardStack::with_board(board_from_fen(fen)),
+            &mg,
+            &pesto,
+            &cfg,
+        )
+        .0
+    };
+    // White rook takes an undefended black queen.
+    assert!(score("3q3k/8/8/8/8/8/8/3RK3 w - - 0 1") > 4.0);
+    // The queen is defended by a pawn: RxQ pxR still wins a queen for a rook, leaving
+    // White about a pawn down instead of 5.75 down.
+    assert!(score("4k3/8/2p5/3q4/8/8/8/3RK3 w - - 0 1") > -2.0);
+}
+
+#[test]
+fn configs_parse_from_names() {
+    let all = parse_config("probe1+delta150+see+d10").unwrap();
+    assert!(all.probe_once && all.see_prune);
+    assert_eq!((all.delta_margin_cp, all.max_depth), (Some(150), 10));
+    assert_eq!(parse_config("exact").unwrap(), ExtConfig::exact());
+    assert_eq!(parse_config("default").unwrap(), ExtConfig::default());
+    assert!(parse_config("delta").is_err() && parse_config("fast").is_err());
 }

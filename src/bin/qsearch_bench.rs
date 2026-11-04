@@ -2,6 +2,8 @@
 //!
 //! Usage: qsearch_bench <leaf file> [reps] [--half tune|held|all] [--impl new|ref|new,ref]
 //!        [--dump <file>]
+//! where each --impl name is `ref` (the frozen original), `new` (the current
+//! default search), `exact` or a pruning configuration such as `probe1+delta200+see+d12`.
 //! (default: 5 reps, all positions, the current search only).
 //!
 //! For each search it prints the time per call over the reps (mean ± sd), the
@@ -19,13 +21,13 @@ use kingfisher::boardstack::BoardStack;
 use kingfisher::eval::PestoEval;
 use kingfisher::move_generation::MoveGen;
 use kingfisher::search::leaf_log::parse_corpus_line;
-use kingfisher::search::qsearch_bench::{answer_checksum, percentile};
-use kingfisher::search::quiescence::forced_ext_pesto_balance_counted;
+use kingfisher::search::qsearch_bench::{answer_checksum, parse_config, percentile};
+use kingfisher::search::quiescence::forced_ext_pesto_balance_with;
 use kingfisher::search::quiescence_reference::forced_ext_pesto_balance_reference;
 use std::io::Write;
 use std::time::Instant;
 
-type Search = fn(&mut BoardStack, &MoveGen, &PestoEval) -> (f32, bool, u32, u8);
+type Search<'a> = &'a dyn Fn(&mut BoardStack) -> (f32, bool, u32, u8);
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
@@ -40,14 +42,7 @@ struct Run {
     median_us: Vec<f64>,
 }
 
-fn run(
-    name: &str,
-    search: Search,
-    boards: &[Board],
-    reps: usize,
-    mg: &MoveGen,
-    pesto: &PestoEval,
-) -> Run {
+fn run(name: &str, search: Search, boards: &[Board], reps: usize) -> Run {
     let n = boards.len();
     let mut times = vec![Vec::with_capacity(reps); n];
     let mut per_rep_us = Vec::with_capacity(reps);
@@ -58,7 +53,7 @@ fn run(
         for (i, b) in boards.iter().enumerate() {
             let mut stack = BoardStack::with_board(b.clone());
             let t = Instant::now();
-            let (score, completed, searched, _) = search(&mut stack, mg, pesto);
+            let (score, completed, searched, _) = search(&mut stack);
             times[i].push(t.elapsed().as_secs_f64() * 1e6);
             if rep == 0 {
                 answers.push((score, completed));
@@ -129,39 +124,51 @@ fn main() {
     let impls = flag(&args, "--impl").unwrap_or("new");
     let mut runs = Vec::new();
     for name in impls.split(',') {
-        let search: Search = match name {
-            "new" => forced_ext_pesto_balance_counted,
-            "ref" => forced_ext_pesto_balance_reference,
-            other => panic!("--impl takes new and/or ref, not {other:?}"),
+        let r = if name == "ref" {
+            run(
+                name,
+                &|b: &mut BoardStack| forced_ext_pesto_balance_reference(b, &mg, &pesto),
+                &boards,
+                reps,
+            )
+        } else {
+            let cfg = parse_config(if name == "new" { "default" } else { name })
+                .unwrap_or_else(|e| panic!("--impl: {e}"));
+            run(
+                name,
+                &|b: &mut BoardStack| forced_ext_pesto_balance_with(b, &mg, &pesto, &cfg),
+                &boards,
+                reps,
+            )
         };
-        runs.push((name, run(name, search, &boards, reps, &mg, &pesto)));
+        runs.push((name, r));
     }
-    if let [(_, a), (_, b)] = &runs[..] {
+    // Agreement of every later run with the first.
+    if let Some(((first, a), rest)) = runs.split_first() {
         let n = boards.len() as f64;
-        let same_score = a
-            .answers
-            .iter()
-            .zip(&b.answers)
-            .filter(|(x, y)| x.0 == y.0)
-            .count();
-        let same_flag = a
-            .answers
-            .iter()
-            .zip(&b.answers)
-            .filter(|(x, y)| x.1 == y.1)
-            .count();
-        let mad = a
-            .answers
-            .iter()
-            .zip(&b.answers)
-            .map(|(x, y)| (x.0 - y.0).abs() as f64)
-            .sum::<f64>()
-            / n;
-        println!(
-            "agreement: same score {:.2}%, same completed flag {:.2}%, mean |score difference| {mad:.4} pawns",
-            100.0 * same_score as f64 / n,
-            100.0 * same_flag as f64 / n
-        );
+        for (name, b) in rest {
+            let pairs = || a.answers.iter().zip(&b.answers);
+            let same_score = pairs().filter(|(x, y)| x.0 == y.0).count() as f64;
+            let same_flag = pairs().filter(|(x, y)| x.1 == y.1).count() as f64;
+            let diffs: Vec<f64> = pairs().map(|(x, y)| (x.0 - y.0).abs() as f64).collect();
+            let mad = diffs.iter().sum::<f64>() / n;
+            let big = diffs.iter().filter(|&&d| d > 1.0).count() as f64;
+            // In the engine's value units, V = tanh(0.326 * score in pawns), which
+            // bounds a mate score's difference at 2.
+            let value = |s: f32| (0.326 * s as f64).tanh();
+            let dv: Vec<f64> = pairs()
+                .map(|(x, y)| (value(x.0) - value(y.0)).abs())
+                .collect();
+            let mean_dv = dv.iter().sum::<f64>() / n;
+            let big_dv = dv.iter().filter(|&&d| d > 0.1).count() as f64;
+            println!(
+                "{name} vs {first}: same score {:.2}%, same completed flag {:.2}%, mean |score difference| {mad:.4} pawns, differing by more than a pawn {:.2}%; mean |value difference| {mean_dv:.4}, more than 0.1 {:.2}%",
+                100.0 * same_score / n,
+                100.0 * same_flag / n,
+                100.0 * big / n,
+                100.0 * big_dv / n
+            );
+        }
     }
     if let Some(dump) = flag(&args, "--dump") {
         let (_, r) = &runs[0];
