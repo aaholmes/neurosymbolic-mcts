@@ -351,6 +351,8 @@ pub struct TacticalMctsStats {
     pub nn_policy_evaluations: u32,
     /// Requests sent to the network, for a leaf or for priors on demand
     pub nn_requests: u32,
+    /// Searches that stopped before their simulation budget (`should_early_terminate`)
+    pub early_stops: u32,
     pub search_time: Duration,
     pub nodes_expanded: u32,
     pub tt_mate_hits: u32,
@@ -582,6 +584,10 @@ pub fn tactical_mcts_search_with_tt(
         }
 
         if should_early_terminate(&root_node, &config) {
+            // Only a stop before the budget is spent counts as early.
+            if iteration < config.max_iterations {
+                stats.early_stops += 1;
+            }
             break;
         }
     }
@@ -1280,6 +1286,10 @@ pub fn tactical_mcts_search_for_training(
         );
 
         if should_early_terminate(&root_node, &config) {
+            // Only a stop before the budget is spent counts as early.
+            if iteration < config.max_iterations {
+                stats.early_stops += 1;
+            }
             break;
         }
     }
@@ -1393,6 +1403,10 @@ pub fn tactical_mcts_search_for_training_with_reuse(
         );
 
         if should_early_terminate(&root_node, &config) {
+            // Only a stop before the budget is spent counts as early.
+            if iteration < config.max_iterations {
+                stats.early_stops += 1;
+            }
             break;
         }
     }

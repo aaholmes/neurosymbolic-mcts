@@ -72,7 +72,10 @@ position in standard chess, on one CPU thread for Tiers 1 and 2:
 | 3 | Neural network (a 6-block residual network, about 2M parameters) | Learned value and move priors | 13 µs of GPU time in a batch of 128 |
 
 A position solved in Tier 1 is terminal, so its proven value propagates up the tree without being
-averaged with approximate evaluations of its children. Otherwise the value is
+averaged with approximate evaluations of its children. Tier 1 also stops the search for a move once
+a root move averages a value above 0.99, which a large material lead alone can reach: in self-play
+with an untrained network, 4.9% of searches stopped early and the root averaged 194 visits instead
+of 200, so engines with and without Tier 1 search nearly equally hard. Otherwise the value is
 
 $$V = \tanh(V_{\text{net}} + k \cdot \Delta M)$$
 
@@ -164,19 +167,15 @@ In order of priority:
 
 1. **Whether the pruned quiescence search changes playing strength**: a match of the tiered engine
    with exact and pruned quiescence, same network and seeds.
-2. **Whether Tier 1 shortens the search**, before comparing engines: with Tier 1 on, the search for a
-   move stops early once a root move averages a value above 0.99, which the classical score alone
-   can reach with a large material lead. Simulations per move with and without it show whether
-   matched runs are trying equally hard.
-3. **A 12-hour continuous run of the network-only engine** with the best 1-hour settings, its
+2. **A 12-hour continuous run of the network-only engine** with the best 1-hour settings, its
    checkpoints rated hourly with a fixed opponent, to see whether the 1-hour settings hold.
-4. **Repeat the top 1-hour runs with new seeds**, since runs with similar settings differed by more
+3. **Repeat the top 1-hour runs with new seeds**, since runs with similar settings differed by more
    than two default runs with different seeds did.
-5. **Three matched 4-hour runs from scratch, two seeds each**: the network alone, the full tiered
+4. **Three matched 4-hour runs from scratch, two seeds each**: the network alone, the full tiered
    engine, and the tiered engine training only the policy (below), rated with a fixed opponent and
    with bootstrap intervals on the differences. This measures whether exact endings and the
    classical score help training, and whether a learned value is worth its noise.
-6. **Only if the policy-only engine is close or ahead**: tune its settings, then a 12-hour run.
+5. **Only if the policy-only engine is close or ahead**: tune its settings, then a 12-hour run.
 
 Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a mixed
 value target) are listed in [docs/TRAINING.md](docs/TRAINING.md#next-experiments).

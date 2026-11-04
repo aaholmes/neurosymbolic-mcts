@@ -25,7 +25,7 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -312,6 +312,14 @@ fn main() {
             }
         }
     });
+    let searches = SEARCHES.load(Ordering::Relaxed).max(1) as f64;
+    println!(
+        "Searches: {} | mean root visits {:.1} | mean new simulations {:.1} | stopped early {:.2}%",
+        SEARCHES.load(Ordering::Relaxed),
+        ROOT_VISITS.load(Ordering::Relaxed) as f64 / searches,
+        SIMULATIONS.load(Ordering::Relaxed) as f64 / searches,
+        100.0 * EARLY_STOPS.load(Ordering::Relaxed) as f64 / searches
+    );
     if exact.tablebase.is_some() {
         println!(
             "Games ended at a tablebase position: {}/{}",
@@ -336,6 +344,12 @@ enum Models {
 
 /// Games ended because they reached a position the endgame tables cover.
 static TABLEBASE_ENDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Main-line searches, their root visits and simulations in total, and how
+/// many stopped before their simulation budget.
+static SEARCHES: AtomicU64 = AtomicU64::new(0);
+static ROOT_VISITS: AtomicU64 = AtomicU64::new(0);
+static SIMULATIONS: AtomicU64 = AtomicU64::new(0);
+static EARLY_STOPS: AtomicU64 = AtomicU64::new(0);
 /// Games ended because the side to move had a forced mate the search finds.
 static MATE_ENDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -473,6 +487,10 @@ fn play_game(
             reused_root,
             &mut transposition_table,
         );
+        SEARCHES.fetch_add(1, Ordering::Relaxed);
+        ROOT_VISITS.fetch_add(result.root_node.borrow().visits as u64, Ordering::Relaxed);
+        SIMULATIONS.fetch_add(result.stats.iterations as u64, Ordering::Relaxed);
+        EARLY_STOPS.fetch_add(result.stats.early_stops as u64, Ordering::Relaxed);
 
         if result.best_move.is_none() {
             break; // Game Over

@@ -227,3 +227,32 @@ fn the_policy_only_flag_parses() {
     assert!(PolicyTiming::from_args(&args("self_play --policy-only lazy")).is_err());
     assert!(PolicyTiming::from_args(&args("self_play --policy-only")).is_err());
 }
+
+/// White is a queen and two rooks ahead, with no short forced mate.
+const BIG_LEAD: &str = "1nb1kbn1/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQ - 0 1";
+
+fn tier1_config(tier1: bool) -> TacticalMctsConfig {
+    TacticalMctsConfig {
+        enable_tier1_gate: tier1,
+        ..config(InferenceServer::new_mock_uniform(), None, 1)
+    }
+}
+
+#[test]
+fn early_stops_are_counted_and_need_tier1() {
+    // With Tier 1 on, the search for a move stops once a root move averages
+    // above 0.99, which the classical score alone reaches with a large lead.
+    let (on, root_on) = search(BIG_LEAD, tier1_config(true));
+    assert_eq!(on.early_stops, 1, "{on:?}");
+    assert!(root_on.borrow().visits < 300);
+    let (off, root_off) = search(BIG_LEAD, tier1_config(false));
+    assert_eq!(off.early_stops, 0);
+    assert_eq!(root_off.borrow().visits, 300);
+}
+
+#[test]
+fn no_early_stop_in_a_balanced_position() {
+    let (s, root) = search(MIDDLEGAME, tier1_config(true));
+    assert_eq!(s.early_stops, 0);
+    assert_eq!(root.borrow().visits, 300);
+}
