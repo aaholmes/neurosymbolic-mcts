@@ -83,8 +83,8 @@ that, Optuna's Gaussian-process sampler proposes each trial from the ratings so 
 trials without root noise or side positions.
 
 Results of the starting trials (Elo relative to the defaults, standard errors from the bootstrap):
-the defaults with seed 1, +12 ± 7; fewer simulations with more data, −9 ± 9; root noise, −63 ± 8;
-side positions at half of all moves, −120 ± 11. Each side position is searched with the full 200
+the defaults with seed 1, +22 ± 6; fewer simulations with more data, +6 ± 8; root noise, −57 ± 6;
+side positions at half of all moves, −110 ± 8 (ratings at the end of the search). Each side position is searched with the full 200
 simulations, so that trial finished 12,852 games in the hour compared with 24,723 at the defaults.
 Side positions were then fixed off, and eight new Sobol points cover the remaining six settings.
 The first three runs the optimizer proposed rated 103–205 Elo above the defaults, all at the
@@ -103,12 +103,57 @@ in the hour. The ranges for those three settings were then widened to those belo
 | Window (positions kept) | 100,000–1,000,000, log scale |
 
 Runs past the old limits did no better: learning rates 0.1 and 0.2 rated about 120 Elo, replay
-ratios below 0.5 rated −73 and +59, and no run beat the best at the old limits (+191 ± 8). The
+ratios below 0.5 rated well below the best, and no run beat the best at the old limits. The
 optimizer kept proposing runs at the limits, where its model is least certain. From trial
 `bo13`, new trials are proposed only inside narrower ranges around the best runs (learning rate
 0.02–0.1, replay ratio 0.5–2, 100–250 simulations, half-life 4–40 moves, exploration constant
 0.6–2, window 150,000–1,000,000), while the model is still fitted on every rated run in the
 ranges above, so runs outside the narrower ranges still inform it.
+
+**Results after 26 optimizer trials** (`bo00`–`bo25`, 43 rated runs in all; Elo relative to the
+defaults with bootstrap standard errors, ratings as of 2026-11-04):
+
+| Run | Elo | Learning rate | Replay ratio | Simulations | Half-life (moves) | Exploration constant | Window | Positions | Games |
+|---|---|---|---|---|---|---|---|---|---|
+| `bo19` | +233 ± 8 | 0.02 | 0.65 | 100 | 40 | 0.68 | 150k | 7.77M | 78,024 |
+| `bo23` | +213 ± 12 | 0.055 | 0.65 | 100 | 40 | 0.60 | 150k | 7.62M | 76,182 |
+| `bo15` | +208 ± 8 | 0.054 | 1.16 | 172 | 4 | 0.87 | 150k | 4.16M | 42,121 |
+| `bo25` | +194 ± 10 | 0.092 | 1.01 | 100 | 40 | 0.69 | 150k | 6.64M | 62,402 |
+| `bo00` | +192 ± 6 | 0.05 | 1.00 | 152 | 12.8 | 1.00 | 746k | 4.48M | 44,776 |
+| `bo01` | +183 ± 8 | 0.05 | 1.00 | 205 | 9.8 | 1.00 | 218k | 3.59M | 36,203 |
+| `bo20` | +177 ± 11 | 0.02 | 0.84 | 100 | 40 | 0.60 | 150k | 6.94M | 61,600 |
+| `bo21` | +113 ± 11 | 0.02 | 0.50 | 100 | 40 | 0.72 | 150k | 7.99M | 78,475 |
+| `bo24` | −32 ± 10 | 0.02 | 1.13 | 100 | 4 | 0.95 | 150k | 7.04M | 76,384 |
+| `t00` (defaults) | 0 | 0.02 | 4.00 | 200 | 6.6 | 1.414 | 200k | 2.39M | 24,723 |
+
+- Differences, with 95% intervals from resampling the games (seed variation not included):
+  `bo19` − `bo00` +41 [23, 59]; `bo19` − `bo23` +20 [−6, 42]; `bo15` − `bo00` +15 [−3, 36].
+- Runs with similar settings differ far more than two default runs with different seeds did
+  (+22 ± 6 at the end of the search): `bo20` rated 55 [33, 77] below `bo19`, and `bo21` 120 below.
+  Until settings are repeated with new seeds, the order within the top group is not established.
+
+**How the replay ratio divides the GPU.** The trainer is paced so that each run takes exactly
+`steps = replay_ratio × positions / 256` optimizer steps (batch size 256), and a game averages
+98 ± 5 positions. Each position costs GPU time for self-play, roughly in proportion to the
+simulations per move, and for training, in proportion to the replay ratio, so positions generated
+in one hour fit
+
+$$\text{positions (millions)} = \frac{1}{a \cdot \text{sims} + b \cdot \text{ratio} + c}$$
+
+with $a = 1.43 \times 10^{-3} \pm 0.05 \times 10^{-3}$, $b = 0.036 \pm 0.003$ and
+$c = -0.033 \pm 0.006$ (37 runs without side positions or root noise, $R^2 = 0.989$, residuals
+about 7%). One unit of replay ratio costs about as much GPU time as 25 simulations per move: at 100
+simulations, raising the ratio from 0.65 to 1 cuts positions by 9% and adds 41% more steps. The
+negative $c$ means the cost is not quite linear in simulations; the fit holds within the tested
+range.
+
+**What the ratings follow.** In weighted linear fits of Elo over the same 37 runs, judged by
+leave-one-out error, the log of positions generated explains the most (error 105 Elo, compared
+with 134 for the mean alone; about +106 Elo per doubling of positions). The number of optimizer
+steps adds nothing once positions are known, and adding the learning rate and the exploration
+constant brings the error to 95. These are correlations: more positions mostly come from fewer
+simulations, so more data and a shallower search cannot be separated in these runs, and the fit
+leaves about 95 Elo unexplained, as large as the differences it would rank.
 
 With 1,024 games in flight, self-play alone runs at 707 moves/s, compared with 768 at 1,920 and
 561 at 512 (one run each), and the first games finish after about 110 s rather than 200 s.
@@ -121,27 +166,33 @@ would count a pawnless ending eight times as often as a position with castling r
 
 ## Next experiments
 
-The best 1-hour settings so far rate about 200 Elo above the defaults, mostly because a replay
-ratio near 1 leaves the GPU to self-play, which then plays 1.5–2 times as many games. These ratings
-only compare the runs with each other, and one hour rewards fast early learning, so the result may
-shrink in longer runs. Each experiment below is a matched comparison at the best settings with two
-seeds, not another setting for the optimizer, which already has six settings and seed noise of
-about 14 Elo per run.
+The best 1-hour settings rate about 190–230 Elo above the defaults, mostly because a replay ratio
+near 1 or below and fewer simulations leave the GPU to self-play, which then generates 1.7–3.3
+times as many positions. These ratings only compare the runs with each other, and one hour rewards fast
+early learning, so the result may shrink in longer runs. Each experiment below is a matched
+comparison at the best settings with two seeds, not another setting for the optimizer.
 
-1. **4-hour reruns** of the best one or two settings and the defaults, each also played with a
+1. **Repeat seeds** of the top runs (`bo19`, `bo23`, `bo15`, `bo00`) and of `bo21`, since runs
+   with similar settings differed by 50–120 Elo, more than the seed variation measured at the
+   defaults.
+2. **The exploration constant at match time**: each engine plays its rating matches with the
+   constant it was trained with, so the ratings mix how well a network trained with how well that
+   constant plays at 200 simulations. Replaying the best networks at constants 0.7–2 separates
+   the two.
+3. **4-hour reruns** of the best one or two settings and the defaults, each also played with a
    fixed opponent (the pilot's `gen_28`, or the classical alpha-beta engine), to check that the
    order holds and to measure strength on a reference that does not change.
-2. **Full searches on only some moves** (playout cap randomization,
+4. **Full searches on only some moves** (playout cap randomization,
    [Wu, 2019](https://arxiv.org/abs/1902.10565)): a full search on about a quarter of moves and a
    quick one on the rest, with policy targets recorded only from full searches. Games per hour
    mattered most in the tuning runs, and this raises them.
-3. **Network size**: 10 blocks of 128 channels, or 6 of 192, compared with 6 of 128, at 4 hours.
+5. **Network size**: 10 blocks of 128 channels, or 6 of 192, compared with 6 of 128, at 4 hours.
    A larger network plays fewer games per hour, so 1-hour runs would always favour the smaller one.
-4. **Gumbel AlphaZero** ([Danihelka et al., ICLR 2022](https://iclr.cc/virtual/2022/poster/6418)) in
+6. **Gumbel AlphaZero** ([Danihelka et al., ICLR 2022](https://iclr.cc/virtual/2022/poster/6418)) in
    place of PUCT at the root, temperature and root noise: actions are sampled without replacement,
    and the policy target comes from the search's value estimates. Its authors report clear gains
    when planning with few simulations. It is a larger change to the search.
-5. **A value target mixing the search's value and the game's result**, so that positions in drawn
+7. **A value target mixing the search's value and the game's result**, so that positions in drawn
    games still carry a signal once most games are draws.
 
 Lower priority:

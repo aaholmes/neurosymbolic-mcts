@@ -33,11 +33,12 @@ theorem prover.
   baseline, so part of the gap is a head start. Details: [docs/VARIANT_RESULT.md](docs/VARIANT_RESULT.md).
 - **Training settings for standard chess**, the intended test, tuned on the network-only engine
   with forced mates and endgame tables as exact endings. Each of 29 runs so far trained from
-  scratch for one hour on one GPU. The best rates 191 ± 8 Elo above the default settings, and five
-  others are within 21 Elo of it. They all train each position about once rather than 4 times, at a
-  learning rate 1.7–2.5 times the default, so more of the GPU goes to self-play: 1.8 times as many
-  games in the hour. One hour favours settings that learn fast early, and the best of 29 runs is
-  likely rated somewhat high, so the best settings are next rerun for longer.
+  scratch for one hour on one GPU. The best of 43 rates 233 ± 8 Elo above the default settings,
+  and four others are within 41 Elo of it. They all train each position 0.65–1.2 times rather than
+  4, and most use 100 simulations per move rather than 200, so more of the GPU goes to self-play:
+  up to 3.3 times as many positions in the hour. Ratings follow the positions generated, at about
+  +106 Elo per doubling, not the number of training steps. Runs with similar settings differed by
+  50–120 Elo, so the top settings are next repeated with new seeds, then rerun for longer.
 - **Self-play speed** (200 simulations per move, one RTX 5060 Ti): **765 moves per second**, up
   from about 65 at the start, through custom GPU kernels, half precision, CUDA graphs and many
   search threads sharing a few batching threads ([docs/THROUGHPUT.md](docs/THROUGHPUT.md)). With
@@ -138,10 +139,12 @@ move, how fast the temperature halves, the exploration constant in PUCT, and the
 run trains from scratch for one hour, then plays 800 games with up to five earlier runs, and all
 runs are rated jointly by Elo (a Bradley–Terry fit with bootstrap standard errors). A
 Gaussian-process optimizer (Optuna) proposes each new run from the ratings so far. Two runs at the
-default settings with different seeds rated 20 ± 5 Elo apart, so differences of a few tens of
-Elo between single runs may be seed noise. Runs past the first ranges did no better, and the optimizer kept
-proposing settings at the range limits, where its model is least certain; it now proposes only
-inside narrower ranges around the best runs, while its model is still fitted on every run.
+default settings with different seeds rated 22 ± 6 Elo apart, but runs with similar settings near
+the best differed by 50–120 Elo, so single runs cannot rank the top settings. The optimizer kept
+proposing settings at the range limits, where its model is least certain, so after 13 trials it
+proposed only inside narrower ranges around the best runs, with its model still fitted on every
+run. Positions generated per hour fit 1/(a·sims + b·ratio + c) within 7%; one unit of replay
+ratio costs as much GPU time as 25 simulations per move ([docs/TRAINING.md](docs/TRAINING.md)).
 
 Each new weights version starts a fresh inference server inside the running self-play process.
 Two bugs made long runs fail: a server loading or shutting down while another recorded a CUDA
@@ -151,10 +154,9 @@ its cuDNN state and graph memory, and a run stops if no game finishes for five m
 
 ## Next steps
 
-1. **Choose the settings for a 12-hour continuous run in standard chess.** Thirteen more 1-hour
-   runs inside the narrower ranges are queued. The best settings and the defaults are then rerun
-   for 4 hours, with two seeds and a fixed opponent as a reference, to check that the 1-hour order
-   holds. Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a
+1. **Choose the settings for a 12-hour continuous run in standard chess.** Repeat the top 1-hour
+   runs with new seeds, then rerun the best settings and the defaults for 4 hours, with two seeds
+   and a fixed opponent as a reference, to check that the 1-hour order holds. Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a
    mixed value target) are listed in [docs/TRAINING.md](docs/TRAINING.md#next-experiments).
 2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap
    interval on the Elo difference. Whether exact endings help training is not yet measured.
