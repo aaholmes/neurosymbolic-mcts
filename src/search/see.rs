@@ -23,7 +23,7 @@
 use crate::board::Board;
 use crate::board_utils::sq_ind_to_bit;
 use crate::move_generation::MoveGen;
-use crate::piece_types::{KING, PAWN};
+use crate::piece_types::{BLACK, KING, PAWN, WHITE};
 use std::cmp::max;
 
 // Piece values for SEE (simple centipawn values)
@@ -32,6 +32,15 @@ const SEE_PIECE_VALUES: [i32; 7] = [100, 320, 330, 500, 975, 10000, 0];
 
 /// Lightweight board representation for SEE computation.
 /// Only stores piece bitboards and occupancy — avoids copying hash, eval, etc.
+/// The color index (`WHITE` or `BLACK`) of the side `white` names.
+fn color(white: bool) -> usize {
+    if white {
+        WHITE
+    } else {
+        BLACK
+    }
+}
+
 struct SeeBoard {
     pieces: [[u64; 6]; 2],
     pieces_occ: [u64; 2],
@@ -79,7 +88,7 @@ impl SeeBoard {
 
     fn set_square(&mut self, sq: usize, piece_type: usize, side: bool) {
         let sq_bb = 1u64 << sq;
-        self.pieces[side as usize][piece_type] |= sq_bb;
+        self.pieces[color(side)][piece_type] |= sq_bb;
     }
 
     fn update_occupancy(&mut self) {
@@ -92,7 +101,7 @@ impl SeeBoard {
     }
 
     fn find_least_valuable_attacker_sq(&self, attackers_bb: u64, side: bool) -> usize {
-        let color_index = side as usize;
+        let color_index = color(side);
         for piece_type_idx in PAWN..=KING {
             let piece_bb = self.pieces[color_index][piece_type_idx];
             let intersection = attackers_bb & piece_bb;
@@ -106,7 +115,7 @@ impl SeeBoard {
     /// Calculate attackers to a square for a given side, using the MoveGen for
     /// sliding piece attack generation with this board's occupancy.
     fn attackers_to(&self, move_gen: &MoveGen, sq: usize, side: bool) -> u64 {
-        let side_idx = side as usize;
+        let side_idx = color(side);
         let mut attackers: u64 = 0;
         let all_occ = self.all_occupancy();
 
@@ -187,10 +196,6 @@ pub fn see(board: &Board, move_gen: &MoveGen, target_sq: usize, initial_attacker
         depth += 1;
         gain[depth] = SEE_PIECE_VALUES[attacker_piece_type] - gain[depth - 1];
 
-        if max(-gain[depth - 1], gain[depth]) < 0 {
-            break;
-        }
-
         let attackers_bb = see_board.attackers_to(move_gen, target_sq, side_to_move);
         if attackers_bb == 0 {
             break;
@@ -211,9 +216,10 @@ pub fn see(board: &Board, move_gen: &MoveGen, target_sq: usize, initial_attacker
     }
 
     // Calculate final score by propagating the gains/losses back up the sequence
-    while depth > 0 {
+    // The last entry assumed a recapture that may not exist, so it is left out.
+    while depth > 1 {
         depth -= 1;
-        gain[depth] = -max(-gain[depth], gain[depth + 1]);
+        gain[depth - 1] = -max(-gain[depth - 1], gain[depth]);
     }
     gain[0]
 }

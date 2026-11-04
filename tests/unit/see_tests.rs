@@ -107,3 +107,32 @@ fn test_see_bishop_takes_knight() {
     // Should be positive (winning)
     assert!(see_value.abs() < 10000, "SEE should return bounded value");
 }
+
+#[test]
+fn an_undefended_piece_is_won_outright_by_either_side() {
+    let mg = setup();
+    // White rook takes a queen nothing defends.
+    let b = Board::new_from_fen("3q3k/8/8/8/8/8/8/3RK3 w - - 0 1");
+    assert_eq!(see(&b, &mg, sq("d8"), sq("d1")), 975);
+    // Black rook takes a bishop nothing defends.
+    let b = Board::new_from_fen("8/8/1p6/2kP2K1/2p5/8/2B2r2/8 b - - 2 49");
+    assert_eq!(see(&b, &mg, sq("c2"), sq("f2")), 330);
+}
+
+#[test]
+fn a_capture_answered_by_a_pawn_loses_for_either_side() {
+    let mg = setup();
+    // White queen takes a pawn defended by a black pawn.
+    let b = Board::new_from_fen("4k3/8/4p3/3p4/8/8/8/3QK3 w - - 0 1");
+    assert_eq!(see(&b, &mg, sq("d5"), sq("d1")), -875);
+    // Black queen takes a pawn defended by a white pawn.
+    let b = Board::new_from_fen("3qk3/8/8/8/3P4/4P3/8/4K3 b - - 0 1");
+    assert_eq!(see(&b, &mg, sq("d4"), sq("d8")), -875);
+}
+
+#[test]
+fn a_rook_for_a_queen_defended_by_a_pawn_still_wins() {
+    let mg = setup();
+    let b = Board::new_from_fen("4k3/8/2p5/3q4/8/8/8/3RK3 w - - 0 1");
+    assert_eq!(see(&b, &mg, sq("d5"), sq("d1")), 475);
+}
