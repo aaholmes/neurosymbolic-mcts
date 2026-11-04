@@ -25,22 +25,31 @@ impl std::fmt::Debug for Tablebase {
 }
 
 impl Tablebase {
-    /// Loads the tables in `dir`. An error if it holds no WDL table.
-    pub fn open(dir: &str) -> Result<Self, String> {
+    /// Loads the tables in `dirs`, one directory or several separated by
+    /// colons (as Stockfish's SyzygyPath). An error if a directory cannot be
+    /// read, or if none holds a WDL table.
+    pub fn open(dirs: &str) -> Result<Self, String> {
         let mut tables = shakmaty_syzygy::Tablebase::new();
-        tables
-            .add_directory(dir)
-            .map_err(|e| format!("cannot read Syzygy tables in {dir}: {e}"))?;
-        // A table's name lists its pieces, e.g. KRvK.rtbw has three.
-        let max_pieces = std::fs::read_dir(dir)
-            .map_err(|e| format!("cannot read {dir}: {e}"))?
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .filter_map(|n| {
-                n.strip_suffix(".rtbw")
-                    .map(|s| s.replace('v', "").len() as u32)
-            })
-            .max()
-            .ok_or_else(|| format!("no Syzygy WDL tables (.rtbw) in {dir}"))?;
+        let mut max_pieces = 0;
+        for dir in dirs.split(':').filter(|d| !d.is_empty()) {
+            tables
+                .add_directory(dir)
+                .map_err(|e| format!("cannot read Syzygy tables in {dir}: {e}"))?;
+            // A table's name lists its pieces, e.g. KRvK.rtbw has three.
+            let most = std::fs::read_dir(dir)
+                .map_err(|e| format!("cannot read {dir}: {e}"))?
+                .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .filter_map(|n| {
+                    n.strip_suffix(".rtbw")
+                        .map(|s| s.replace('v', "").len() as u32)
+                })
+                .max()
+                .unwrap_or(0);
+            max_pieces = max_pieces.max(most);
+        }
+        if max_pieces == 0 {
+            return Err(format!("no Syzygy WDL tables (.rtbw) in {dirs}"));
+        }
         Ok(Self {
             tables: Arc::new(tables),
             max_pieces,

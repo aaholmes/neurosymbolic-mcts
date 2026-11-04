@@ -330,3 +330,37 @@ fn the_settings_line_names_the_quiet_moves() {
     );
     assert!(d("x --no-mate-search").starts_with("mate search off"));
 }
+
+/// A directory holding only the KRvK table, linked from `dir`.
+fn krvk_only(dir: &str) -> std::path::PathBuf {
+    let tmp = std::env::temp_dir().join(format!("kf_krvk_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let link = tmp.join("KRvK.rtbw");
+    if !link.exists() {
+        std::os::unix::fs::symlink(std::path::Path::new(dir).join("KRvK.rtbw"), &link).unwrap();
+    }
+    tmp
+}
+
+#[test]
+fn several_directories_separated_by_colons_are_all_loaded() {
+    let Some(_) = tables() else { return };
+    let dir = std::env::var("KF_SYZYGY_PATH").unwrap_or_else(|_| "/data/syzygy".into());
+    let small = krvk_only(&dir);
+    let small = small.to_str().unwrap();
+    assert_eq!(Tablebase::open(small).unwrap().max_pieces(), 3);
+    let both = Tablebase::open(&format!("{small}:{dir}")).unwrap();
+    assert_eq!(
+        both.max_pieces(),
+        Tablebase::open(&dir).unwrap().max_pieces()
+    );
+    // A 5-piece table from the second directory is used.
+    assert_eq!(probe(&both, "8/8/8/4k3/8/8/1P6/QR2K3 w - - 0 1"), Some(1.0));
+}
+
+#[test]
+fn a_missing_directory_in_the_list_is_an_error() {
+    let Some(_) = tables() else { return };
+    let dir = std::env::var("KF_SYZYGY_PATH").unwrap_or_else(|_| "/data/syzygy".into());
+    assert!(Tablebase::open(&format!("{dir}:/nonexistent/syzygy")).is_err());
+}

@@ -66,11 +66,11 @@ position in standard chess, on one CPU thread for Tiers 1 and 2:
 
 | Tier | Method | Result | Cost |
 |---|---|---|---|
-| 1 | Exact search for a forced mate in up to 5 moves in which every attacking move gives check, and endgame tables (Syzygy) for positions with 5 or fewer pieces | Proven win, loss or draw | 12 µs (mate search) |
-| 2 | Quiescence search: captures, promotions, replies to check and one quiet check or fork per side in each line are played out, threats are tested by letting the side to move pass, and the quiet position is scored with a standard hand-tuned evaluation (PeSTO) | Heuristic score ΔM | 150 µs (median 24 µs) |
+| 1 | Exact search for a forced mate in up to 5 moves in which every attacking move gives check, and endgame tables (Syzygy) for positions with 5 or fewer pieces | Exact win, loss or draw | 12 µs (mate search) |
+| 2 | Quiescence search: captures, promotions, replies to check and one quiet check or fork per side in each line are played out, threats are tested by letting the side to move pass, and the quiet position is scored with a standard hand-tuned evaluation (PeSTO); a line that reaches a position the endgame tables cover ends with their result | Heuristic score ΔM | 150 µs (median 24 µs) |
 | 3 | Neural network (a 6-block residual network, about 2M parameters) | Learned value and move priors | 13 µs of GPU time in a batch of 128 |
 
-A position solved in Tier 1 is terminal, so its proven value propagates up the tree without being
+A position solved in Tier 1 is terminal, so its exact value propagates up the tree without being
 averaged with approximate evaluations of its children. Tier 1 also stops the search for a move once
 a root move averages a value above 0.99, which a large material lead alone can reach: in self-play
 with an untrained network, 4.9% of searches stopped early and the root averaged 194 visits instead
@@ -173,17 +173,21 @@ GPU time as 25 simulations per move.
 
 In order of priority:
 
-1. **Whether the pruned quiescence search changes playing strength**: a match of the tiered engine
+1. **Where the policy-only engine spends its CPU time** (in progress): a profile of self-play,
+   split into quiescence search, mate search, node expansion, tactical move detection and thread
+   scheduling, run with 6-piece endgame tables added (68 GB, held in RAM). The largest cost is the
+   next to cut.
+2. **Whether the pruned quiescence search changes playing strength**: a match of the tiered engine
    with exact and pruned quiescence, same network and seeds.
-2. **A 12-hour continuous run of the network-only engine** with the best 1-hour settings, its
+3. **A 12-hour continuous run of the network-only engine** with the best 1-hour settings, its
    checkpoints rated hourly with a fixed opponent, to see whether the 1-hour settings hold.
-3. **Repeat the top 1-hour runs with new seeds**, since runs with similar settings differed by more
+4. **Repeat the top 1-hour runs with new seeds**, since runs with similar settings differed by more
    than two default runs with different seeds did.
-4. **Three matched 4-hour runs from scratch, two seeds each**: the network alone, the full tiered
+5. **Three matched 4-hour runs from scratch, two seeds each**: the network alone, the full tiered
    engine, and the tiered engine training only the policy (below), rated with a fixed opponent and
    with bootstrap intervals on the differences. This measures whether exact endings and the
    classical score help training, and whether a learned value is worth its noise.
-5. **Only if the policy-only engine is close or ahead**: tune its settings, then a 12-hour run.
+6. **Only if the policy-only engine is close or ahead**: tune its settings, then a 12-hour run.
 
 Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a mixed
 value target) are listed in [docs/TRAINING.md](docs/TRAINING.md#next-experiments).
@@ -202,7 +206,8 @@ Stockfish's NNUE would raise it, but would no longer be learning from scratch on
 
 The policy-only engine is implemented (`self_play --policy-only revisit`) and needs about a sixth of
 the network calls (Results). With the GPU mostly idle, it could afford a policy network several
-times larger, and a cheaper quiescence search would raise its speed directly.
+times larger, and cheaper CPU-side search would raise its speed directly. Both pay off only if the
+matched runs show the engine is competitive.
 
 Later directions: network layers that connect squares a knight or queen move apart, and applying
 the tiered search to mathematical reasoning, with an automated theorem prover as the exact method.
@@ -212,6 +217,7 @@ the tiered search to mathematical reasoning, with an automated theorem prover as
 ```bash
 cargo build --release --features cudnn        # needs CUDA (nvcc >= 12.8 for RTX 50-series) and cuDNN
 ./target/release/self_play 1920 200 out/ model.pt false false false none --syzygy /data/syzygy
+# --syzygy takes several directories separated by colons, e.g. /data/syzygy:/data/syzygy6
 python python/continuous.py --work-dir runs/c1 --replay-ratio 4 --window 200000
 cargo test                                    # fast Rust tests (~50 s)
 cd python && python -m pytest                 # training pipeline
