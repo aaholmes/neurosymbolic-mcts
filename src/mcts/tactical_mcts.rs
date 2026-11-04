@@ -17,9 +17,7 @@ use crate::move_generation::MoveGen;
 use crate::move_types::Move;
 use crate::search::koth_center_in_n_counted;
 use crate::search::mate_search;
-use crate::search::{
-    forced_cap1_pesto_balance, forced_ext_pesto_balance_counted, forced_principal_exchange,
-};
+use crate::search::{forced_cap1_pesto_balance, forced_principal_exchange};
 use crate::search::{koth_best_move, koth_center_in_n};
 use crate::transposition::TranspositionTable;
 use crossbeam_channel::Receiver;
@@ -88,6 +86,7 @@ pub fn qsearch_inputs(
     pesto: &PestoEval,
     variant: QSearchVariant,
     enable_material: bool,
+    tablebase: Option<&crate::egtb::Tablebase>,
 ) -> QsearchInputs {
     if !enable_material {
         return QsearchInputs {
@@ -104,7 +103,13 @@ pub fn qsearch_inputs(
             (s, true, n, 0) // a single line of captures always finishes
         }
         QSearchVariant::Cap1 => forced_cap1_pesto_balance(&mut stack, move_gen, pesto),
-        QSearchVariant::Extended => forced_ext_pesto_balance_counted(&mut stack, move_gen, pesto),
+        QSearchVariant::Extended => crate::search::quiescence::forced_ext_pesto_balance_tables(
+            &mut stack,
+            move_gen,
+            pesto,
+            &crate::search::quiescence::ExtConfig::default(),
+            tablebase,
+        ),
     };
     QsearchInputs {
         score,
@@ -985,6 +990,7 @@ fn begin_leaf_evaluation(
             &config.pesto,
             config.qsearch_variant,
             config.enable_material_value,
+            config.tablebase.as_ref().filter(|_| !config.enable_koth),
         );
         if config.enable_material_value {
             stats.qsearch_timing.record(qsearch_start.elapsed());

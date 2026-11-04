@@ -79,7 +79,7 @@ fn with_material_on_each_variant_returns_its_own_search_result() {
     for board in positions() {
         for variant in VARIANTS {
             assert_eq!(
-                qsearch_inputs(&board, &mg, &pesto, variant, true),
+                qsearch_inputs(&board, &mg, &pesto, variant, true, None),
                 direct(&board, variant),
                 "{variant:?} {}",
                 board.to_fen().unwrap()
@@ -99,7 +99,10 @@ fn with_material_off_no_search_runs_and_the_scalars_are_zero_and_finished() {
     };
     for board in positions() {
         for variant in VARIANTS {
-            assert_eq!(qsearch_inputs(&board, &mg, &pesto, variant, false), off);
+            assert_eq!(
+                qsearch_inputs(&board, &mg, &pesto, variant, false, None),
+                off
+            );
         }
     }
 }

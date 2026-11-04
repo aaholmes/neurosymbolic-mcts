@@ -856,6 +856,7 @@ fn make_sample(
         &config.pesto,
         qsearch_variant,
         enable_material,
+        config.tablebase.as_ref().filter(|_| !config.enable_koth),
     );
     TrainingSample {
         board: board.clone(),

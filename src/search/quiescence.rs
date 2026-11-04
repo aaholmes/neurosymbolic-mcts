@@ -62,6 +62,7 @@
 use super::see::see;
 use crate::board::Board;
 use crate::boardstack::BoardStack;
+use crate::egtb::Tablebase;
 use crate::eval::PestoEval;
 use crate::move_generation::MoveGen;
 use crate::move_types::Move;
@@ -417,7 +418,7 @@ pub fn ext_pesto_qsearch_counted(
     };
     let cfg = ExtConfig::default();
     ext_node(
-        &mut pool, board, move_gen, pesto, alpha, beta, max_depth, flags, &cfg,
+        &mut pool, board, move_gen, pesto, alpha, beta, max_depth, flags, &cfg, None,
     )
 }
 
@@ -483,10 +484,11 @@ fn ext_node(
     max_depth: u8,
     flags: ExtFlags,
     cfg: &ExtConfig,
+    tb: Option<&Tablebase>,
 ) -> (i32, bool, u32, u8) {
     let mut lists = pool.pop().unwrap_or_default();
     let result = ext_body(
-        &mut lists, pool, board, move_gen, pesto, alpha, beta, max_depth, flags, cfg,
+        &mut lists, pool, board, move_gen, pesto, alpha, beta, max_depth, flags, cfg, tb,
     );
     pool.push(lists);
     result
@@ -504,7 +506,12 @@ fn ext_body(
     max_depth: u8,
     flags: ExtFlags,
     cfg: &ExtConfig,
+    tb: Option<&Tablebase>,
 ) -> (i32, bool, u32, u8) {
+    // A position the endgame tables cover has its exact result: the line ends here.
+    if let Some(v) = tb.and_then(|t| t.probe_value(board.current_state())) {
+        return ((v * TABLEBASE_WIN_CP as f32) as i32, true, 1, 0);
+    }
     let ExtFlags {
         white_tactic_used,
         black_tactic_used,
@@ -588,6 +595,7 @@ fn ext_body(
                     max_depth - 2,
                     probe_flags,
                     cfg,
+                    tb,
                 );
                 nodes += child_nodes;
                 max_child_depth = max_child_depth.max(child_depth + 2);
@@ -629,6 +637,7 @@ fn ext_body(
                         max_depth - 2,
                         child_flags,
                         cfg,
+                        tb,
                     );
                     nodes += child_nodes;
                     max_child_depth = max_child_depth.max(child_depth + 2);
@@ -757,6 +766,7 @@ fn ext_body(
                 max_depth - 1,
                 flags,
                 cfg,
+                tb,
             );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
@@ -816,6 +826,7 @@ fn ext_body(
                 max_depth - 1,
                 main_flags,
                 cfg,
+                tb,
             );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
@@ -858,6 +869,7 @@ fn ext_body(
                     max_depth - 1,
                     child_flags,
                     cfg,
+                    tb,
                 );
                 nodes += child_nodes;
                 max_child_depth = max_child_depth.max(child_depth + 1);
@@ -910,6 +922,24 @@ pub fn forced_ext_pesto_balance_with(
     pesto: &PestoEval,
     cfg: &ExtConfig,
 ) -> (f32, bool, u32, u8) {
+    forced_ext_pesto_balance_tables(board, move_gen, pesto, cfg, None)
+}
+
+/// The score, in centipawns, of a position the endgame tables call a win for
+/// the side to move (a loss is its negative, a draw 0). It is far above any
+/// material balance a game reaches near the table limit, and tanh(0.326 · 20)
+/// > 0.99, so the engine values it as nearly certain.
+pub const TABLEBASE_WIN_CP: i32 = 2000;
+
+/// As `forced_ext_pesto_balance_with`, and a line that reaches a position the
+/// endgame tables `tb` cover ends there with the tables' result.
+pub fn forced_ext_pesto_balance_tables(
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+    cfg: &ExtConfig,
+    tb: Option<&Tablebase>,
+) -> (f32, bool, u32, u8) {
     let flags = ExtFlags {
         white_tactic_used: false,
         black_tactic_used: false,
@@ -927,6 +957,7 @@ pub fn forced_ext_pesto_balance_with(
         cfg.max_depth,
         flags,
         cfg,
+        tb,
     );
     (score_cp as f32 / 100.0, completed, nodes, depth)
 }

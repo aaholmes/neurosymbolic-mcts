@@ -44,6 +44,7 @@ mod policy_target_tests;
 mod position_classifier_tests;
 mod qsearch_inputs_tests;
 mod qsearch_speed_tests;
+mod qsearch_tablebase_tests;
 mod quiescence_tests;
 mod search_logger_tests;
 mod see_tests;
