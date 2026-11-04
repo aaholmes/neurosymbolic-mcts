@@ -154,17 +154,36 @@ its cuDNN state and graph memory, and a run stops if no game finishes for five m
 
 ## Next steps
 
-1. **Choose the settings for a 12-hour continuous run in standard chess.** Repeat the top 1-hour
-   runs with new seeds, then rerun the best settings and the defaults for 4 hours, with two seeds
-   and a fixed opponent as a reference, to check that the 1-hour order holds. Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a
-   mixed value target) are listed in [docs/TRAINING.md](docs/TRAINING.md#next-experiments).
-2. **Network alone, with and without exact endings**: matched runs from scratch, with a bootstrap
-   interval on the Elo difference. Whether exact endings help training is not yet measured.
+In order of priority:
+
+1. **Repeat the top 1-hour runs with new seeds** (under way), and check how much of each rating
+   comes from the exploration constant used in rating matches rather than in training.
+2. **A 12-hour continuous run of the network-only engine** with the best 1-hour settings, its
+   checkpoints rated hourly with a fixed opponent, to see whether the 1-hour settings hold.
 3. **Make the quiescence search cheaper**, so the full classical search fits in standard chess.
    It averages 9.4 ms per call, mostly from a few positions with exposed kings; standard pruning
    (static exchange evaluation, delta pruning, a size cap) should shrink it at least 10×.
-4. **The full engine versus the network alone in standard chess at equal wall-clock time**,
-   including the untrained engine, to separate a head start from better learning.
+4. **Three matched 4-hour runs from scratch, two seeds each**: the network alone, the full tiered
+   engine, and the tiered engine training only the policy (below), rated with a fixed opponent and
+   with bootstrap intervals on the differences. This measures whether exact endings and the
+   classical score help training, and whether a learned value is worth its noise.
+5. **Only if the policy-only engine is close or ahead**: tune its settings, whose best values
+   likely differ because its self-play is limited by the CPU, then a 12-hour run.
+
+Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a mixed
+value target) are listed in [docs/TRAINING.md](docs/TRAINING.md#next-experiments).
+
+**Long-term goal: a strong engine that learns only its policy.** The value of a position would
+come from classical methods alone: exact search for forced mates and endgame tables, then the
+quiescence score, $V = \tanh(k \cdot \Delta M)$, with the network's value fixed at 0. The network
+learns only which moves to search. In tuning, the value loss fell 1.7 times its noise over the
+last 40 minutes of an hour while the policy loss fell 14 times, because a game's result is one
+noisy label shared by all its positions; training only the policy removes that target. The cost
+is a ceiling: the engine can at best match a shallow search on a hand-tuned evaluation (PeSTO),
+with the best possible choice of moves to search, and averaging values in MCTS makes a weak
+evaluation hurt more than in minimax search. How high that ceiling is has not been measured.
+Using a learned evaluation such as Stockfish's NNUE would raise it, but would no longer be
+learning from scratch on limited compute. Details: [docs/TRAINING.md](docs/TRAINING.md#long-term-goal-training-only-the-policy).
 
 Later directions: a small learned evaluation inside quiescence search, as in Stockfish's
 efficiently updatable neural network (NNUE); network layers that connect squares a knight or queen
