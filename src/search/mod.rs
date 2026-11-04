@@ -48,7 +48,9 @@ mod koth;
 pub mod leaf_log;
 pub mod mate_order;
 pub mod mate_search;
+pub mod qsearch_bench;
 pub mod quiescence;
+pub mod quiescence_reference;
 mod see;
 
 pub use history::{HistoryTable, MAX_PLY};

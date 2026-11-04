@@ -157,3 +157,49 @@ fn test_null_move_make_and_undo() {
         "FEN should be restored after undo null move"
     );
 }
+
+/// A board's full position (pieces, side to move, castling, en passant, clocks).
+fn key(b: &kingfisher::board::Board) -> Option<String> {
+    b.to_fen()
+}
+
+#[test]
+fn moves_made_without_history_reach_the_same_board_and_leave_the_history_alone() {
+    let mut recorded = BoardStack::new_from_fen(positions::STARTING);
+    let mut quick = BoardStack::new_from_fen(positions::STARTING);
+    let history = quick.position_history.clone();
+    let line = [
+        Move::new(12, 28, None),
+        Move::new(52, 36, None),
+        Move::new(6, 21, None),
+    ];
+    for &mv in &line {
+        recorded.make_move(mv);
+        quick.make_move_without_history(mv);
+        assert_eq!(key(quick.current_state()), key(recorded.current_state()));
+    }
+    assert_eq!(quick.position_history, history);
+    for _ in &line {
+        quick.undo_move_without_history();
+    }
+    assert_eq!(
+        key(quick.current_state()),
+        key(BoardStack::new_from_fen(positions::STARTING).current_state())
+    );
+    assert_eq!(quick.position_history, history);
+}
+
+#[test]
+fn a_null_move_without_history_flips_the_side_and_undoes_cleanly() {
+    let mut stack = BoardStack::new_from_fen(positions::STARTING);
+    let history = stack.position_history.clone();
+    let before = key(stack.current_state());
+    stack.make_null_move_without_history();
+    assert!(!stack.current_state().w_to_move);
+    let mut recorded = BoardStack::new_from_fen(positions::STARTING);
+    recorded.make_null_move();
+    assert_eq!(key(stack.current_state()), key(recorded.current_state()));
+    stack.undo_move_without_history();
+    assert_eq!(key(stack.current_state()), before);
+    assert_eq!(stack.position_history, history);
+}

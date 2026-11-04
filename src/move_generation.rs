@@ -367,6 +367,93 @@ impl MoveGen {
         self.gen_king_moves_into(board, captures, moves);
     }
 
+    /// Appends exactly the captures and promotions `gen_all_moves_into` would put
+    /// in `captures` and `promotions`, in the same order, without generating
+    /// quiet moves or testing castling.
+    pub fn gen_captures_into(
+        &self,
+        board: &Board,
+        captures: &mut Vec<Move>,
+        promotions: &mut Vec<Move>,
+    ) {
+        let (us, them) = if board.w_to_move {
+            (WHITE, BLACK)
+        } else {
+            (BLACK, WHITE)
+        };
+        let enemy = board.pieces_occ[them];
+        let occ = board.pieces_occ[WHITE] | board.pieces_occ[BLACK];
+
+        // Pawns: captures (and en passant), then promotions by pushing, per pawn.
+        let (pawn_caps, pawn_pushes, promo_from) = if board.w_to_move {
+            (&self.wp_captures, &self.wp_moves, 48..56)
+        } else {
+            (&self.bp_captures, &self.bp_moves, 8..16)
+        };
+        for from in bits(&board.pieces[us][PAWN]) {
+            let promotes = promo_from.contains(&from);
+            for to in &pawn_caps[from] {
+                if enemy & (1u64 << to) != 0 || board.en_passant == Some(*to as u8) {
+                    if promotes {
+                        append_promotions(promotions, from, to, board.w_to_move);
+                    } else {
+                        captures.push(Move::new(from, *to, None));
+                    }
+                }
+            }
+            if promotes {
+                for to in &pawn_pushes[from] {
+                    if occ & (1u64 << to) == 0 {
+                        append_promotions(promotions, from, to, board.w_to_move);
+                    }
+                }
+            }
+        }
+
+        for from in bits(&board.pieces[us][KNIGHT]) {
+            for &to in &self.n_moves[from] {
+                if enemy & (1u64 << to) != 0 {
+                    captures.push(Move::new(from, to, None));
+                }
+            }
+        }
+        let rook_targets = |from: usize| {
+            let key = (((occ & R_MASKS[from]).wrapping_mul(self.r_magics[from]))
+                >> (64 - R_BITS[from])) as usize;
+            self.r_move_bitboard[from][key] & enemy
+        };
+        let bishop_targets = |from: usize| {
+            let key = (((occ & B_MASKS[from]).wrapping_mul(self.b_magics[from]))
+                >> (64 - B_BITS[from])) as usize;
+            self.b_move_bitboard[from][key] & enemy
+        };
+        for from in bits(&board.pieces[us][BISHOP]) {
+            for to in bits(&bishop_targets(from)) {
+                captures.push(Move::new(from, to, None));
+            }
+        }
+        for from in bits(&board.pieces[us][ROOK]) {
+            for to in bits(&rook_targets(from)) {
+                captures.push(Move::new(from, to, None));
+            }
+        }
+        for from in bits(&board.pieces[us][QUEEN]) {
+            for to in bits(&rook_targets(from)) {
+                captures.push(Move::new(from, to, None));
+            }
+            for to in bits(&bishop_targets(from)) {
+                captures.push(Move::new(from, to, None));
+            }
+        }
+        for from in bits(&board.pieces[us][KING]) {
+            for &to in &self.k_moves[from] {
+                if enemy & (1u64 << to) != 0 {
+                    captures.push(Move::new(from, to, None));
+                }
+            }
+        }
+    }
+
     /// Appends every pseudo-legal move that gives check to `out`: exactly the
     /// moves `Board::gives_check` accepts, without generating the others.
     ///

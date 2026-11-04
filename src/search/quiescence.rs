@@ -354,7 +354,7 @@ pub fn ext_pesto_qsearch_counted(
     board: &mut BoardStack,
     move_gen: &MoveGen,
     pesto: &PestoEval,
-    mut alpha: i32,
+    alpha: i32,
     beta: i32,
     max_depth: u8,
     white_tactic_used: bool,
@@ -362,6 +362,106 @@ pub fn ext_pesto_qsearch_counted(
     white_null_used: bool,
     black_null_used: bool,
 ) -> (i32, bool, u32, u8) {
+    let mut pool = Vec::new();
+    let flags = ExtFlags {
+        white_tactic_used,
+        black_tactic_used,
+        white_null_used,
+        black_null_used,
+    };
+    ext_node(
+        &mut pool, board, move_gen, pesto, alpha, beta, max_depth, flags,
+    )
+}
+
+/// Which side has used its one quiet tactical move and its one null move.
+#[derive(Clone, Copy)]
+struct ExtFlags {
+    white_tactic_used: bool,
+    black_tactic_used: bool,
+    white_null_used: bool,
+    black_null_used: bool,
+}
+
+/// Move lists for one search node, reused across nodes so that a search
+/// allocates them once per level rather than at every position.
+#[derive(Default)]
+struct MoveLists {
+    captures: Vec<Move>,
+    promotions: Vec<Move>,
+    quiets: Vec<Move>,
+}
+
+impl MoveLists {
+    /// Every pseudo-legal move, as `gen_pseudo_legal_moves` returns them:
+    /// captures then promotions in `captures`, the rest in `quiets`.
+    fn fill(&mut self, board: &Board, move_gen: &MoveGen) {
+        self.captures.clear();
+        self.promotions.clear();
+        self.quiets.clear();
+        move_gen.gen_all_moves_into(
+            board,
+            &mut self.captures,
+            &mut self.promotions,
+            &mut self.quiets,
+        );
+        self.captures.append(&mut self.promotions);
+    }
+
+    /// Only the captures and promotions `fill` would put in `captures`, in the
+    /// same order; `quiets` is left empty.
+    fn fill_captures(&mut self, board: &Board, move_gen: &MoveGen) {
+        self.captures.clear();
+        self.promotions.clear();
+        self.quiets.clear();
+        move_gen.gen_captures_into(board, &mut self.captures, &mut self.promotions);
+        self.captures.append(&mut self.promotions);
+    }
+
+    /// Captures and promotions in the order `gen_pseudo_legal_captures` returns them.
+    fn sort_captures(&mut self, board: &Board, move_gen: &MoveGen) {
+        self.captures
+            .sort_unstable_by_key(|m| -move_gen.mvv_lva(board, m.from(), m.to()));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ext_node(
+    pool: &mut Vec<MoveLists>,
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+    alpha: i32,
+    beta: i32,
+    max_depth: u8,
+    flags: ExtFlags,
+) -> (i32, bool, u32, u8) {
+    let mut lists = pool.pop().unwrap_or_default();
+    let result = ext_body(
+        &mut lists, pool, board, move_gen, pesto, alpha, beta, max_depth, flags,
+    );
+    pool.push(lists);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ext_body(
+    lists: &mut MoveLists,
+    pool: &mut Vec<MoveLists>,
+    board: &mut BoardStack,
+    move_gen: &MoveGen,
+    pesto: &PestoEval,
+    mut alpha: i32,
+    beta: i32,
+    max_depth: u8,
+    flags: ExtFlags,
+) -> (i32, bool, u32, u8) {
+    let ExtFlags {
+        white_tactic_used,
+        black_tactic_used,
+        white_null_used,
+        black_null_used,
+    } = flags;
     let mut nodes: u32 = 1;
     let mut all_completed = true;
     let mut max_child_depth: u8 = 0;
@@ -378,169 +478,159 @@ pub fn ext_pesto_qsearch_counted(
             black_null_used
         };
 
-        // Null-move probe with "mystery square recapture" for forks.
-        //
-        // Pass the turn and evaluate each opponent response. When there are 2+
-        // threats, model the fork resolution: saved piece moves to a "mystery
-        // square," opponent captures the other piece, saved piece recaptures the
-        // attacker. This bends chess rules slightly but correctly evaluates forks:
-        //   Fork cost = lesser_piece - forking_piece (recapture recovers material)
-        //
-        // For single threats: pass fully addresses it (no second threat).
-        // For no threats: stand-pat holds.
-        let adjusted_stand_pat = if !stm_null_used && max_depth > 1 {
-            board.make_null_move();
-            let new_w_null = true;
-            let new_b_null = true;
+        // Null-move probe with "mystery square recapture" for forks: pass the
+        // turn and search the opponent's best two captures and one quiet
+        // tactical move. With two threats, the passer saves the more valuable
+        // piece (moving it to a "mystery square"), the opponent takes the
+        // other, and the saved piece recaptures the attacker: a fork costs
+        // the lesser piece minus the forking piece. One threat: passing
+        // answers it. No threats: stand-pat holds.
+        // The probe can only lower stand-pat, so it is skipped when stand-pat
+        // cannot raise alpha.
+        let adjusted_stand_pat = if !stm_null_used && max_depth > 1 && stand_pat > alpha {
+            board.make_null_move_without_history();
+            let probe_flags = ExtFlags {
+                white_null_used: true,
+                black_null_used: true,
+                ..flags
+            };
 
-            // Evaluate the top 2 opponent captures (MVV-LVA sorted) and up to 1 tactical quiet.
-            // We only need first and second choice for deny-first-choice + recapture.
-            let opp_captures = move_gen.gen_pseudo_legal_captures(board.current_state());
-            let mut scored_moves: Vec<(i32, Move)> = Vec::new();
+            // Up to two captures and one quiet tactical move, as (score, move).
+            let mut scored = [(0i32, Move::null()); 3];
+            let mut n_scored = 0;
+            // Quiet moves are needed only if the opponent may still play a quiet tactic
+            let opp_tactic_used = if stm_is_white {
+                black_tactic_used
+            } else {
+                white_tactic_used
+            };
+            if opp_tactic_used {
+                lists.fill_captures(board.current_state(), move_gen);
+            } else {
+                lists.fill(board.current_state(), move_gen);
+            }
+            lists.sort_captures(board.current_state(), move_gen);
             let mut legal_cap_count = 0;
-
-            for cap in &opp_captures {
-                board.make_move(*cap);
+            for &cap in &lists.captures {
+                board.make_move_without_history(cap);
                 if !board.current_state().is_legal(move_gen) {
-                    board.undo_move();
+                    board.undo_move_without_history();
                     continue;
                 }
-                let (score, child_completed, child_nodes, child_depth) = ext_pesto_qsearch_counted(
+                let (score, child_completed, child_nodes, child_depth) = ext_node(
+                    pool,
                     board,
                     move_gen,
                     pesto,
                     -beta,
                     -alpha,
                     max_depth - 2,
-                    white_tactic_used,
-                    black_tactic_used,
-                    new_w_null,
-                    new_b_null,
+                    probe_flags,
                 );
                 nodes += child_nodes;
                 max_child_depth = max_child_depth.max(child_depth + 2);
                 if !child_completed {
                     all_completed = false;
                 }
-                board.undo_move();
-                scored_moves.push((-score, *cap));
+                board.undo_move_without_history();
+                scored[n_scored] = (-score, cap);
+                n_scored += 1;
                 legal_cap_count += 1;
                 if legal_cap_count >= 2 {
                     break;
-                } // only need top 2
+                }
             }
 
-            // Also evaluate one opponent tactical quiet (check or fork) if budget allows
-            let opp_tactic_used = if stm_is_white {
-                black_tactic_used
-            } else {
-                white_tactic_used
-            };
+            // One opponent quiet tactical move (check or fork) if its budget allows
             if !opp_tactic_used {
-                let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
-                for mv in &quiets {
-                    if !is_tactical_quiet(board.current_state(), *mv, move_gen) {
+                for &mv in &lists.quiets {
+                    if !is_tactical_quiet(board.current_state(), mv, move_gen) {
                         continue;
                     }
-                    board.make_move(*mv);
+                    board.make_move_without_history(mv);
                     if !board.current_state().is_legal(move_gen) {
-                        board.undo_move();
+                        board.undo_move_without_history();
                         continue;
                     }
-                    let opp_w_used = if !stm_is_white {
-                        true
-                    } else {
-                        white_tactic_used
+                    let child_flags = ExtFlags {
+                        white_tactic_used: !stm_is_white || white_tactic_used,
+                        black_tactic_used: stm_is_white || black_tactic_used,
+                        ..probe_flags
                     };
-                    let opp_b_used = if stm_is_white {
-                        true
-                    } else {
-                        black_tactic_used
-                    };
-                    let (score, child_completed, child_nodes, child_depth) =
-                        ext_pesto_qsearch_counted(
-                            board,
-                            move_gen,
-                            pesto,
-                            -beta,
-                            -alpha,
-                            max_depth - 2,
-                            opp_w_used,
-                            opp_b_used,
-                            new_w_null,
-                            new_b_null,
-                        );
+                    let (score, child_completed, child_nodes, child_depth) = ext_node(
+                        pool,
+                        board,
+                        move_gen,
+                        pesto,
+                        -beta,
+                        -alpha,
+                        max_depth - 2,
+                        child_flags,
+                    );
                     nodes += child_nodes;
                     max_child_depth = max_child_depth.max(child_depth + 2);
                     if !child_completed {
                         all_completed = false;
                     }
-                    board.undo_move();
-                    scored_moves.push((-score, *mv));
-                    break; // only need one tactical quiet
+                    board.undo_move_without_history();
+                    scored[n_scored] = (-score, mv);
+                    n_scored += 1;
+                    break;
                 }
             }
 
-            board.undo_null_move();
+            board.undo_move_without_history();
 
-            // Sort ascending (worst for passer first = opponent's best)
-            scored_moves.sort_unstable_by_key(|(s, _)| *s);
+            // Worst for the passer (the opponent's best) first
+            let scored = &mut scored[..n_scored];
+            scored.sort_unstable_by_key(|(s, _)| *s);
 
-            // Separate captures (have victims, eligible for recapture) from
-            // tactical quiets (checks/forks, no victim to recapture)
-            let mut capture_scores: Vec<(i32, Move)> = Vec::new();
-            let mut all_scores: Vec<i32> = Vec::new();
-            for &(score, mv) in &scored_moves {
-                all_scores.push(score);
-                // A move is a capture if there's a piece on the target square
-                // (in the current board state, before null-move)
+            // Captures have a victim to recapture; quiet tactical moves do not
+            let mut capture_scores = [(0i32, Move::null()); 3];
+            let mut n_caps = 0;
+            let mut all_scores = [0i32; 3];
+            for (k, &(score, mv)) in scored.iter().enumerate() {
+                all_scores[k] = score;
                 if board.current_state().get_piece(mv.to()).is_some() {
-                    capture_scores.push((score, mv));
+                    capture_scores[n_caps] = (score, mv);
+                    n_caps += 1;
                 }
             }
-
+            let all_scores = &mut all_scores[..n_scored];
             all_scores.sort_unstable();
 
             let null_threat = if all_scores.len() >= 2 {
                 let second_score = all_scores[1]; // second-worst for passer
 
-                // Try mystery-square recapture if there are 2+ captures with victims
+                let capture_scores = &mut capture_scores[..n_caps];
                 capture_scores.sort_unstable_by_key(|(s, _)| *s);
                 if capture_scores.len() >= 2 {
-                    // Fork resolution with mystery-square recapture:
-                    // 1. Saved piece moves to "mystery square" (deny first capture)
-                    // 2. Opponent captures the other piece (second capture)
-                    // 3. Saved piece recaptures the attacker from mystery square
+                    // Mystery-square recapture: deny the first capture, let the
+                    // second happen, recapture the attacker with the saved piece.
                     let best_victim_sq = capture_scores[0].1.to();
                     let second_cap = capture_scores[1].1;
                     let second_cap_score = capture_scores[1].0;
 
-                    board.make_null_move();
-                    board.make_move(second_cap);
+                    board.make_null_move_without_history();
+                    board.make_move_without_history(second_cap);
                     let recapture_threat = if board.current_state().is_legal(move_gen) {
-                        // Mystery recapture: saved piece teleports to attacker's landing
                         let recapture = Move::new(best_victim_sq, second_cap.to(), None);
                         let recaptured_board = board.current_state().apply_move_to_board(recapture);
+                        // From the opponent's side (to move); negate for the passer.
                         let recapture_eval = pesto.pst_eval_cp(&recaptured_board);
-                        // recaptured_board has opponent to move (passer just recaptured).
-                        // pst_eval_cp returns from STM perspective = opponent's perspective.
-                        // Negate for passer's perspective.
                         second_cap_score.max(-recapture_eval)
                     } else {
                         second_cap_score
                     };
-                    board.undo_move();
-                    board.undo_null_move();
+                    board.undo_move_without_history();
+                    board.undo_move_without_history();
 
-                    // Use better of: overall second-best or recapture-adjusted capture
                     second_score.max(recapture_threat)
                 } else {
                     second_score
                 }
-            } else if all_scores.len() == 1 {
-                stand_pat // single threat — pass fully saves
             } else {
-                stand_pat // no threats
+                stand_pat // one threat (passing answers it) or none
             };
 
             stand_pat.min(null_threat)
@@ -561,11 +651,11 @@ pub fn ext_pesto_qsearch_counted(
             // Can't resolve check at depth 0
             return (alpha, false, nodes, 0);
         }
-        let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
-        let has_legal_capture = captures.iter().any(|&cap| {
-            board.make_move(cap);
+        lists.fill_captures(board.current_state(), move_gen);
+        let has_legal_capture = lists.captures.iter().any(|&cap| {
+            board.make_move_without_history(cap);
             let legal = board.current_state().is_legal(move_gen);
-            board.undo_move();
+            board.undo_move_without_history();
             legal
         });
         return (alpha, !has_legal_capture, nodes, 0);
@@ -578,29 +668,31 @@ pub fn ext_pesto_qsearch_counted(
         black_tactic_used
     };
 
-    let mut any_legal = false;
-
+    // Quiet moves are needed when in check (every evasion) or for a quiet tactic
+    if in_check || !stm_tactic_used {
+        lists.fill(board.current_state(), move_gen);
+    } else {
+        lists.fill_captures(board.current_state(), move_gen);
+    }
     if in_check {
-        // In check: generate ALL pseudo-legal moves as evasions (free, no budget consumed)
-        let (caps, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
-        for mv in caps.iter().chain(quiets.iter()) {
-            board.make_move(*mv);
+        // In check: every pseudo-legal move is an evasion (free, no budget consumed)
+        let mut any_legal = false;
+        for &mv in lists.captures.iter().chain(lists.quiets.iter()) {
+            board.make_move_without_history(mv);
             if !board.current_state().is_legal(move_gen) {
-                board.undo_move();
+                board.undo_move_without_history();
                 continue;
             }
             any_legal = true;
-            let (score, child_completed, child_nodes, child_depth) = ext_pesto_qsearch_counted(
+            let (score, child_completed, child_nodes, child_depth) = ext_node(
+                pool,
                 board,
                 move_gen,
                 pesto,
                 -beta,
                 -alpha,
                 max_depth - 1,
-                white_tactic_used,
-                black_tactic_used,
-                white_null_used,
-                black_null_used,
+                flags,
             );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
@@ -608,7 +700,7 @@ pub fn ext_pesto_qsearch_counted(
             if !child_completed {
                 all_completed = false;
             }
-            board.undo_move();
+            board.undo_move_without_history();
             if score >= beta {
                 return (beta, all_completed, nodes, max_child_depth);
             }
@@ -621,27 +713,23 @@ pub fn ext_pesto_qsearch_counted(
             return (-1_000_000, true, nodes, 0);
         }
     } else {
-        // Not in check: captures first, then tactical quiets
-
         // 1. Captures (MVV-LVA sorted)
-        let captures = move_gen.gen_pseudo_legal_captures(board.current_state());
-        for capture in &captures {
-            board.make_move(*capture);
+        lists.sort_captures(board.current_state(), move_gen);
+        for &capture in &lists.captures {
+            board.make_move_without_history(capture);
             if !board.current_state().is_legal(move_gen) {
-                board.undo_move();
+                board.undo_move_without_history();
                 continue;
             }
-            let (score, child_completed, child_nodes, child_depth) = ext_pesto_qsearch_counted(
+            let (score, child_completed, child_nodes, child_depth) = ext_node(
+                pool,
                 board,
                 move_gen,
                 pesto,
                 -beta,
                 -alpha,
                 max_depth - 1,
-                white_tactic_used,
-                black_tactic_used,
-                white_null_used,
-                black_null_used,
+                flags,
             );
             nodes += child_nodes;
             max_child_depth = max_child_depth.max(child_depth + 1);
@@ -649,7 +737,7 @@ pub fn ext_pesto_qsearch_counted(
             if !child_completed {
                 all_completed = false;
             }
-            board.undo_move();
+            board.undo_move_without_history();
             if score >= beta {
                 return (beta, all_completed, nodes, max_child_depth);
             }
@@ -658,43 +746,31 @@ pub fn ext_pesto_qsearch_counted(
             }
         }
 
-        // 2. Tactical quiets: non-capture checks and forks (when budget allows)
+        // 2. Quiet checks and forks, which use the moving side's budget
         if !stm_tactic_used {
-            let (_, quiets) = move_gen.gen_pseudo_legal_moves(board.current_state());
-            for mv in &quiets {
-                if !is_tactical_quiet(board.current_state(), *mv, move_gen) {
+            for &mv in &lists.quiets {
+                if !is_tactical_quiet(board.current_state(), mv, move_gen) {
                     continue;
                 }
-
-                board.make_move(*mv);
+                board.make_move_without_history(mv);
                 if !board.current_state().is_legal(move_gen) {
-                    board.undo_move();
+                    board.undo_move_without_history();
                     continue;
                 }
-
-                // Tactical move consumes the moving side's budget
-                let new_w_used = if stm_is_white {
-                    true
-                } else {
-                    white_tactic_used
+                let child_flags = ExtFlags {
+                    white_tactic_used: stm_is_white || white_tactic_used,
+                    black_tactic_used: !stm_is_white || black_tactic_used,
+                    ..flags
                 };
-                let new_b_used = if !stm_is_white {
-                    true
-                } else {
-                    black_tactic_used
-                };
-
-                let (score, child_completed, child_nodes, child_depth) = ext_pesto_qsearch_counted(
+                let (score, child_completed, child_nodes, child_depth) = ext_node(
+                    pool,
                     board,
                     move_gen,
                     pesto,
                     -beta,
                     -alpha,
                     max_depth - 1,
-                    new_w_used,
-                    new_b_used,
-                    white_null_used,
-                    black_null_used,
+                    child_flags,
                 );
                 nodes += child_nodes;
                 max_child_depth = max_child_depth.max(child_depth + 1);
@@ -702,7 +778,7 @@ pub fn ext_pesto_qsearch_counted(
                 if !child_completed {
                     all_completed = false;
                 }
-                board.undo_move();
+                board.undo_move_without_history();
                 if score >= beta {
                     return (beta, all_completed, nodes, max_child_depth);
                 }
@@ -711,10 +787,7 @@ pub fn ext_pesto_qsearch_counted(
                 }
             }
         }
-
-        // No retreat moves needed — the null-move "deny first choice" mechanism
-        // handles threats implicitly by assuming the passer saves the most
-        // valuable piece and the opponent captures the second-most valuable.
+        // Threats are handled by the null-move probe above, so no retreats are searched.
     }
 
     (alpha, all_completed, nodes, max_child_depth)

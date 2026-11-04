@@ -189,6 +189,31 @@ impl BoardStack {
         self.move_stack.push_front(Move::null());
     }
 
+    /// Makes `mv` without recording the position for repetition detection, for
+    /// searches that never test repetitions (quiescence search). Undo it with
+    /// `undo_move_without_history`.
+    pub fn make_move_without_history(&mut self, mv: Move) {
+        let new_board = self.current_state().apply_move_to_board(mv);
+        self.move_stack.push_front(mv);
+        self.state_stack.push_front(new_board);
+    }
+
+    /// `make_null_move` without recording the position for repetition detection.
+    pub fn make_null_move_without_history(&mut self) {
+        let mut new_board = self.current_state().clone();
+        new_board.w_to_move = !new_board.w_to_move;
+        new_board.en_passant = None;
+        new_board.zobrist_hash = new_board.compute_zobrist_hash();
+        self.state_stack.push_front(new_board);
+        self.move_stack.push_front(Move::null());
+    }
+
+    /// Undoes a move or null move made without recording its position.
+    pub fn undo_move_without_history(&mut self) {
+        self.state_stack.pop_front();
+        self.move_stack.pop_front();
+    }
+
     /// Undoes a null move
     ///
     /// This is the counterpart to make_null_move.
