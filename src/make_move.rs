@@ -224,3 +224,247 @@ impl Board {
         new_board
     }
 }
+
+/// What `Board::make_move_in_place` changed that the move itself cannot
+/// recover: the captured piece and the board's counters, flags and hash.
+#[derive(Clone, Copy, Debug)]
+pub struct UndoInfo {
+    /// Colour, piece type and square of the captured piece (for en passant,
+    /// not the square moved to).
+    captured: Option<(usize, usize, usize)>,
+    en_passant: Option<u8>,
+    castling_rights: crate::move_types::CastlingRights,
+    halfmove_clock: u8,
+    fullmove_number: u8,
+    zobrist_hash: u64,
+}
+
+impl Board {
+    fn undo_info(&self) -> UndoInfo {
+        UndoInfo {
+            captured: None,
+            en_passant: self.en_passant,
+            castling_rights: self.castling_rights,
+            halfmove_clock: self.halfmove_clock,
+            fullmove_number: self.fullmove_number,
+            zobrist_hash: self.zobrist_hash,
+        }
+    }
+
+    /// The piece type of `color` on `sq`, if any.
+    fn piece_of(&self, color: usize, sq: usize) -> Option<usize> {
+        let bit = sq_ind_to_bit(sq);
+        if self.pieces_occ[color] & bit == 0 {
+            return None;
+        }
+        (0..6).find(|&p| self.pieces[color][p] & bit != 0)
+    }
+
+    /// Toggles `piece` of `color` on `sq` in the piece and occupancy boards.
+    fn toggle(&mut self, color: usize, piece: usize, sq: usize) {
+        let bit = sq_ind_to_bit(sq);
+        self.pieces[color][piece] ^= bit;
+        self.pieces_occ[color] ^= bit;
+    }
+
+    /// Makes `the_move` on this board instead of on a copy: the board becomes
+    /// what `apply_move_to_board` returns. Undo it with `unmake_move`.
+    pub fn make_move_in_place(&mut self, the_move: Move) -> UndoInfo {
+        let mut undo = self.undo_info();
+        let (from, to) = (the_move.from(), the_move.to());
+        if from == 0 && to == 0 {
+            // A null move, as in apply_move_to_board.
+            let mut hash = self.zobrist_hash;
+            if let Some(ep_sq) = self.en_passant {
+                hash ^= ZOBRIST_KEYS.en_passant_key((ep_sq % 8) as usize);
+            }
+            self.en_passant = None;
+            hash ^= ZOBRIST_KEYS.side_to_move_key();
+            self.w_to_move = !self.w_to_move;
+            if self.w_to_move {
+                self.fullmove_number += 1;
+            }
+            self.zobrist_hash = hash;
+            return undo;
+        }
+        let color = if self.w_to_move { WHITE } else { BLACK };
+        let them = 1 - color;
+        let piece = self.piece_of(color, from).unwrap_or_else(|| {
+            panic!(
+                "No piece at from_sq_ind {} ({})",
+                from,
+                crate::board_utils::sq_ind_to_algebraic(from)
+            )
+        });
+        let mut hash = self.zobrist_hash;
+        self.halfmove_clock += 1;
+
+        let captured = self.piece_of(them, to);
+        if let Some(cap) = captured {
+            self.toggle(them, cap, to);
+            self.halfmove_clock = 0;
+            hash ^= ZOBRIST_KEYS.piece_key(them, cap, to);
+            undo.captured = Some((them, cap, to));
+        }
+        let old_castling = self.castling_rights;
+
+        if piece == PAWN && self.en_passant == Some(to as u8) {
+            let sq = if color == WHITE { to - 8 } else { to + 8 };
+            self.toggle(them, PAWN, sq);
+            hash ^= ZOBRIST_KEYS.piece_key(them, PAWN, sq);
+            undo.captured = Some((them, PAWN, sq));
+        }
+        if let Some(ep_sq) = self.en_passant {
+            hash ^= ZOBRIST_KEYS.en_passant_key((ep_sq % 8) as usize);
+        }
+        self.en_passant = None;
+        if piece == PAWN {
+            self.halfmove_clock = 0;
+            if from.abs_diff(to) == 16 {
+                let ep_sq = ((from + to) / 2) as u8;
+                self.en_passant = Some(ep_sq);
+                hash ^= ZOBRIST_KEYS.en_passant_key((ep_sq % 8) as usize);
+            }
+        }
+
+        self.toggle(color, piece, from);
+        hash ^= ZOBRIST_KEYS.piece_key(color, piece, from);
+        match the_move.promotion() {
+            Some(promotion) => {
+                self.toggle(color, promotion, to);
+                hash ^= ZOBRIST_KEYS.piece_key(color, promotion, to);
+            }
+            None => {
+                self.toggle(color, piece, to);
+                hash ^= ZOBRIST_KEYS.piece_key(color, piece, to);
+            }
+        }
+
+        if piece == KING {
+            if let Some((rook_from, rook_to)) = castling_rook(color, from, to) {
+                self.toggle(color, ROOK, rook_from);
+                self.toggle(color, ROOK, rook_to);
+                hash ^= ZOBRIST_KEYS.piece_key(color, ROOK, rook_from);
+                hash ^= ZOBRIST_KEYS.piece_key(color, ROOK, rook_to);
+            }
+            let c = &mut self.castling_rights;
+            if color == WHITE {
+                c.white_kingside = false;
+                c.white_queenside = false;
+            } else {
+                c.black_kingside = false;
+                c.black_queenside = false;
+            }
+        } else if piece == ROOK {
+            let c = &mut self.castling_rights;
+            match (color, from) {
+                (WHITE, 0) => c.white_queenside = false,
+                (WHITE, 7) => c.white_kingside = false,
+                (BLACK, 56) => c.black_queenside = false,
+                (BLACK, 63) => c.black_kingside = false,
+                _ => {}
+            }
+        }
+        if captured.is_some() {
+            let c = &mut self.castling_rights;
+            match to {
+                0 => c.white_queenside = false,
+                7 => c.white_kingside = false,
+                56 => c.black_queenside = false,
+                63 => c.black_kingside = false,
+                _ => {}
+            }
+        }
+        let c = self.castling_rights;
+        for (i, (old, new)) in [
+            (old_castling.white_kingside, c.white_kingside),
+            (old_castling.white_queenside, c.white_queenside),
+            (old_castling.black_kingside, c.black_kingside),
+            (old_castling.black_queenside, c.black_queenside),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if old != new {
+                hash ^= ZOBRIST_KEYS.castling_key(i);
+            }
+        }
+
+        hash ^= ZOBRIST_KEYS.side_to_move_key();
+        self.w_to_move = !self.w_to_move;
+        if self.w_to_move {
+            self.fullmove_number += 1;
+        }
+        self.zobrist_hash = hash;
+        debug_assert_eq!(self.zobrist_hash, self.compute_zobrist_hash());
+        undo
+    }
+
+    /// Undoes `the_move`, made by `make_move_in_place`, which returned `undo`.
+    pub fn unmake_move(&mut self, the_move: Move, undo: UndoInfo) {
+        self.w_to_move = !self.w_to_move;
+        let (from, to) = (the_move.from(), the_move.to());
+        if !(from == 0 && to == 0) {
+            let color = if self.w_to_move { WHITE } else { BLACK };
+            let moved = match the_move.promotion() {
+                Some(promotion) => {
+                    self.toggle(color, promotion, to);
+                    PAWN
+                }
+                None => {
+                    let p = self.piece_of(color, to).expect("the moved piece");
+                    self.toggle(color, p, to);
+                    p
+                }
+            };
+            self.toggle(color, moved, from);
+            if moved == KING {
+                if let Some((rook_from, rook_to)) = castling_rook(color, from, to) {
+                    self.toggle(color, ROOK, rook_to);
+                    self.toggle(color, ROOK, rook_from);
+                }
+            }
+            if let Some((c, p, sq)) = undo.captured {
+                self.toggle(c, p, sq);
+            }
+        }
+        self.en_passant = undo.en_passant;
+        self.castling_rights = undo.castling_rights;
+        self.halfmove_clock = undo.halfmove_clock;
+        self.fullmove_number = undo.fullmove_number;
+        self.zobrist_hash = undo.zobrist_hash;
+    }
+
+    /// Passes the move, as `BoardStack::make_null_move_without_history` does
+    /// (the move number is not advanced). Undo it with `unmake_null_move`.
+    pub fn make_null_move_in_place(&mut self) -> UndoInfo {
+        let undo = self.undo_info();
+        let mut hash = self.zobrist_hash ^ ZOBRIST_KEYS.side_to_move_key();
+        if let Some(ep_sq) = self.en_passant {
+            hash ^= ZOBRIST_KEYS.en_passant_key((ep_sq % 8) as usize);
+        }
+        self.w_to_move = !self.w_to_move;
+        self.en_passant = None;
+        self.zobrist_hash = hash;
+        debug_assert_eq!(self.zobrist_hash, self.compute_zobrist_hash());
+        undo
+    }
+
+    /// Undoes `make_null_move_in_place`.
+    pub fn unmake_null_move(&mut self, undo: UndoInfo) {
+        self.w_to_move = !self.w_to_move;
+        self.en_passant = undo.en_passant;
+        self.zobrist_hash = undo.zobrist_hash;
+    }
+}
+
+/// The rook's squares (from, to) if a king move from `from` to `to` castles.
+fn castling_rook(color: usize, from: usize, to: usize) -> Option<(usize, usize)> {
+    match (color, from, to) {
+        (WHITE, 4, 6) => Some((7, 5)),
+        (WHITE, 4, 2) => Some((0, 3)),
+        (BLACK, 60, 62) => Some((63, 61)),
+        (BLACK, 60, 58) => Some((56, 59)),
+        _ => None,
+    }
+}

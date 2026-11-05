@@ -29,6 +29,7 @@ mod leaf_log_tests;
 mod leaf_parallel_tests;
 mod legality_check_tests;
 mod magic_bitboard_tests;
+mod make_in_place_tests;
 mod make_move_tests;
 mod mate_order_tests;
 mod mate_search_tests;

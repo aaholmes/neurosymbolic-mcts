@@ -19,6 +19,9 @@ pub struct BoardStack {
     pub position_history: FxHashMap<u64, u8>,
     pub(crate) state_stack: VecDeque<Board>,
     move_stack: VecDeque<Move>,
+    /// Undo records of moves made in place on the current board, without
+    /// history (the quiescence search).
+    undo_stack: Vec<crate::make_move::UndoInfo>,
 }
 
 impl Default for BoardStack {
@@ -35,6 +38,7 @@ impl BoardStack {
             position_history: FxHashMap::default(),
             state_stack: VecDeque::new(),
             move_stack: VecDeque::new(),
+            undo_stack: Vec::new(),
         };
 
         board.position_history.insert(initial_state.zobrist_hash, 1);
@@ -64,6 +68,7 @@ impl BoardStack {
             position_history: FxHashMap::default(),
             state_stack: VecDeque::new(),
             move_stack: VecDeque::new(),
+            undo_stack: Vec::new(),
         };
         board.position_history.insert(initial_board.zobrist_hash, 1);
         board.state_stack.push_front(initial_board);
@@ -192,26 +197,36 @@ impl BoardStack {
     /// Makes `mv` without recording the position for repetition detection, for
     /// searches that never test repetitions (quiescence search). Undo it with
     /// `undo_move_without_history`.
+    /// The move is made in place on the current board, with an undo record,
+    /// instead of on a copy pushed onto the stack.
     pub fn make_move_without_history(&mut self, mv: Move) {
-        let new_board = self.current_state().apply_move_to_board(mv);
+        let undo = self.board_mut().make_move_in_place(mv);
         self.move_stack.push_front(mv);
-        self.state_stack.push_front(new_board);
+        self.undo_stack.push(undo);
     }
 
     /// `make_null_move` without recording the position for repetition detection.
     pub fn make_null_move_without_history(&mut self) {
-        let mut new_board = self.current_state().clone();
-        new_board.w_to_move = !new_board.w_to_move;
-        new_board.en_passant = None;
-        new_board.zobrist_hash = new_board.compute_zobrist_hash();
-        self.state_stack.push_front(new_board);
+        let undo = self.board_mut().make_null_move_in_place();
         self.move_stack.push_front(Move::null());
+        self.undo_stack.push(undo);
     }
 
-    /// Undoes a move or null move made without recording its position.
+    /// Undoes a move or null move made without recording its position. Moves
+    /// with and without history must be undone in the reverse order made.
     pub fn undo_move_without_history(&mut self) {
-        self.state_stack.pop_front();
-        self.move_stack.pop_front();
+        let mv = self.move_stack.pop_front().expect("a move to undo");
+        let undo = self.undo_stack.pop().expect("a move made without history");
+        let board = self.board_mut();
+        if mv == Move::null() {
+            board.unmake_null_move(undo);
+        } else {
+            board.unmake_move(mv, undo);
+        }
+    }
+
+    fn board_mut(&mut self) -> &mut Board {
+        self.state_stack.front_mut().unwrap()
     }
 
     /// Undoes a null move
