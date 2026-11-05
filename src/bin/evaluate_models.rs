@@ -990,6 +990,15 @@ fn main() {
     CURRENT_LEAVES.store(leaves("--current-leaves"), Ordering::Relaxed);
 
     // Both sides use the same exact endings, as in their training.
+    if let Some(cfg) = kingfisher::search::quiescence::qsearch_config_from_args(&args)
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2);
+        })
+    {
+        kingfisher::search::quiescence::set_engine_config(cfg).unwrap();
+        eprintln!("quiescence search settings: {cfg:?}");
+    }
     let exact = ExactEndings::from_args(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2)

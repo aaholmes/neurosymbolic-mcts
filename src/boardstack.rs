@@ -205,6 +205,14 @@ impl BoardStack {
         self.undo_stack.push(undo);
     }
 
+    /// `make_move_without_history` without updating the hash, which is wrong
+    /// until the move is undone; for searches that never read it.
+    pub fn make_move_unhashed_without_history(&mut self, mv: Move) {
+        let undo = self.board_mut().make_move_in_place_unhashed(mv);
+        self.move_stack.push_front(mv);
+        self.undo_stack.push(undo);
+    }
+
     /// `make_null_move` without recording the position for repetition detection.
     pub fn make_null_move_without_history(&mut self) {
         let undo = self.board_mut().make_null_move_in_place();

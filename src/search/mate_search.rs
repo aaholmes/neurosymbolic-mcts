@@ -58,8 +58,7 @@ use crate::search::mate_order::{order_attacker_moves, order_defender_moves, Move
 /// while deeper levels use checks-only search. Default exhaustive_depth=2
 /// makes mate-in-1 and mate-in-2 exhaustive, and mate-in-3+ checks-only.
 ///
-/// Stateless: operates on immutable `&Board` references (like KOTH search),
-/// avoiding BoardStack overhead. Repetition detection is unnecessary — forced
+/// Makes and undoes moves on a copy of the board, without a BoardStack. Repetition detection is unnecessary — forced
 /// mates exist regardless of position history.
 pub fn mate_search(
     board: &Board,
@@ -116,11 +115,11 @@ pub fn mate_search_ordered(
                     continue;
                 }
 
-                let next_board = board.apply_move_to_board(*m);
+                let mut next_board = board.apply_move_to_board(*m);
 
                 let quiet = if checks_only { 0 } else { EVERY_MOVE };
                 if solve_mate(
-                    &next_board,
+                    &mut next_board,
                     move_gen,
                     depth - 1,
                     false,
@@ -309,6 +308,8 @@ pub fn has_forced_mate_ordered(
 ) -> (bool, i32) {
     let mut nodes = 0;
     let exhaustive = exhaustive.min(depth);
+    // Searched by making and undoing moves on one copy.
+    let board = &mut board.clone();
     with_scratch(2 * depth, |lists, table| {
         if order.killer {
             for l in lists.iter_mut() {
@@ -357,7 +358,7 @@ pub fn has_forced_mate_ordered(
 /// - Defender: returns true only if ALL children lead to mate (short-circuits on first refutation)
 #[allow(clippy::too_many_arguments)]
 fn solve_mate(
-    board: &Board,
+    board: &mut Board,
     move_gen: &MoveGen,
     depth: i32,
     is_attackers_turn: bool,
@@ -418,7 +419,7 @@ fn try_killer_first(here: &mut PlyMoves) {
 /// `solve_mate` below the table lookup.
 #[allow(clippy::too_many_arguments)]
 fn search_children(
-    board: &Board,
+    board: &mut Board,
     move_gen: &MoveGen,
     depth: i32,
     is_attackers_turn: bool,
@@ -480,6 +481,7 @@ fn search_children(
     let mut has_legal_move = false;
     // The move that ended the search early: a mate, or a refutation.
     let mut cutoff = None;
+    let pins = board.pins(move_gen);
 
     for &m in here
         .captures
@@ -497,15 +499,14 @@ fn search_children(
             child_quiet = quiet - 1;
         }
 
-        if !board.is_legal_after_move(m, move_gen) {
+        if !board.is_legal_with_pins(m, &pins, move_gen) {
             continue;
         }
 
         has_legal_move = true;
-        let next_board = board.apply_move_to_board(m);
-
+        let undo = board.make_move_in_place_unscored(m);
         let child_result = solve_mate(
-            &next_board,
+            board,
             move_gen,
             depth - 1,
             !is_attackers_turn,
@@ -515,6 +516,7 @@ fn search_children(
             deeper,
             table,
         );
+        board.unmake_move(m, undo);
 
         // The attacker stops at a mating line, the defender at a refutation.
         if child_result == is_attackers_turn {

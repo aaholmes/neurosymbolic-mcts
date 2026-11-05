@@ -57,6 +57,46 @@ Ruled out: a depth limit of 12 instead of 20 (7.3× alone) changed the completed
 positions. With all three rules, the median call takes 24 µs and 96% of calls finish within the
 depth limit, compared with 79% at the start.
 
+## Faster positions, same answers
+
+With the pruning above as the default, the time per position was cut further without changing any
+answer (checksum of every score and completed flag on the 20,000 leaves unchanged, and a golden
+file of 509 answers in the tests). Same benchmark, all 20,000 leaves, one thread, builds run
+alternately, 2–3 runs each (spread under 1%):
+
+| Change | µs per call | Speed-up |
+|---|---|---|
+| Default search, moves made and undone in place (start) | 136.8 | |
+| **Quiet checks and forks generated directly**, in the order full generation lists them, instead of generating every quiet move and testing each; **legality from pinned pieces** instead of making each move and testing the king | 102.7 | 1.33× |
+| **A square-to-piece table** on the board, so finding the piece on a square is one lookup | 96.8 | 1.41× |
+| **The piece-square score kept up to date** as pieces move, instead of summed over the board at each position | 93.5 | 1.46× |
+| **No hash updates** in the search (nothing reads the hash), and undo restoring the score from the undo record | 87.6 | 1.56× |
+
+In self-play (policy-only engine, network bo19's priors, 6-piece tables and the 7-piece rook and
+pawn endings, 200 simulations, 1,920 games, 3 alternating runs per build) this raised throughput
+from 1,799 to 2,266 moves per second (+26%; runs within ±1.5% of their mean).
+
+The mate search shares the board code. Making its moves in place instead of copying the board, and
+testing legality from pins, leaves it within 0–4% of its earlier speed: the square table makes
+copying the board slower, and making moves in place recovers most of that.
+
+## Options that change answers (off by default)
+
+`--qsearch-config <name>` in `self_play` and `evaluate_models` sets them (names as in
+`qsearch_bench`, e.g. `default+n4000`).
+
+| Option | µs per call (held-out half) | Same score | Value changes by more than 0.1 | Self-play moves/s |
+|---|---|---|---|---|
+| Default | 92.4 | | | 2,266 |
+| **Transposition table** for each call (4,096 entries) | 77.4 | 100% | 0% | 2,137 (−5.7%) |
+| Transposition table kept by each thread across calls | | | | 2,187 (−3.5%) |
+| **At most 4,000 positions per call**, after which positions score their static evaluation | 58.0 | 98.1% | 0.73% | 2,377 (+4.9%) |
+| At most 2,000 positions | 47.7 | 95.7% | 1.55% | |
+
+The table returns the same scores as the search without it (on the unpruned search too, as a test
+checks), and is 16% faster on one thread, but slower in self-play with 1,920 threads, probably
+because each thread's table competes for cache. A budget makes the slowest 1% of calls cheaper.
+
 What this does not measure: whether the changed scores make self-play stronger or weaker. The
 reference is the original search, not a ground truth; a pruned score that differs may be better or
 worse.

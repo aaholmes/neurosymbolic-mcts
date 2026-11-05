@@ -107,7 +107,7 @@ pub fn qsearch_inputs(
             &mut stack,
             move_gen,
             pesto,
-            &crate::search::quiescence::ExtConfig::default(),
+            &crate::search::quiescence::engine_config(),
             tablebase,
         ),
     };

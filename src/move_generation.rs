@@ -486,32 +486,7 @@ impl MoveGen {
         let own = board.pieces_occ[us];
         let ours = &board.pieces[us];
 
-        // Our pieces that block one of our sliders from the king.
-        let mut uncovers = 0u64;
-        let rook_line = self.gen_rook_attacks_occ(ksq, occ);
-        let bishop_line = self.gen_bishop_attacks_occ(ksq, occ);
-        for (line, sliders, attacks) in [
-            (
-                rook_line,
-                ours[ROOK] | ours[QUEEN],
-                Self::gen_rook_attacks_occ as fn(&Self, usize, u64) -> u64,
-            ),
-            (
-                bishop_line,
-                ours[BISHOP] | ours[QUEEN],
-                Self::gen_bishop_attacks_occ,
-            ),
-        ] {
-            if sliders == 0 {
-                continue;
-            }
-            for sq in bits(&(line & own)) {
-                let bit = 1u64 << sq;
-                if attacks(self, ksq, occ & !bit) & sliders & !bit != 0 {
-                    uncovers |= bit;
-                }
-            }
-        }
+        let (uncovers, rook_line, bishop_line) = self.uncovering_pieces(board, ksq);
 
         let push_tested = |out: &mut Vec<Move>, from: usize, targets: u64| {
             for to in bits(&targets) {
@@ -651,6 +626,215 @@ impl MoveGen {
                 }
             }
         }
+    }
+
+    /// Our pieces (the side to move's) that stand between one of our sliders
+    /// and the enemy king on square `ksq`, so that moving them off the line
+    /// may give check; and the rook and bishop lines from that king.
+    fn uncovering_pieces(&self, board: &Board, ksq: usize) -> (u64, u64, u64) {
+        let us = if board.w_to_move { WHITE } else { BLACK };
+        let occ = board.pieces_occ[WHITE] | board.pieces_occ[BLACK];
+        let own = board.pieces_occ[us];
+        let ours = &board.pieces[us];
+        let mut uncovers = 0u64;
+        let rook_line = self.gen_rook_attacks_occ(ksq, occ);
+        let bishop_line = self.gen_bishop_attacks_occ(ksq, occ);
+        for (line, sliders, attacks) in [
+            (
+                rook_line,
+                ours[ROOK] | ours[QUEEN],
+                Self::gen_rook_attacks_occ as fn(&Self, usize, u64) -> u64,
+            ),
+            (
+                bishop_line,
+                ours[BISHOP] | ours[QUEEN],
+                Self::gen_bishop_attacks_occ,
+            ),
+        ] {
+            if sliders == 0 {
+                continue;
+            }
+            for sq in bits(&(line & own)) {
+                let bit = 1u64 << sq;
+                if attacks(self, ksq, occ & !bit) & sliders & !bit != 0 {
+                    uncovers |= bit;
+                }
+            }
+        }
+
+        (uncovers, rook_line, bishop_line)
+    }
+
+    /// Appends the quiet moves (not captures or promotions) that give check
+    /// or fork, in the order `gen_all_moves_into` lists them among its quiet
+    /// moves: exactly those `quiescence::is_tactical_quiet` accepts, without
+    /// generating the others. A fork is a pawn attacking two of knight, bishop,
+    /// rook, queen and king, or a knight attacking two of rook, queen and king.
+    pub fn gen_tactical_quiets_into(&self, board: &Board, out: &mut Vec<Move>) {
+        let us = if board.w_to_move { WHITE } else { BLACK };
+        let them = 1 - us;
+        let theirs = &board.pieces[them];
+        let their_king = theirs[KING];
+        let occ = board.pieces_occ[WHITE] | board.pieces_occ[BLACK];
+        let empty = !occ;
+        let ours = &board.pieces[us];
+        // Without an enemy king nothing gives check; forks are still found.
+        let (ksq, uncovers, rook_line, bishop_line) = if their_king != 0 {
+            let ksq = their_king.trailing_zeros() as usize;
+            let (u, r, b) = self.uncovering_pieces(board, ksq);
+            (Some(ksq), u, r, b)
+        } else {
+            (None, 0, 0, 0)
+        };
+        let pawn_targets =
+            theirs[KNIGHT] | theirs[BISHOP] | theirs[ROOK] | theirs[QUEEN] | their_king;
+        let knight_targets = theirs[ROOK] | theirs[QUEEN] | their_king;
+        let tested = |m: Move| board.gives_check(m, self);
+
+        // Pawn pushes, skipping the rank before promotion (promotions are not quiet).
+        let (pushes, attacks, pawn_checks, seventh, second) = if us == WHITE {
+            (
+                &self.wp_moves,
+                &self.wp_capture_bitboard,
+                ksq.map_or(0, |k| self.bp_capture_bitboard[k]),
+                0x00FF_0000_0000_0000u64,
+                0xFF00u64,
+            )
+        } else {
+            (
+                &self.bp_moves,
+                &self.bp_capture_bitboard,
+                ksq.map_or(0, |k| self.wp_capture_bitboard[k]),
+                0xFF00u64,
+                0x00FF_0000_0000_0000u64,
+            )
+        };
+        for from in bits(&(ours[PAWN] & !seventh)) {
+            let uncover = uncovers & (1u64 << from) != 0;
+            for &to in &pushes[from] {
+                if empty & (1u64 << to) == 0 {
+                    continue;
+                }
+                if (1u64 << from) & second != 0 && from.abs_diff(to) == 16 {
+                    let mid = (from + to) / 2;
+                    if empty & (1u64 << mid) == 0 {
+                        continue;
+                    }
+                }
+                let m = Move::new(from, to, None);
+                let fork = (attacks[to] & pawn_targets).count_ones() >= 2;
+                let check = if uncover {
+                    tested(m)
+                } else {
+                    pawn_checks & (1u64 << to) != 0
+                };
+                if fork || check {
+                    out.push(m);
+                }
+            }
+        }
+
+        let knight_checks = ksq.map_or(0, |k| self.n_move_bitboard[k]);
+        for from in bits(&ours[KNIGHT]) {
+            let uncover = uncovers & (1u64 << from) != 0;
+            for &to in &self.n_moves[from] {
+                if empty & (1u64 << to) == 0 {
+                    continue;
+                }
+                let m = Move::new(from, to, None);
+                let fork = (self.n_move_bitboard[to] & knight_targets).count_ones() >= 2;
+                let check = if uncover {
+                    tested(m)
+                } else {
+                    knight_checks & (1u64 << to) != 0
+                };
+                if fork || check {
+                    out.push(m);
+                }
+            }
+        }
+
+        // Sliders give check only, never fork.
+        let slider = |out: &mut Vec<Move>, from: usize, reach: u64, checks: u64| {
+            let targets = reach & empty;
+            if uncovers & (1u64 << from) != 0 {
+                for to in bits(&targets) {
+                    let m = Move::new(from, to, None);
+                    if tested(m) {
+                        out.push(m);
+                    }
+                }
+            } else {
+                for to in bits(&(targets & checks)) {
+                    out.push(Move::new(from, to, None));
+                }
+            }
+        };
+        if ksq.is_some() {
+            for from in bits(&ours[BISHOP]) {
+                slider(
+                    out,
+                    from,
+                    self.gen_bishop_attacks_occ(from, occ),
+                    bishop_line,
+                );
+            }
+            for from in bits(&ours[ROOK]) {
+                slider(out, from, self.gen_rook_attacks_occ(from, occ), rook_line);
+            }
+            for from in bits(&ours[QUEEN]) {
+                let lines = rook_line | bishop_line;
+                slider(out, from, self.gen_rook_attacks_occ(from, occ), lines);
+                slider(out, from, self.gen_bishop_attacks_occ(from, occ), lines);
+            }
+            // The king: castling (its rook may give check), then uncovered checks.
+            for m in self.castling_moves(board).into_iter().flatten() {
+                if tested(m) {
+                    out.push(m);
+                }
+            }
+            for from in bits(&ours[KING]) {
+                if uncovers & (1u64 << from) != 0 {
+                    for &to in &self.k_moves[from] {
+                        let m = Move::new(from, to, None);
+                        if empty & (1u64 << to) != 0 && tested(m) {
+                            out.push(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The castling moves `gen_king_moves_into` generates, king side first.
+    fn castling_moves(&self, board: &Board) -> [Option<Move>; 2] {
+        let occ = board.pieces_occ[WHITE] | board.pieces_occ[BLACK];
+        let c = &board.castling_rights;
+        let (us, base, by_white, k_right, q_right) = if board.w_to_move {
+            (WHITE, 0, false, c.white_kingside, c.white_queenside)
+        } else {
+            (BLACK, 56, true, c.black_kingside, c.black_queenside)
+        };
+        if board.pieces[us][KING] & (1u64 << (base + 4)) == 0 {
+            return [None, None];
+        }
+        let safe = |sq: usize| !board.is_square_attacked(sq, by_white, self);
+        let king_side = k_right
+            && board.pieces[us][ROOK] & (1u64 << (base + 7)) != 0
+            && occ & ((1u64 << (base + 5)) | (1u64 << (base + 6))) == 0
+            && safe(base + 4)
+            && safe(base + 5)
+            && safe(base + 6);
+        let queen_side = q_right
+            && board.pieces[us][ROOK] & (1u64 << base) != 0
+            && occ & ((1u64 << (base + 1)) | (1u64 << (base + 2)) | (1u64 << (base + 3))) == 0
+            && safe(base + 4)
+            && safe(base + 3)
+            && safe(base + 2);
+        [
+            king_side.then(|| Move::new(base + 4, base + 6, None)),
+            queen_side.then(|| Move::new(base + 4, base + 2, None)),
+        ]
     }
 
     /// Appends the candidate moves out of check for the side to move, which

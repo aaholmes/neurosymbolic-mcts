@@ -173,6 +173,15 @@ fn main() {
     }
     POLICY_ONLY.set(policy_only).expect("set once");
 
+    if let Some(cfg) = kingfisher::search::quiescence::qsearch_config_from_args(&args)
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2);
+        })
+    {
+        kingfisher::search::quiescence::set_engine_config(cfg).unwrap();
+        eprintln!("quiescence search settings: {cfg:?}");
+    }
     let exact = ExactEndings::from_args(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2)

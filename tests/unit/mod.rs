@@ -43,6 +43,7 @@ mod pesto_qsearch_tests;
 mod policy_only_tests;
 mod policy_target_tests;
 mod position_classifier_tests;
+mod qsearch_faster_tests;
 mod qsearch_inputs_tests;
 mod qsearch_speed_tests;
 mod qsearch_tablebase_tests;

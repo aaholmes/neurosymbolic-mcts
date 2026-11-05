@@ -1,19 +1,26 @@
 //! Statistics for `qsearch_bench`, which times the extended quiescence search
 //! on logged self-play leaves.
 
-use crate::search::quiescence::ExtConfig;
+use crate::search::quiescence::{ExtConfig, TtScope};
 
-/// A pruning configuration from a name: `default`, `exact`, or `+`-joined parts
-/// added to the exact search among `probe1` (one threat probe per side per
-/// line), `delta<cp>` (delta pruning with that margin), `see` (skip losing
-/// captures) and `d<plies>` (depth limit).
+/// A pruning configuration from a name: `+`-joined parts applied in order to
+/// the exact search, among `default` (the default pruning), `probe1` (one
+/// threat probe per side per line), `delta<cp>` (delta pruning with that
+/// margin), `see` (skip losing captures), `d<plies>` (depth limit), `n<N>` (at
+/// most N positions per call), `tt` (a transposition table for each call) and
+/// `ttg` (one kept by each thread).
 pub fn parse_config(name: &str) -> Result<ExtConfig, String> {
-    if name == "default" {
-        return Ok(ExtConfig::default());
-    }
     let mut cfg = ExtConfig::exact();
     for part in name.split('+') {
         if part == "exact" {
+        } else if part == "default" {
+            cfg = ExtConfig::default();
+        } else if part == "tt" {
+            cfg.tt = Some(TtScope::Call);
+        } else if part == "ttg" {
+            cfg.tt = Some(TtScope::Thread);
+        } else if let Some(n) = part.strip_prefix('n') {
+            cfg.max_nodes = Some(n.parse().map_err(|_| format!("bad budget in {part:?}"))?);
         } else if part == "probe1" {
             cfg.probe_once = true;
         } else if part == "see" {

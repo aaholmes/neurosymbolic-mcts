@@ -281,7 +281,7 @@ pub fn forced_pesto_balance_counted(
 
 /// Checks if a quiet (non-capture) move is tactical: gives check, creates a pawn fork,
 /// or creates a knight fork.
-fn is_tactical_quiet(board: &Board, mv: Move, move_gen: &MoveGen) -> bool {
+pub fn is_tactical_quiet(board: &Board, mv: Move, move_gen: &MoveGen) -> bool {
     if board.gives_check(mv, move_gen) {
         return true;
     }
@@ -369,6 +369,20 @@ pub struct ExtConfig {
     pub see_prune: bool,
     /// Plies searched at most.
     pub max_depth: u8,
+    /// Positions searched at most in one call; past it, each new position
+    /// scores its static evaluation and the answer is marked not completed.
+    pub max_nodes: Option<u32>,
+    /// A transposition table, cleared for each call or kept by each thread.
+    pub tt: Option<TtScope>,
+}
+
+/// How long the quiescence search's transposition table keeps its entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtScope {
+    /// One search call.
+    Call,
+    /// Every call on the thread, for as long as the configuration stays the same.
+    Thread,
 }
 
 impl ExtConfig {
@@ -379,6 +393,8 @@ impl ExtConfig {
             delta_margin_cp: None,
             see_prune: false,
             max_depth: 20,
+            max_nodes: None,
+            tt: None,
         }
     }
 }
@@ -390,6 +406,39 @@ impl Default for ExtConfig {
             delta_margin_cp: Some(200),
             see_prune: true,
             max_depth: 20,
+            max_nodes: None,
+            tt: None,
+        }
+    }
+}
+
+static ENGINE_CONFIG: std::sync::OnceLock<ExtConfig> = std::sync::OnceLock::new();
+
+/// The quiescence settings the engine's search uses: `ExtConfig::default()`
+/// unless `set_engine_config` chose others.
+pub fn engine_config() -> ExtConfig {
+    ENGINE_CONFIG.get().copied().unwrap_or_default()
+}
+
+/// Sets the engine's quiescence settings for this process, once, before any search.
+pub fn set_engine_config(cfg: ExtConfig) -> Result<(), String> {
+    ENGINE_CONFIG.set(cfg).or_else(|old| {
+        if old == *ENGINE_CONFIG.get().unwrap() {
+            Ok(())
+        } else {
+            Err("the quiescence settings were already chosen".into())
+        }
+    })
+}
+
+/// The settings named by `--qsearch-config <name>` (names as in
+/// `qsearch_bench::parse_config`, e.g. `default+tt`), if the flag is given.
+pub fn qsearch_config_from_args(args: &[String]) -> Result<Option<ExtConfig>, String> {
+    match args.iter().position(|a| a == "--qsearch-config") {
+        None => Ok(None),
+        Some(i) => {
+            let name = args.get(i + 1).ok_or("--qsearch-config needs a value")?;
+            crate::search::qsearch_bench::parse_config(name).map(Some)
         }
     }
 }
@@ -409,7 +458,6 @@ pub fn ext_pesto_qsearch_counted(
     white_null_used: bool,
     black_null_used: bool,
 ) -> (i32, bool, u32, u8) {
-    let mut pool = Vec::new();
     let flags = ExtFlags {
         white_tactic_used,
         black_tactic_used,
@@ -417,9 +465,12 @@ pub fn ext_pesto_qsearch_counted(
         black_null_used,
     };
     let cfg = ExtConfig::default();
-    ext_node(
+    let mut pool = Ctx::new(&cfg, None);
+    let result = ext_node(
         &mut pool, board, move_gen, pesto, alpha, beta, max_depth, flags, &cfg, None,
-    )
+    );
+    pool.finish();
+    result
 }
 
 /// Which side has used its one quiet tactical move and its one null move.
@@ -466,6 +517,13 @@ impl MoveLists {
         self.captures.append(&mut self.promotions);
     }
 
+    /// The captures and promotions of `fill_captures`, and in `quiets` only the
+    /// quiet moves that give check or fork, in the order `fill` lists them.
+    fn fill_tactical(&mut self, board: &Board, move_gen: &MoveGen) {
+        self.fill_captures(board, move_gen);
+        move_gen.gen_tactical_quiets_into(board, &mut self.quiets);
+    }
+
     /// Captures and promotions in the order `gen_pseudo_legal_captures` returns them.
     fn sort_captures(&mut self, board: &Board, move_gen: &MoveGen) {
         self.captures
@@ -475,7 +533,7 @@ impl MoveLists {
 
 #[allow(clippy::too_many_arguments)]
 fn ext_node(
-    pool: &mut Vec<MoveLists>,
+    pool: &mut Ctx,
     board: &mut BoardStack,
     move_gen: &MoveGen,
     pesto: &PestoEval,
@@ -486,18 +544,176 @@ fn ext_node(
     cfg: &ExtConfig,
     tb: Option<&Tablebase>,
 ) -> (i32, bool, u32, u8) {
-    let mut lists = pool.pop().unwrap_or_default();
+    if pool.nodes_left == 0 {
+        // Out of budget: the static score, not searched.
+        let s = pesto.pst_eval_cp(board.current_state()).clamp(alpha, beta);
+        return (s, false, 0, 0);
+    }
+    pool.nodes_left -= 1;
+    let key = pool
+        .tt
+        .as_ref()
+        .map(|_| tt_key(board.current_state(), max_depth, flags));
+    if let (Some(tt), Some(key)) = (pool.tt.as_ref(), key) {
+        if let Some(hit) = tt.probe(key, alpha, beta) {
+            return hit;
+        }
+    }
+    let mut lists = pool.lists.pop().unwrap_or_default();
     let result = ext_body(
         &mut lists, pool, board, move_gen, pesto, alpha, beta, max_depth, flags, cfg, tb,
     );
-    pool.push(lists);
+    pool.lists.push(lists);
+    if let (Some(tt), Some(key)) = (pool.tt.as_mut(), key) {
+        tt.store(key, alpha, beta, result);
+    }
     result
+}
+
+/// What one quiescence search call shares across its positions: the move
+/// lists for each depth, the positions it may still search, and its
+/// transposition table.
+struct Ctx {
+    lists: Vec<MoveLists>,
+    nodes_left: u32,
+    tt: Option<Box<Tt>>,
+}
+
+thread_local! {
+    static TT: std::cell::RefCell<Option<Box<Tt>>> = const { std::cell::RefCell::new(None) };
+}
+
+impl Ctx {
+    /// Takes this thread's table (if the configuration asks for one) for the call.
+    fn new(cfg: &ExtConfig, tb: Option<&Tablebase>) -> Ctx {
+        let tt = cfg.tt.map(|scope| {
+            let mut t = TT
+                .with(|c| c.borrow_mut().take())
+                .unwrap_or_else(|| Box::new(Tt::new(TT_BITS)));
+            // Entries from another configuration (or tables) answer differently.
+            let config = config_key(cfg, tb);
+            if scope == TtScope::Call || t.config != config {
+                t.epoch = t.epoch.wrapping_add(1);
+                t.config = config;
+            }
+            t
+        });
+        Ctx {
+            lists: Vec::new(),
+            nodes_left: cfg.max_nodes.unwrap_or(u32::MAX),
+            tt,
+        }
+    }
+
+    /// Returns the table to the thread for its next call.
+    fn finish(self) {
+        if let Some(t) = self.tt {
+            TT.with(|c| *c.borrow_mut() = Some(t));
+        }
+    }
+}
+
+const TT_BITS: u32 = 12;
+
+#[derive(Clone, Copy, Default)]
+struct TtEntry {
+    key: u64,
+    epoch: u32,
+    score: i32,
+    nodes_bound: u8,
+    completed: bool,
+    depth_used: u8,
+}
+
+const BOUND_EXACT: u8 = 0;
+const BOUND_LOWER: u8 = 1;
+const BOUND_UPPER: u8 = 2;
+
+/// A transposition table for the quiescence search: a position's score with
+/// its bound, keyed by the position, the plies left and the side flags.
+struct Tt {
+    entries: Vec<TtEntry>,
+    mask: u64,
+    /// Entries from other epochs are empty.
+    epoch: u32,
+    config: u64,
+}
+
+impl Tt {
+    fn new(bits: u32) -> Tt {
+        Tt {
+            entries: vec![TtEntry::default(); 1 << bits],
+            mask: (1u64 << bits) - 1,
+            epoch: 0,
+            config: 0,
+        }
+    }
+
+    /// A stored answer usable in the window (alpha, beta), as the search
+    /// itself would return it (clamped to the window).
+    fn probe(&self, key: u64, alpha: i32, beta: i32) -> Option<(i32, bool, u32, u8)> {
+        let e = &self.entries[(key & self.mask) as usize];
+        if e.key != key || e.epoch != self.epoch {
+            return None;
+        }
+        let score = match e.nodes_bound {
+            BOUND_EXACT => e.score.clamp(alpha, beta),
+            BOUND_LOWER if e.score >= beta => beta,
+            BOUND_UPPER if e.score <= alpha => alpha,
+            _ => return None,
+        };
+        Some((score, e.completed, 1, e.depth_used))
+    }
+
+    fn store(&mut self, key: u64, alpha: i32, beta: i32, result: (i32, bool, u32, u8)) {
+        let (score, completed, _, depth_used) = result;
+        let bound = if score <= alpha {
+            BOUND_UPPER
+        } else if score >= beta {
+            BOUND_LOWER
+        } else {
+            BOUND_EXACT
+        };
+        self.entries[(key & self.mask) as usize] = TtEntry {
+            key,
+            epoch: self.epoch,
+            score,
+            nodes_bound: bound,
+            completed,
+            depth_used,
+        };
+    }
+}
+
+/// The table key: the position's hash mixed with the plies left and the flags.
+fn tt_key(board: &Board, max_depth: u8, flags: ExtFlags) -> u64 {
+    let f = (flags.white_tactic_used as u64)
+        | (flags.black_tactic_used as u64) << 1
+        | (flags.white_null_used as u64) << 2
+        | (flags.black_null_used as u64) << 3
+        | (max_depth as u64) << 4;
+    board.zobrist_hash ^ (f + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+/// Identifies a configuration and set of tables, so a thread's table is
+/// emptied when either changes.
+fn config_key(cfg: &ExtConfig, tb: Option<&Tablebase>) -> u64 {
+    let parts = [
+        cfg.probe_once as u64,
+        cfg.delta_margin_cp.map_or(u64::MAX, |m| m as u64),
+        cfg.see_prune as u64,
+        cfg.max_depth as u64,
+        tb.map_or(0, |t| t as *const Tablebase as u64),
+    ];
+    parts.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| {
+        (h ^ x).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn ext_body(
     lists: &mut MoveLists,
-    pool: &mut Vec<MoveLists>,
+    pool: &mut Ctx,
     board: &mut BoardStack,
     move_gen: &MoveGen,
     pesto: &PestoEval,
@@ -512,6 +728,15 @@ fn ext_body(
     if let Some(v) = tb.and_then(|t| t.probe_value(board.current_state())) {
         return ((v * TABLEBASE_WIN_CP as f32) as i32, true, 1, 0);
     }
+    // The hash is needed only by the transposition table.
+    let hashed = cfg.tt.is_some();
+    let make = |board: &mut BoardStack, mv: Move| {
+        if hashed {
+            board.make_move_without_history(mv)
+        } else {
+            board.make_move_unhashed_without_history(mv)
+        }
+    };
     let ExtFlags {
         white_tactic_used,
         black_tactic_used,
@@ -575,16 +800,20 @@ fn ext_body(
             if opp_tactic_used {
                 lists.fill_captures(board.current_state(), move_gen);
             } else {
-                lists.fill(board.current_state(), move_gen);
+                lists.fill_tactical(board.current_state(), move_gen);
             }
             lists.sort_captures(board.current_state(), move_gen);
+            // The opponent, to move after the pass, cannot be in check.
+            let pins = board.current_state().pins_in_check(move_gen, false);
             let mut legal_cap_count = 0;
             for &cap in &lists.captures {
-                board.make_move_without_history(cap);
-                if !board.current_state().is_legal(move_gen) {
-                    board.undo_move_without_history();
+                if !board
+                    .current_state()
+                    .is_legal_with_pins(cap, &pins, move_gen)
+                {
                     continue;
                 }
+                make(board, cap);
                 let (score, child_completed, child_nodes, child_depth) = ext_node(
                     pool,
                     board,
@@ -614,14 +843,13 @@ fn ext_body(
             // One opponent quiet tactical move (check or fork) if its budget allows
             if !opp_tactic_used {
                 for &mv in &lists.quiets {
-                    if !is_tactical_quiet(board.current_state(), mv, move_gen) {
+                    if !board
+                        .current_state()
+                        .is_legal_with_pins(mv, &pins, move_gen)
+                    {
                         continue;
                     }
-                    board.make_move_without_history(mv);
-                    if !board.current_state().is_legal(move_gen) {
-                        board.undo_move_without_history();
-                        continue;
-                    }
+                    make(board, mv);
                     let child_flags = ExtFlags {
                         white_tactic_used: !stm_is_white || white_tactic_used,
                         black_tactic_used: stm_is_white || black_tactic_used,
@@ -684,9 +912,12 @@ fn ext_body(
                     let second_cap_score = capture_scores[1].0;
 
                     board.make_null_move_without_history();
-                    board.make_move_without_history(second_cap);
+                    make(board, second_cap);
                     let recapture_threat = if board.current_state().is_legal(move_gen) {
                         let recapture = Move::new(best_victim_sq, second_cap.to(), None);
+                        // Copied, not made in place: the second capture may have
+                        // taken the piece on that square, and the copy then keeps
+                        // the original search's answer.
                         let recaptured_board = board.current_state().apply_move_to_board(recapture);
                         // From the opponent's side (to move); negate for the passer.
                         let recapture_eval = pesto.pst_eval_cp(&recaptured_board);
@@ -724,12 +955,14 @@ fn ext_body(
             return (alpha, false, nodes, 0);
         }
         lists.fill_captures(board.current_state(), move_gen);
-        let has_legal_capture = lists.captures.iter().any(|&cap| {
-            board.make_move_without_history(cap);
-            let legal = board.current_state().is_legal(move_gen);
-            board.undo_move_without_history();
-            legal
-        });
+        let b = board.current_state();
+        let has_legal_capture = !lists.captures.is_empty() && {
+            let pins = b.pins_in_check(move_gen, false);
+            lists
+                .captures
+                .iter()
+                .any(|&cap| b.is_legal_with_pins(cap, &pins, move_gen))
+        };
         return (alpha, !has_legal_capture, nodes, 0);
     }
 
@@ -740,21 +973,27 @@ fn ext_body(
         black_tactic_used
     };
 
-    // Quiet moves are needed when in check (every evasion) or for a quiet tactic
-    if in_check || !stm_tactic_used {
+    // Every move is needed in check (all are evasions); otherwise quiet checks
+    // and forks only while this side may still play one
+    if in_check {
         lists.fill(board.current_state(), move_gen);
+    } else if !stm_tactic_used {
+        lists.fill_tactical(board.current_state(), move_gen);
     } else {
         lists.fill_captures(board.current_state(), move_gen);
     }
+    let pins = board.current_state().pins_in_check(move_gen, in_check);
     if in_check {
         // In check: every pseudo-legal move is an evasion (free, no budget consumed)
         let mut any_legal = false;
         for &mv in lists.captures.iter().chain(lists.quiets.iter()) {
-            board.make_move_without_history(mv);
-            if !board.current_state().is_legal(move_gen) {
-                board.undo_move_without_history();
+            if !board
+                .current_state()
+                .is_legal_with_pins(mv, &pins, move_gen)
+            {
                 continue;
             }
+            make(board, mv);
             any_legal = true;
             let (score, child_completed, child_nodes, child_depth) = ext_node(
                 pool,
@@ -811,11 +1050,13 @@ fn ext_body(
                     continue;
                 }
             }
-            board.make_move_without_history(capture);
-            if !board.current_state().is_legal(move_gen) {
-                board.undo_move_without_history();
+            if !board
+                .current_state()
+                .is_legal_with_pins(capture, &pins, move_gen)
+            {
                 continue;
             }
+            make(board, capture);
             let (score, child_completed, child_nodes, child_depth) = ext_node(
                 pool,
                 board,
@@ -846,14 +1087,13 @@ fn ext_body(
         // 2. Quiet checks and forks, which use the moving side's budget
         if !stm_tactic_used {
             for &mv in &lists.quiets {
-                if !is_tactical_quiet(board.current_state(), mv, move_gen) {
+                if !board
+                    .current_state()
+                    .is_legal_with_pins(mv, &pins, move_gen)
+                {
                     continue;
                 }
-                board.make_move_without_history(mv);
-                if !board.current_state().is_legal(move_gen) {
-                    board.undo_move_without_history();
-                    continue;
-                }
+                make(board, mv);
                 let child_flags = ExtFlags {
                     white_tactic_used: stm_is_white || white_tactic_used,
                     black_tactic_used: !stm_is_white || black_tactic_used,
@@ -946,7 +1186,7 @@ pub fn forced_ext_pesto_balance_tables(
         white_null_used: false,
         black_null_used: false,
     };
-    let mut pool = Vec::new();
+    let mut pool = Ctx::new(cfg, tb);
     let (score_cp, completed, nodes, depth) = ext_node(
         &mut pool,
         board,
@@ -959,6 +1199,7 @@ pub fn forced_ext_pesto_balance_tables(
         cfg,
         tb,
     );
+    pool.finish();
     (score_cp as f32 / 100.0, completed, nodes, depth)
 }
 

@@ -22,6 +22,25 @@ pub struct Board {
     pub(crate) zobrist_hash: u64,
     pub(crate) eval: i32,
     pub game_phase: i32,
+    /// The piece on each square, as colour * 6 + piece type, or `NO_PIECE`.
+    pub(crate) squares: [u8; 64],
+    /// The PeSTO piece-square sums, White's minus Black's (middlegame,
+    /// endgame), and the game phase, kept up to date as pieces move.
+    pub(crate) pst: [i32; 2],
+    pub(crate) phase: i32,
+}
+
+/// An empty square in `Board::squares`.
+pub(crate) const NO_PIECE: u8 = 12;
+
+/// The side to move's pinned pieces, for testing many moves' legality
+/// without making them (`Board::is_legal_with_pins`).
+#[derive(Clone, Copy, Debug)]
+pub struct Pins {
+    pinned: u64,
+    /// The side to move's king square, or 64 without a king.
+    king_sq: u8,
+    in_check: bool,
 }
 
 pub const KOTH_CENTER: u64 = 0x0000001818000000; // d4, e4, d5, e5
@@ -45,6 +64,9 @@ impl Board {
             zobrist_hash: 0,
             eval: 0,
             game_phase: 24,
+            squares: [NO_PIECE; 64],
+            pst: [0; 2],
+            phase: 0,
         };
         board.init_position();
         board.zobrist_hash = board.compute_zobrist_hash();
@@ -101,6 +123,32 @@ impl Board {
         for color in [WHITE, BLACK] {
             self.pieces_occ[color] = self.pieces[color].iter().fold(0, |acc, &x| acc | x);
         }
+        self.rebuild_squares();
+    }
+
+    /// Fills `squares`, `pst` and `phase` from the piece bitboards.
+    pub(crate) fn rebuild_squares(&mut self) {
+        self.squares = [NO_PIECE; 64];
+        self.pst = [0; 2];
+        self.phase = 0;
+        for color in [WHITE, BLACK] {
+            for piece in 0..6 {
+                for sq in crate::bits::bits(&self.pieces[color][piece]) {
+                    self.squares[sq] = (color * 6 + piece) as u8;
+                    self.add_pst(color, piece, sq, 1);
+                }
+            }
+        }
+    }
+
+    /// Adds (`sign` 1) or removes (-1) a piece's share of `pst` and `phase`.
+    #[inline(always)]
+    pub(crate) fn add_pst(&mut self, color: usize, piece: usize, sq: usize, sign: i32) {
+        use crate::eval_constants::{GAMEPHASE_INC, PST_EG, PST_MG};
+        let s = if color == WHITE { sign } else { -sign };
+        self.pst[0] += s * PST_MG[color][piece][sq];
+        self.pst[1] += s * PST_EG[color][piece][sq];
+        self.phase += sign * GAMEPHASE_INC[piece];
     }
 
     /// Creates a new Bitboard from a FEN (Forsyth–Edwards Notation) string.
@@ -188,12 +236,7 @@ impl Board {
                 board.fullmove_number = parts[5].parse::<u8>().unwrap();
             }
         }
-        for color in 0..2 {
-            board.pieces_occ[color] = board.pieces[color][PAWN];
-            for piece in 1..6 {
-                board.pieces_occ[color] |= board.pieces[color][piece];
-            }
-        }
+        board.update_occupancy();
         board.zobrist_hash = board.compute_zobrist_hash();
         board
     }
@@ -250,34 +293,17 @@ impl Board {
     ///
     /// An Option containing the piece type if a piece is present, or None if the square is empty.
     pub fn get_piece(&self, sq_ind: usize) -> Option<(usize, usize)> {
-        let bit = sq_ind_to_bit(sq_ind);
-        if bit & self.pieces[WHITE][PAWN] != 0 {
-            Some((WHITE, PAWN))
-        } else if bit & self.pieces[BLACK][PAWN] != 0 {
-            Some((BLACK, PAWN))
-        } else if bit & self.pieces[WHITE][KNIGHT] != 0 {
-            Some((WHITE, KNIGHT))
-        } else if bit & self.pieces[BLACK][KNIGHT] != 0 {
-            Some((BLACK, KNIGHT))
-        } else if bit & self.pieces[WHITE][BISHOP] != 0 {
-            Some((WHITE, BISHOP))
-        } else if bit & self.pieces[BLACK][BISHOP] != 0 {
-            Some((BLACK, BISHOP))
-        } else if bit & self.pieces[WHITE][ROOK] != 0 {
-            Some((WHITE, ROOK))
-        } else if bit & self.pieces[BLACK][ROOK] != 0 {
-            Some((BLACK, ROOK))
-        } else if bit & self.pieces[WHITE][QUEEN] != 0 {
-            Some((WHITE, QUEEN))
-        } else if bit & self.pieces[BLACK][QUEEN] != 0 {
-            Some((BLACK, QUEEN))
-        } else if bit & self.pieces[WHITE][KING] != 0 {
-            Some((WHITE, KING))
-        } else if bit & self.pieces[BLACK][KING] != 0 {
-            Some((BLACK, KING))
-        } else {
+        let code = self.squares[sq_ind];
+        if code == NO_PIECE {
             None
+        } else {
+            Some(((code / 6) as usize, (code % 6) as usize))
         }
+    }
+
+    /// The position's Zobrist hash, kept up to date as moves are made.
+    pub fn zobrist_hash(&self) -> u64 {
+        self.zobrist_hash
     }
 
     /// Returns the bitboard for a specific piece type and color.
@@ -815,6 +841,88 @@ impl Board {
     ///
     /// This is functionally equivalent to `apply_move_to_board(mv).is_legal(move_gen)`
     /// but avoids the board clone and hash recomputation.
+    /// The side to move's pieces pinned to its king by an enemy slider.
+    pub fn pins(&self, move_gen: &MoveGen) -> Pins {
+        let in_check = self.is_check(move_gen);
+        self.pins_in_check(move_gen, in_check)
+    }
+
+    /// `pins` when whether the side to move is in check is already known; in
+    /// check, every move is tested as `is_legal_after_move` does.
+    pub fn pins_in_check(&self, move_gen: &MoveGen, in_check: bool) -> Pins {
+        let us = if self.w_to_move { WHITE } else { BLACK };
+        let them = 1 - us;
+        let king = self.pieces[us][KING];
+        if king == 0 || in_check {
+            let king_sq = if king == 0 {
+                64
+            } else {
+                king.trailing_zeros() as u8
+            };
+            return Pins {
+                pinned: 0,
+                king_sq,
+                in_check,
+            };
+        }
+        let ksq = king.trailing_zeros() as usize;
+        let occ = self.pieces_occ[WHITE] | self.pieces_occ[BLACK];
+        let theirs = self.pieces_occ[them];
+        let t = &self.pieces[them];
+        let mut pinned = 0u64;
+        let rook_snipers = move_gen.gen_rook_attacks_occ(ksq, theirs) & (t[ROOK] | t[QUEEN]);
+        let bishop_snipers = move_gen.gen_bishop_attacks_occ(ksq, theirs) & (t[BISHOP] | t[QUEEN]);
+        for s in crate::bits::bits(&rook_snipers) {
+            let between = move_gen.gen_rook_attacks_occ(ksq, 1u64 << s)
+                & move_gen.gen_rook_attacks_occ(s, 1u64 << ksq)
+                & occ;
+            if between.count_ones() == 1 {
+                pinned |= between & self.pieces_occ[us];
+            }
+        }
+        for s in crate::bits::bits(&bishop_snipers) {
+            let between = move_gen.gen_bishop_attacks_occ(ksq, 1u64 << s)
+                & move_gen.gen_bishop_attacks_occ(s, 1u64 << ksq)
+                & occ;
+            if between.count_ones() == 1 {
+                pinned |= between & self.pieces_occ[us];
+            }
+        }
+        Pins {
+            pinned,
+            king_sq: ksq as u8,
+            in_check: false,
+        }
+    }
+
+    /// `is_legal_after_move` for a pseudo-legal move, with the side's pins
+    /// from `pins`: a move by a piece that is not the king, not pinned and
+    /// not capturing en passant is legal when not in check, and a pinned
+    /// piece may move along the line through its king. Other moves are tested
+    /// as `is_legal_after_move` does.
+    #[inline]
+    pub fn is_legal_with_pins(&self, mv: Move, pins: &Pins, move_gen: &MoveGen) -> bool {
+        let from_bit = 1u64 << mv.from();
+        let ksq = pins.king_sq as usize;
+        if pins.in_check
+            || ksq == 64
+            || ksq == mv.from()
+            || (self.en_passant == Some(mv.to() as u8)
+                && self.pieces[if self.w_to_move { WHITE } else { BLACK }][PAWN] & from_bit != 0)
+        {
+            return self.is_legal_after_move(mv, move_gen);
+        }
+        if pins.pinned & from_bit == 0 {
+            return true;
+        }
+        let line = if move_gen.gen_rook_attacks_occ(ksq, 0) & from_bit != 0 {
+            move_gen.gen_rook_attacks_occ(ksq, 0) & move_gen.gen_rook_attacks_occ(mv.from(), 0)
+        } else {
+            move_gen.gen_bishop_attacks_occ(ksq, 0) & move_gen.gen_bishop_attacks_occ(mv.from(), 0)
+        };
+        line & (1u64 << mv.to()) != 0
+    }
+
     pub fn is_legal_after_move(&self, mv: Move, move_gen: &MoveGen) -> bool {
         let stm = if self.w_to_move { WHITE } else { BLACK };
         let opp = 1 - stm;

@@ -273,3 +273,24 @@ impl Default for EvalWeights {
         }
     }
 }
+
+/// The piece-square scores `PestoEval` uses, piece value included, as
+/// [colour][piece][square]: middlegame then endgame.
+pub const PST_MG: [[[i32; 64]; 6]; 2] = pst(&MG_VALUE, &MG_PESTO_TABLE);
+pub const PST_EG: [[[i32; 64]; 6]; 2] = pst(&EG_VALUE, &EG_PESTO_TABLE);
+
+const fn pst(value: &[i32; 6], table: &[[i32; 64]; 6]) -> [[[i32; 64]; 6]; 2] {
+    let mut out = [[[0; 64]; 6]; 2];
+    let mut p = 0;
+    while p < 6 {
+        let mut sq = 0;
+        while sq < 64 {
+            // The tables are written from Black's side: White's square is flipped.
+            out[0][p][sq] = value[p] + table[p][sq ^ 56];
+            out[1][p][sq] = value[p] + table[p][sq];
+            sq += 1;
+        }
+        p += 1;
+    }
+    out
+}

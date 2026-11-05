@@ -91,6 +91,19 @@ impl PestoEval {
     /// Uses only PST values (base piece values + positional adjustments),
     /// no bishop pair, king safety, mobility, or other bonus terms.
     pub fn pst_eval_cp(&self, board: &Board) -> i32 {
+        // The board keeps these sums for the standard tables, which every
+        // PestoEval uses (the weights change only the full evaluation).
+        let mg_phase = std::cmp::min(24, board.phase);
+        let score = (board.pst[0] * mg_phase + board.pst[1] * (24 - mg_phase)) / 24;
+        if board.w_to_move {
+            score
+        } else {
+            -score
+        }
+    }
+
+    /// `pst_eval_cp` counted from every piece on the board.
+    pub fn pst_eval_cp_full(&self, board: &Board) -> i32 {
         let mut mg: [i32; 2] = [0, 0];
         let mut eg: [i32; 2] = [0, 0];
         let mut game_phase: i32 = 0;

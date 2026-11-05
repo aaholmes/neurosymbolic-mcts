@@ -54,7 +54,10 @@ except the first.
 - **The classical search made cheaper.** The mate search is 3.7× faster at its default depth
   ([docs/MATE_SEARCH.md](docs/MATE_SEARCH.md)). The quiescence search is 2.2× faster with
   identical scores and about 24× faster with standard pruning, which changes the value of 4% of
-  positions by more than 0.1 ([docs/QUIESCENCE.md](docs/QUIESCENCE.md)). Profiling it also found
+  positions by more than 0.1. Generating only the checking and forking quiet moves, testing legality
+from pinned pieces, and keeping a square-to-piece table and the piece-square score on the board
+make it a further 1.56× faster with the same answers, and the policy-only engine's self-play 26%
+faster ([docs/QUIESCENCE.md](docs/QUIESCENCE.md)). Profiling it also found
   a bug in static exchange evaluation (the estimate of whether a capture wins material), which had
   looked for recaptures among the wrong side's pieces. The pruning matters for speed: with the
   unpruned search, self-play ran at 260 moves per second, with the GPU busy 26% of the time.
@@ -67,7 +70,7 @@ position in standard chess, on one CPU thread for Tiers 1 and 2:
 | Tier | Method | Result | Cost |
 |---|---|---|---|
 | 1 | Exact search for a forced mate in up to 5 moves in which every attacking move gives check, and endgame tables (Syzygy) for positions with 5 or fewer pieces | Exact win, loss or draw | 12 µs (mate search) |
-| 2 | Quiescence search: captures, promotions, replies to check and one quiet check or fork per side in each line are played out, threats are tested by letting the side to move pass, and the quiet position is scored with a standard hand-tuned evaluation (PeSTO); a line that reaches a position the endgame tables cover ends with their result | Heuristic score ΔM | 150 µs (median 24 µs) |
+| 2 | Quiescence search: captures, promotions, replies to check and one quiet check or fork per side in each line are played out, threats are tested by letting the side to move pass, and the quiet position is scored with a standard hand-tuned evaluation (PeSTO); a line that reaches a position the endgame tables cover ends with their result | Heuristic score ΔM | 88 µs (median 14 µs) |
 | 3 | Neural network (a 6-block residual network, about 2M parameters) | Learned value and move priors | 13 µs of GPU time in a batch of 128 |
 
 A position solved in Tier 1 is terminal, so its exact value propagates up the tree without being
