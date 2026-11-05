@@ -246,8 +246,10 @@ def freeze_heads(model, train_heads):
     print(f"Frozen {count} parameters (train_heads={train_heads})")
 
 
-def batch_loss(model, boards, scalars, values, policies, device, disable_material=False):
-    """Training loss on one batch: policy KL divergence plus value squared error.
+def batch_loss(model, boards, scalars, values, policies, device, disable_material=False,
+               value_weight=1.0):
+    """Training loss on one batch: policy KL divergence plus value squared error,
+    the latter times value_weight (0 trains the policy alone).
 
     A position whose value target is NaN (a side position, with no game result)
     adds to the policy loss only. Returns (loss, policy_loss, value_loss, k): the
@@ -268,7 +270,7 @@ def batch_loss(model, boards, scalars, values, policies, device, disable_materia
     value_loss_per = F.mse_loss(pred_value, torch.nan_to_num(values), reduction='none').squeeze(1)
     value_loss = (value_loss_per * has_value).sum() / has_value.sum().clamp(min=1)
     policy_loss = policy_loss_per.mean()
-    return policy_loss + value_loss, policy_loss, value_loss, k
+    return policy_loss + value_weight * value_loss, policy_loss, value_loss, k
 
 
 def make_optimizer(model, optimizer_name, lr):

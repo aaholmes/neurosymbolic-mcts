@@ -10,8 +10,8 @@ use kingfisher::egtb::{Ending, ExactEndings};
 use kingfisher::eval::PestoEval;
 use kingfisher::mcts::sprt::{SprtConfig, SprtResult, SprtState};
 use kingfisher::mcts::{
-    qsearch_inputs, tactical_mcts_search_with_tt, InferenceServer, MctsNode, QSearchVariant,
-    TacticalMctsConfig,
+    qsearch_inputs, tactical_mcts_search_with_tt, InferenceServer, MctsNode, PolicyTiming,
+    QSearchVariant, TacticalMctsConfig,
 };
 use kingfisher::move_generation::MoveGen;
 use kingfisher::move_types::Move;
@@ -261,6 +261,7 @@ pub fn play_evaluation_game_with_servers(
         randomize_move_order: true,
         qsearch_variant,
         leaves_per_iteration: CANDIDATE_LEAVES.load(Ordering::Relaxed),
+        policy_only: policy_only(0),
         ..Default::default()
     });
 
@@ -281,6 +282,7 @@ pub fn play_evaluation_game_with_servers(
         randomize_move_order: true,
         qsearch_variant,
         leaves_per_iteration: CURRENT_LEAVES.load(Ordering::Relaxed),
+        policy_only: policy_only(1),
         ..Default::default()
     });
 
@@ -908,6 +910,12 @@ static CURRENT_C_PUCT: AtomicU64 = AtomicU64::new(0x3FF6_9FBE_76C8_B439);
 
 /// Leaves per MCTS iteration for each side, set once from the command line in main.
 static CANDIDATE_LEAVES: AtomicU32 = AtomicU32::new(1);
+/// Each side's policy-only search (--candidate-policy-only, --current-policy-only).
+static POLICY_ONLY: std::sync::OnceLock<[Option<PolicyTiming>; 2]> = std::sync::OnceLock::new();
+
+fn policy_only(side: usize) -> Option<PolicyTiming> {
+    POLICY_ONLY.get().and_then(|p| p[side])
+}
 /// Set once from the mate search flags and --syzygy in main; off when unset (as in tests).
 static EXACT: std::sync::OnceLock<ExactEndings> = std::sync::OnceLock::new();
 
@@ -987,6 +995,20 @@ fn main() {
             .max(1)
     };
     CANDIDATE_LEAVES.store(leaves("--candidate-leaves"), Ordering::Relaxed);
+    let side_policy = |flag: &str| {
+        PolicyTiming::from_flag(&args, flag).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2)
+        })
+    };
+    let sides = [
+        side_policy("--candidate-policy-only"),
+        side_policy("--current-policy-only"),
+    ];
+    if sides.iter().any(Option::is_some) {
+        eprintln!("policy-only search (candidate, current): {sides:?}");
+    }
+    POLICY_ONLY.set(sides).unwrap();
     CURRENT_LEAVES.store(leaves("--current-leaves"), Ordering::Relaxed);
 
     // Both sides use the same exact endings, as in their training.

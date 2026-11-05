@@ -194,15 +194,19 @@ pub enum PolicyTiming {
 impl PolicyTiming {
     /// `--policy-only leaf|revisit` from command-line arguments; None without the flag.
     pub fn from_args(args: &[String]) -> Result<Option<Self>, String> {
-        let Some(i) = args.iter().position(|a| a == "--policy-only") else {
+        Self::from_flag(args, "--policy-only")
+    }
+
+    /// `flag leaf|revisit` from command-line arguments, e.g. a match's
+    /// `--candidate-policy-only`; None without the flag.
+    pub fn from_flag(args: &[String], flag: &str) -> Result<Option<Self>, String> {
+        let Some(i) = args.iter().position(|a| a == flag) else {
             return Ok(None);
         };
         match args.get(i + 1).map(String::as_str) {
             Some("leaf") => Ok(Some(Self::AtLeaf)),
             Some("revisit") => Ok(Some(Self::OnRevisit)),
-            other => Err(format!(
-                "--policy-only needs leaf or revisit, not {other:?}"
-            )),
+            other => Err(format!("{flag} needs leaf or revisit, not {other:?}")),
         }
     }
 }

@@ -256,3 +256,21 @@ fn no_early_stop_in_a_balanced_position() {
     assert_eq!(s.early_stops, 0);
     assert_eq!(root.borrow().visits, 300);
 }
+
+#[test]
+fn each_side_of_a_match_can_be_policy_only() {
+    let a = args("evaluate_models a b 10 100 --current-policy-only revisit");
+    assert_eq!(
+        PolicyTiming::from_flag(&a, "--current-policy-only"),
+        Ok(Some(PolicyTiming::OnRevisit))
+    );
+    assert_eq!(
+        PolicyTiming::from_flag(&a, "--candidate-policy-only"),
+        Ok(None)
+    );
+    assert!(PolicyTiming::from_flag(
+        &args("x --candidate-policy-only no"),
+        "--candidate-policy-only"
+    )
+    .is_err());
+}

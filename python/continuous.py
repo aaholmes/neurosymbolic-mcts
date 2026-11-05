@@ -75,6 +75,9 @@ class ContinuousConfig:
     mate_quiet: int = 0
     syzygy_path: str = ""
     syzygy_set: str = ""  # none, 5, 5+, 6 or 6+; "" = every table in syzygy_path
+    # Leaf values from the classical search alone; the network trains only its policy
+    policy_only: bool = False
+    qsearch_config: str = ""  # quiescence settings for self-play (e.g. default+tt); "" = default
     self_play_bin: str = ""  # a built self_play binary; "" = cargo run
     inference_batch_size: int = 128
     inference_workers: int = 4
@@ -215,7 +218,7 @@ class Trainer:
 
     def __init__(self, model, weights_dir, optimizer="muon", lr=0.02, batch_size=256,
                  keep_published=5, device="", seed=0, augment=True, disable_material=False,
-                 precision="f32", channels_last=False):
+                 precision="f32", channels_last=False, value_weight=1.0):
         if precision not in PRECISIONS:
             raise ValueError(f"precision must be one of {sorted(PRECISIONS)}, not {precision!r}")
         self.precision = precision
@@ -235,6 +238,7 @@ class Trainer:
         self.keep_published = keep_published
         self.augment = augment
         self.disable_material = disable_material
+        self.value_weight = value_weight
         self.rng = np.random.default_rng(seed)
         self.steps = 0
         self.version = -1
@@ -271,7 +275,7 @@ class Trainer:
                 loss, p_loss, v_loss, k = batch_loss(
                     self.model, boards, torch.from_numpy(scalars),
                     torch.from_numpy(values), torch.from_numpy(policies),
-                    self.device, self.disable_material)
+                    self.device, self.disable_material, self.value_weight)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -317,7 +321,8 @@ def make_trainer(cfg, weights_dir):
                    batch_size=cfg.batch_size, keep_published=cfg.keep_published,
                    device=cfg.device, seed=cfg.seed, augment=cfg.augment,
                    disable_material=not cfg.enable_material, precision=cfg.precision,
-                   channels_last=cfg.channels_last)
+                   channels_last=cfg.channels_last,
+                   value_weight=0.0 if cfg.policy_only else 1.0)
 
 
 def self_play_command(cfg, pointer, first_weights, games_dir):
@@ -349,6 +354,10 @@ def self_play_command(cfg, pointer, first_weights, games_dir):
     ]
     if cfg.qsearch != "extended":
         cmd += ["--qsearch", cfg.qsearch]
+    if cfg.qsearch_config:
+        cmd += ["--qsearch-config", cfg.qsearch_config]
+    if cfg.policy_only:
+        cmd += ["--policy-only", "revisit"]
     return cmd + exact_ending_args(cfg)
 
 

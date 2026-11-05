@@ -470,3 +470,46 @@ class TestSidePositions:
                                      "/w/p.txt", "/w/c.pth", "/d/g")
         assert cmd[cmd.index("--side-fraction") + 1] == "0.5"
         assert cmd[cmd.index("--side-two-moves") + 1] == "0.25"
+
+
+class TestPolicyOnly:
+    """The policy-only engine: leaf values from the classical search alone, so
+    the network trains only its policy."""
+
+    def test_self_play_runs_the_policy_only_search(self):
+        assert not cont.ContinuousConfig().policy_only
+        cmd = cont.self_play_command(cont.ContinuousConfig(policy_only=True),
+                                     "/w/p.txt", "/w/c.pth", "/d/g")
+        assert cmd[cmd.index("--policy-only") + 1] == "revisit"
+        plain = cont.self_play_command(cont.ContinuousConfig(), "/w/p.txt", "/w/c.pth", "/d/g")
+        assert "--policy-only" not in plain
+
+    def test_a_value_weight_of_zero_trains_the_policy_alone(self, tmp):
+        from train import batch_loss
+        cfg = cont.ContinuousConfig(num_blocks=1, hidden_dim=16, device="cpu", optimizer="adam",
+                                    precision="f32", channels_last=False)
+        trainer = cont.make_trainer(cfg, os.path.join(tmp, "w"))
+        n = 4
+        boards = torch.randn((n, 17, 8, 8))
+        values = torch.ones((n, 1))
+        loss, p, v, _ = batch_loss(trainer.model, boards, torch.zeros((n, 2)), values,
+                                   torch.full((n, 4672), 1.0 / 4672), "cpu", value_weight=0.0)
+        assert v.item() > 0.0  # still reported
+        assert torch.allclose(loss, p)
+
+    def test_the_policy_only_trainer_gives_the_value_no_weight(self, tmp):
+        base = dict(num_blocks=1, hidden_dim=16, device="cpu", optimizer="adam",
+                    precision="f32", channels_last=False)
+        assert cont.make_trainer(cont.ContinuousConfig(**base), os.path.join(tmp, "a")).value_weight == 1.0
+        policy = cont.make_trainer(cont.ContinuousConfig(policy_only=True, **base),
+                                   os.path.join(tmp, "b"))
+        assert policy.value_weight == 0.0
+
+
+def test_the_quiescence_settings_reach_self_play():
+    assert cont.ContinuousConfig().qsearch_config == ""
+    plain = cont.self_play_command(cont.ContinuousConfig(), "/w/p.txt", "/w/c.pth", "/d/g")
+    assert "--qsearch-config" not in plain
+    cmd = cont.self_play_command(cont.ContinuousConfig(qsearch_config="default+tt"),
+                                 "/w/p.txt", "/w/c.pth", "/d/g")
+    assert cmd[cmd.index("--qsearch-config") + 1] == "default+tt"

@@ -10,6 +10,9 @@ just as checkmate does. The engine is then rewarded for reaching such a position
 checkmate, so the training signal is denser, and unlike a learned reward model it cannot be gamed.
 Only positions no exact method can evaluate go to the neural network.
 
+In a matched test, this engine trained for one hour rated 131 Elo [116, 146] above an
+AlphaZero-style engine that relies on the network alone, given the same settings and training time.
+
 Where no exact answer exists, classical search still informs the network. A quiescence search plays
 out the forcing moves in a position, mainly captures, and scores the quiet position that results.
 That score is added to the network's output as a prior and is also one of its inputs. Forced
@@ -25,42 +28,45 @@ theorem prover.
 
 ## Results so far
 
-All numbers below are for standard chess on one RTX 5060 Ti GPU and a 16-core Ryzen 9 7950X CPU,
-except the first.
+All numbers are for standard chess on one RTX 5060 Ti GPU and a 16-core Ryzen 9 7950X CPU.
 
-- **A first result, in a chess variant where exact solutions are common** (King of the Hill, where
-  moving the king to the centre also wins): after 18 generations of self-play the engine rates about
-  625 Elo above a network-only baseline trained for 28. It is preliminary: compute was not matched,
-  the two runs are linked by a single 100-game match, and the untrained engine already plays about
-  as well as the trained baseline, so part of the gap is a head start
-  ([docs/VARIANT_RESULT.md](docs/VARIANT_RESULT.md)).
-- **Training settings, tuned in 1-hour runs** of the network-only engine with forced mates and
-  endgame tables as exact endings. The best of 43 runs rates 233 ± 8 Elo above the default
-  settings, and four others are within 41 Elo of it. They train on each position 0.65–1.2 times
-  rather than 4, and most search 100 positions per move rather than 200, so more of the GPU goes to
-  self-play: up to 3.3 times as many positions in the hour. Ratings follow the number of positions
-  generated (about +106 Elo per doubling), not the number of training steps. Runs with similar
-  settings differed by 50–120 Elo, so the order within the top group is not yet established.
+- **Matched comparison: the full engine is 131 Elo stronger than the network alone** after the
+  same training. Each of the three engines (below) trained from scratch for one hour with the same
+  settings, two seeds each, then all six played a round robin (100 games per pair, 100 simulations
+  per move, each searching as it was trained). Differences of arm means, with 95% intervals from
+  resampling games:
+
+  | Comparison | Elo difference |
+  |---|---|
+  | Full engine − network only | +131 [+116, +146] |
+  | Policy-only engine − network only | −18 [−29, −6] |
+  | Full engine − policy-only engine | +149 [+135, +163] |
+
+  The two seeds of each engine differed by 12–25 Elo, so the full engine's lead is far larger than
+  the run-to-run spread; the policy-only engine's deficit is not. The policy-only engine generated
+  three times as many positions in the hour (21–22M compared with 7.5M), and still did not catch up.
+  Limits: the intervals cover game noise, not seed variance (two seeds per arm); the matches fixed
+  simulations per move, not time, so the full engine spent more CPU per move; most games were drawn
+  by repetition, which compresses rating gaps; and part of the lead may be a head start, since the
+  classical score lets the untrained full engine play reasonably. Settings were tuned for the
+  network-only engine, which favours it.
+- **Training settings, tuned in 1-hour runs** of the network-only engine. The best of 43 runs
+  rates 233 ± 8 Elo above the default settings. They train on each position 0.65–1.2 times rather
+  than 4, and search 100 positions per move rather than 200, so more of the GPU goes to self-play:
+  up to 3.3 times as many positions in the hour. Ratings follow the number of positions generated
+  (about +106 Elo per doubling), not the number of training steps. Two reruns of the best settings
+  with new seeds averaged 4 Elo above it [−14, +21].
 - **Self-play speed**: 765 moves per second with the network alone (200 simulations per move), up
   from about 65, through custom GPU kernels, half precision, CUDA graphs and many search threads
   sharing a few batching threads ([docs/THROUGHPUT.md](docs/THROUGHPUT.md)).
-- **The policy-only engine runs twice as fast in self-play.** Its leaf values need no network, so
-  a node's priors are requested only when a simulation first has to choose among its children.
-  This gives the same search with 4.5 network calls per move instead of 29.7, and 1,942 moves per
-  second instead of 998 (untrained network, 200 simulations per move, two runs per arm, identical
-  games). Only about 2% of simulations need new priors, probably because the forced first visits
-  to every root move and every capture, check and fork create many leaves that are never
-  revisited. The CPU is then the limit (91% busy) while the GPU is busy 29% of the time.
-- **The classical search made cheaper.** The mate search is 3.7× faster at its default depth
-  ([docs/MATE_SEARCH.md](docs/MATE_SEARCH.md)). The quiescence search is 2.2× faster with
-  identical scores and about 24× faster with standard pruning, which changes the value of 4% of
-  positions by more than 0.1. Generating only the checking and forking quiet moves, testing legality
-from pinned pieces, and keeping a square-to-piece table and the piece-square score on the board
-make it a further 1.56× faster with the same answers, and the policy-only engine's self-play 26%
-faster ([docs/QUIESCENCE.md](docs/QUIESCENCE.md)). Profiling it also found
-  a bug in static exchange evaluation (the estimate of whether a capture wins material), which had
-  looked for recaptures among the wrong side's pieces. The pruning matters for speed: with the
-  unpruned search, self-play ran at 260 moves per second, with the GPU busy 26% of the time.
+- **Cheaper classical search.** The mate search is 3.7× faster at its default depth
+  ([docs/MATE_SEARCH.md](docs/MATE_SEARCH.md)). The quiescence search is 3.4× faster with
+  identical scores, by generating only checking and forking quiet moves, testing legality from
+  pinned pieces, and keeping the piece on each square and the piece-square score up to date on the
+  board; standard pruning makes it about 24× faster but changes 4% of values by more than 0.1, so
+  it is optional ([docs/QUIESCENCE.md](docs/QUIESCENCE.md)). The policy-only engine needs no
+  network value, so it makes 4.5 network calls per move instead of 29.7 and is CPU-bound: 2,266
+  moves per second with 6-piece endgame tables, 26% faster than before the exact speed-ups.
 
 ## How the search works
 
@@ -176,21 +182,16 @@ GPU time as 25 simulations per move.
 
 In order of priority:
 
-1. **Where the policy-only engine spends its CPU time** (in progress): a profile of self-play,
-   split into quiescence search, mate search, node expansion, tactical move detection and thread
-   scheduling, run with 6-piece endgame tables added (68 GB, held in RAM). The largest cost is the
-   next to cut.
-2. **Whether the pruned quiescence search changes playing strength**: a match of the tiered engine
-   with exact and pruned quiescence, same network and seeds.
-3. **A 12-hour continuous run of the network-only engine** with the best 1-hour settings, its
-   checkpoints rated hourly with a fixed opponent, to see whether the 1-hour settings hold.
-4. **Repeat the top 1-hour runs with new seeds**, since runs with similar settings differed by more
-   than two default runs with different seeds did.
-5. **Three matched 4-hour runs from scratch, two seeds each**: the network alone, the full tiered
-   engine, and the tiered engine training only the policy (below), rated with a fixed opponent and
-   with bootstrap intervals on the differences. This measures whether exact endings and the
-   classical score help training, and whether a learned value is worth its noise.
-6. **Only if the policy-only engine is close or ahead**: tune its settings, then a 12-hour run.
+1. **Separate the head start from the training effect**: rate the untrained full engine using the
+   trained network-only engines. If it is already close to +131, the classical score helps play
+   more than it helps learning.
+2. **Matched by time, not simulations**: replay the round robin with each side given the same
+   wall-clock time per move, since the full engine's classical search costs CPU per simulation.
+3. **Longer matched runs (4 hours, three seeds per engine)**, to see whether the full engine's
+   lead grows or shrinks as the network improves, with intervals over seeds as well as games.
+4. **Tune the full engine's own settings**, since the current ones were tuned for the network alone.
+5. **Whether the pruned quiescence search changes playing strength**: the full engine with exact
+   and pruned quiescence, same network and seeds.
 
 Further experiments (full searches on only some moves, network size, Gumbel AlphaZero, a mixed
 value target) are listed in [docs/TRAINING.md](docs/TRAINING.md#next-experiments).
@@ -207,10 +208,10 @@ minimax search. How high that ceiling is has not been measured. A learned evalua
 Stockfish's NNUE would raise it, but would no longer be learning from scratch on limited compute
 ([docs/TRAINING.md](docs/TRAINING.md#long-term-goal-training-only-the-policy)).
 
-The policy-only engine is implemented (`self_play --policy-only revisit`) and needs about a sixth of
-the network calls (Results). With the GPU mostly idle, it could afford a policy network several
-times larger, and cheaper CPU-side search would raise its speed directly. Both pay off only if the
-matched runs show the engine is competitive.
+The policy-only engine is implemented (`self_play --policy-only revisit`). In the matched
+one-hour comparison it trailed the network-only engine by 18 Elo despite three times as much data,
+so its ceiling is the open question; a learned evaluation, or a larger policy network using the
+idle GPU, would be the next things to try.
 
 Later directions: network layers that connect squares a knight or queen move apart, and applying
 the tiered search to mathematical reasoning, with an automated theorem prover as the exact method.
@@ -239,7 +240,7 @@ About 1,400 tests in Rust, CUDA and Python. All build options, settings, binarie
 - [docs/MATE_SEARCH.md](docs/MATE_SEARCH.md): the mate search speed-ups and move orders tried
 - [docs/QUIESCENCE.md](docs/QUIESCENCE.md): the quiescence search speed-ups and pruning
 - [docs/TRAINING.md](docs/TRAINING.md): both training loops, the tuning results and the long-term goal
-- [docs/VARIANT_RESULT.md](docs/VARIANT_RESULT.md): the first result, with all ratings
+- [docs/VARIANT_RESULT.md](docs/VARIANT_RESULT.md): an early, unmatched result in King of the Hill, a chess variant
 - [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md): what was tried, what failed, and why
 
 ## License
