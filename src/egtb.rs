@@ -31,14 +31,89 @@ impl std::str::FromStr for TableReads {
     }
 }
 
+/// Which tables to use: every table with up to `pieces` pieces (kings
+/// included), and with `plus` also the (pieces + 1)-piece rook and pawn
+/// endings close in material: only rooks and pawns, the same number of rooks
+/// on each side (none or one), and at most two pawns difference. Written `5`,
+/// `5+`, `6`, `6+`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableSet {
+    pub pieces: u32,
+    pub plus: bool,
+}
+
+/// The number of Syzygy tables with exactly n pieces, n = 3..=7.
+const TABLES_WITH_PIECES: [u32; 8] = [0, 0, 0, 5, 30, 110, 365, 1001];
+
+impl std::str::FromStr for TableSet {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let (n, plus) = match s.strip_suffix('+') {
+            Some(n) => (n, true),
+            None => (s, false),
+        };
+        let bad =
+            || format!("table set must be one of 3..7, optionally with +, up to 6+; not {s:?}");
+        let pieces: u32 = n.parse().map_err(|_| bad())?;
+        if !(3..=7).contains(&pieces) || (plus && pieces == 7) {
+            return Err(bad());
+        }
+        Ok(Self { pieces, plus })
+    }
+}
+
+impl std::fmt::Display for TableSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", self.pieces, if self.plus { "+" } else { "" })
+    }
+}
+
+impl TableSet {
+    /// The names of the (pieces + 1)-piece tables `plus` adds, sorted.
+    pub fn extra_tables(&self) -> Vec<String> {
+        if !self.plus {
+            return Vec::new();
+        }
+        let mut names = Vec::new();
+        for rooks in 0..=1u32 {
+            let Some(pawns) = (self.pieces + 1).checked_sub(2 + 2 * rooks) else {
+                continue;
+            };
+            for behind in 0..=pawns / 2 {
+                let ahead = pawns - behind;
+                if ahead - behind <= 2 {
+                    let side = |p: u32| {
+                        format!("K{}{}", "R".repeat(rooks as usize), "P".repeat(p as usize))
+                    };
+                    names.push(format!("{}v{}", side(ahead), side(behind)));
+                }
+            }
+        }
+        names.sort();
+        names
+    }
+
+    /// Whether a position with this material is in the set.
+    fn allows(&self, m: &Material) -> bool {
+        let count = 2 + m.iter().map(|&c| c as u32).sum::<u32>();
+        // Queens, rooks, bishops, knights, pawns; then the other side.
+        let rook_pawn_only = [0, 2, 3, 5, 7, 8].iter().all(|&i| m[i] == 0) && m[1] == m[6];
+        let close = m[1] <= 1 && rook_pawn_only && m[4].abs_diff(m[9]) <= 2;
+        count <= self.pieces || (self.plus && count == self.pieces + 1 && close)
+    }
+}
+
 /// A directory of Syzygy WDL tables, shared between threads.
 #[derive(Clone)]
 pub struct Tablebase {
     tables: Arc<shakmaty_syzygy::Tablebase<Chess>>,
     max_pieces: u32,
     reads: TableReads,
-    /// The material of every loaded table, from each side's view.
+    /// The material of every table in use, from each side's view.
     materials: Arc<std::collections::HashSet<Material>>,
+    /// The number of loaded tables with each piece count.
+    loaded_with_pieces: [u32; 8],
+    set: Option<TableSet>,
 }
 
 /// Counts of queens, rooks, bishops, knights and pawns: the side to compare
@@ -105,6 +180,7 @@ impl Tablebase {
         let mut max_pieces = 0;
         // Bare kings are a draw without any table.
         let mut materials = std::collections::HashSet::from([[0u8; 10]]);
+        let mut loaded_with_pieces = [0u32; 8];
         for dir in dirs.split(':').filter(|d| !d.is_empty()) {
             tables
                 .add_directory(dir)
@@ -117,7 +193,11 @@ impl Tablebase {
                 let Some(table) = name.strip_suffix(".rtbw") else {
                     continue;
                 };
-                max_pieces = max_pieces.max(table.replace('v', "").len() as u32);
+                let pieces = table.replace('v', "").len() as u32;
+                max_pieces = max_pieces.max(pieces);
+                if let Some(slot) = loaded_with_pieces.get_mut(pieces as usize) {
+                    *slot += 1;
+                }
                 materials.extend(table_materials(table).into_iter().flatten());
             }
         }
@@ -129,7 +209,46 @@ impl Tablebase {
             max_pieces,
             reads,
             materials: Arc::new(materials),
+            loaded_with_pieces,
+            set: None,
         })
+    }
+
+    /// These tables limited to `set`. An error if a table the set needs is
+    /// not loaded: every table with up to `set.pieces` pieces, and the extra
+    /// endings for a `+` set.
+    pub fn restricted_to(self, set: TableSet) -> Result<Self, String> {
+        for n in 3..=set.pieces as usize {
+            if self.loaded_with_pieces[n] < TABLES_WITH_PIECES[n] {
+                return Err(format!(
+                    "table set {set} needs all {} {n}-piece tables; {} are loaded",
+                    TABLES_WITH_PIECES[n], self.loaded_with_pieces[n]
+                ));
+            }
+        }
+        for name in set.extra_tables() {
+            let m = table_materials(&name).expect("a valid table name")[0];
+            if !self.materials.contains(&m) {
+                return Err(format!("table set {set} needs {name}.rtbw"));
+            }
+        }
+        let materials = self
+            .materials
+            .iter()
+            .filter(|m| set.allows(m))
+            .copied()
+            .collect();
+        Ok(Self {
+            max_pieces: set.pieces + set.plus as u32,
+            materials: Arc::new(materials),
+            set: Some(set),
+            ..self
+        })
+    }
+
+    /// The set these tables are limited to, or None for every loaded table.
+    pub fn set(&self) -> Option<TableSet> {
+        self.set
     }
 
     /// How the table files are read.
@@ -310,12 +429,26 @@ impl ExactEndings {
                 .parse()?,
             None => TableReads::default(),
         };
-        let tablebase = match args.iter().position(|a| a == "--syzygy") {
-            Some(i) => {
-                let dir = args.get(i + 1).ok_or("--syzygy needs a directory")?;
-                Some(Tablebase::open_with(dir, reads)?)
-            }
+        let set = match args.iter().position(|a| a == "--syzygy-set") {
+            Some(i) => match args.get(i + 1).map(String::as_str) {
+                None => return Err("--syzygy-set needs none, 5, 5+, 6 or 6+".into()),
+                Some("none") => Some(None),
+                Some(s) => Some(Some(s.parse::<TableSet>()?)),
+            },
             None => None,
+        };
+        let tablebase = match (args.iter().position(|a| a == "--syzygy"), set) {
+            (_, Some(None)) => None,
+            (Some(i), set) => {
+                let dir = args.get(i + 1).ok_or("--syzygy needs a directory")?;
+                let tb = Tablebase::open_with(dir, reads)?;
+                match set.flatten() {
+                    Some(set) => Some(tb.restricted_to(set)?),
+                    None => Some(tb),
+                }
+            }
+            (None, Some(Some(_))) => return Err("--syzygy-set needs --syzygy".into()),
+            (None, None) => None,
         };
         let has = |flag: &str| args.iter().any(|a| a == flag);
         let quiet = number_after(args, "--mate-quiet")?.unwrap_or(0);
@@ -409,7 +542,14 @@ impl ExactEndings {
                 }
             },
             match &self.tablebase {
-                Some(t) => format!("up to {} pieces", t.max_pieces()),
+                Some(t) => match t.set() {
+                    Some(TableSet { pieces, plus: true }) => format!(
+                        "up to {pieces} pieces plus {}-piece rook and pawn endings",
+                        pieces + 1
+                    ),
+                    Some(TableSet { pieces, .. }) => format!("up to {pieces} pieces"),
+                    None => format!("up to {} pieces", t.max_pieces()),
+                },
                 None => "off".into(),
             }
         )

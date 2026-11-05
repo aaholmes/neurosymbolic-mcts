@@ -505,3 +505,190 @@ fn a_partial_set_of_seven_piece_tables_covers_only_its_own_material() {
     assert!(tb.covers(&mirrored));
     assert_eq!(tb.probe_value(&mirrored), tb.probe_value(&krppvkrp));
 }
+
+// Table sets: every table up to N pieces, optionally plus the (N+1)-piece rook
+// and pawn endings with equal rooks (none or one each) and at most two pawns
+// difference.
+
+fn set(s: &str) -> kingfisher::egtb::TableSet {
+    s.parse().unwrap()
+}
+
+#[test]
+fn table_sets_are_parsed() {
+    use kingfisher::egtb::TableSet;
+    assert_eq!(
+        set("5"),
+        TableSet {
+            pieces: 5,
+            plus: false
+        }
+    );
+    assert_eq!(
+        set("5+"),
+        TableSet {
+            pieces: 5,
+            plus: true
+        }
+    );
+    assert_eq!(
+        set("6+"),
+        TableSet {
+            pieces: 6,
+            plus: true
+        }
+    );
+    for bad in ["", "+", "x", "6++", "2", "8", "8+"] {
+        assert!(bad.parse::<TableSet>().is_err(), "{bad}");
+    }
+    assert_eq!(set("5+").to_string(), "5+");
+    assert_eq!(set("6").to_string(), "6");
+}
+
+#[test]
+fn the_extra_endings_are_rook_and_pawn_endings_close_in_material() {
+    assert_eq!(
+        set("5+").extra_tables(),
+        vec!["KPPPvKP", "KPPvKPP", "KRPPvKR", "KRPvKRP"]
+    );
+    assert_eq!(set("6+").extra_tables(), vec!["KPPPvKPP", "KRPPvKRP"]);
+    assert!(set("6").extra_tables().is_empty());
+}
+
+const SIX_DIR: &str = "/data/syzygy6";
+const SEVEN_DIR: &str = "/data/syzygy7";
+
+fn have(dir: &str, table: &str) -> bool {
+    std::path::Path::new(dir)
+        .join(format!("{table}.rtbw"))
+        .exists()
+}
+
+/// The 5-, 6- and (if present) 7-piece directories, or None to skip.
+fn all_dirs(with_seven: bool) -> Option<String> {
+    tables()?;
+    if !have(SIX_DIR, "KRPvKRP") || (with_seven && !have(SEVEN_DIR, "KRPPvKRP")) {
+        eprintln!("skipped: 6- or 7-piece tables missing");
+        return None;
+    }
+    let mut d = format!("/data/syzygy:{SIX_DIR}");
+    if with_seven {
+        d += &format!(":{SEVEN_DIR}");
+    }
+    Some(d)
+}
+
+fn opened(dirs: &str, s: &str) -> Result<Tablebase, String> {
+    Tablebase::open(dirs)?.restricted_to(set(s))
+}
+
+fn b(fen: &str) -> Board {
+    Board::new_from_fen(fen)
+}
+
+const KRPVKR: &str = "8/5k2/8/8/8/1r4P1/4R3/6K1 w - - 0 1";
+const KRPVKRP: &str = "8/5k2/6p1/8/8/1r4P1/4R3/6K1 w - - 0 1";
+const KRPPVKR: &str = "8/5k2/8/8/8/1r3PP1/4R3/6K1 w - - 0 1";
+const KPPVKPP: &str = "8/5k2/6pp/8/8/6PP/8/6K1 w - - 0 1";
+const KPPPVKP: &str = "8/5k2/7p/8/8/5PPP/8/6K1 w - - 0 1";
+const KPPPPVK: &str = "8/5k2/8/8/8/4PPPP/8/6K1 w - - 0 1";
+const KRRVKRP: &str = "8/5k2/6p1/8/8/1r6/4R3/R5K1 w - - 0 1";
+const KRPVKBP: &str = "8/5k2/6p1/8/8/1b4P1/4R3/6K1 w - - 0 1";
+const KRPPVKRP: &str = "8/5k2/6p1/8/8/1r3PP1/4R3/6K1 w - - 0 1";
+const KPPPVKPP: &str = "8/5k2/6p1/7p/8/5PPP/8/6K1 w - - 0 1";
+const KRRPVKRP: &str = "8/5k2/6p1/8/8/1r4P1/4R3/R5K1 w - - 0 1";
+
+#[test]
+fn up_to_five_pieces_leaves_out_six_piece_tables_that_are_loaded() {
+    let Some(dirs) = all_dirs(false) else { return };
+    let tb = opened(&dirs, "5").unwrap();
+    assert_eq!(tb.max_pieces(), 5);
+    assert!(tb.covers(&b(KRPVKR)));
+    assert!(tb.probe_value(&b(KRPVKR)).is_some());
+    for fen in [KRPVKRP, KPPVKPP, KRPVKBP] {
+        assert!(!tb.covers(&b(fen)), "{fen}");
+        assert_eq!(tb.probe_value(&b(fen)), None, "{fen}");
+    }
+}
+
+#[test]
+fn five_plus_adds_only_the_close_six_piece_rook_and_pawn_endings() {
+    let Some(dirs) = all_dirs(false) else { return };
+    let tb = opened(&dirs, "5+").unwrap();
+    assert_eq!(tb.max_pieces(), 6);
+    for fen in [KRPVKR, KRPVKRP, KRPPVKR, KPPVKPP, KPPPVKP] {
+        assert!(tb.covers(&b(fen)), "{fen}");
+        assert!(tb.probe_value(&b(fen)).is_some(), "{fen}");
+    }
+    // Four pawns up, a rook more, or a bishop: not included.
+    for fen in [KPPPPVK, KRRVKRP, KRPVKBP] {
+        assert!(!tb.covers(&b(fen)), "{fen}");
+    }
+    // Either colour may be the side ahead.
+    assert!(tb.covers(&b("6k1/4r3/1R3pp1/8/8/8/5K2/8 b - - 0 1")));
+}
+
+#[test]
+fn six_and_six_plus() {
+    let Some(dirs) = all_dirs(true) else { return };
+    let six = opened(&dirs, "6").unwrap();
+    assert_eq!(six.max_pieces(), 6);
+    assert!(six.covers(&b(KRPVKBP)));
+    assert!(!six.covers(&b(KRPPVKRP)));
+    let plus = opened(&dirs, "6+").unwrap();
+    assert_eq!(plus.max_pieces(), 7);
+    for fen in [KRPVKBP, KRPPVKRP, KPPPVKPP] {
+        assert!(plus.covers(&b(fen)), "{fen}");
+        assert!(plus.probe_value(&b(fen)).is_some(), "{fen}");
+    }
+    assert!(!plus.covers(&b(KRRPVKRP)));
+}
+
+#[test]
+fn a_set_whose_tables_are_not_loaded_is_an_error() {
+    let Some(_) = tables() else { return };
+    assert!(opened("/data/syzygy", "5").is_ok());
+    assert!(opened("/data/syzygy", "6").is_err());
+    assert!(opened("/data/syzygy", "5+").is_err());
+    let Some(dirs) = all_dirs(false) else { return };
+    assert!(opened(&dirs, "6+").is_err());
+    // A 7-piece directory holding only the two extra tables is enough for 6+.
+    if let Some(dirs) = all_dirs(true) {
+        assert!(opened(&dirs, "6+").is_ok());
+        assert!(opened(&dirs, "7").is_err());
+    }
+}
+
+#[test]
+fn the_table_set_is_read_from_the_command_line() {
+    use kingfisher::egtb::ExactEndings;
+    assert!(ExactEndings::from_args(&args("x --syzygy-set")).is_err());
+    assert!(ExactEndings::from_args(&args("x --syzygy-set 9")).is_err());
+    // A set other than none needs the directories.
+    assert!(ExactEndings::from_args(&args("x --syzygy-set 5")).is_err());
+    let none = ExactEndings::from_args(&args("x --syzygy-set none")).unwrap();
+    assert!(none.tablebase.is_none());
+    let Some(dirs) = all_dirs(false) else { return };
+    let e = |s: &str| ExactEndings::from_args(&args(&format!("x --syzygy {dirs} {s}")));
+    assert!(e("--syzygy-set none").unwrap().tablebase.is_none());
+    let five = e("--syzygy-set 5").unwrap();
+    assert_eq!(five.tablebase.as_ref().unwrap().max_pieces(), 5);
+    assert_eq!(five.tablebase.as_ref().unwrap().set(), Some(set("5")));
+    assert!(
+        five.describe().contains("tablebase up to 5 pieces"),
+        "{}",
+        five.describe()
+    );
+    let plus = e("--syzygy-set 5+").unwrap();
+    assert!(plus.tablebase.as_ref().unwrap().covers(&b(KRPVKRP)));
+    assert!(
+        plus.describe()
+            .contains("plus 6-piece rook and pawn endings"),
+        "{}",
+        plus.describe()
+    );
+    // Without --syzygy-set every loaded table is used.
+    let all = e("").unwrap();
+    assert_eq!(all.tablebase.as_ref().unwrap().set(), None);
+    assert_eq!(all.tablebase.unwrap().max_pieces(), 6);
+}

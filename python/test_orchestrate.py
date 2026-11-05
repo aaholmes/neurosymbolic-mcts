@@ -1339,6 +1339,16 @@ class TestExactEndings:
             for flag, value in [("--mate-in", "2"), ("--mate-checks", "6"),
                                 ("--mate-quiet", "1"), ("--syzygy", "/data/syzygy")]:
                 assert cmd[cmd.index(flag) + 1] == value
+            assert "--syzygy-set" not in cmd
+
+    def test_table_set_is_passed_on(self, tmp_workspace):
+        """A table set (none, 5, 5+, 6 or 6+) is a hyperparameter passed to every game."""
+        assert TrainingConfig().syzygy_set == ""
+        orch = self._make_orch(tmp_workspace, syzygy_path="/a:/b", syzygy_set="5+")
+        for cmd in self._commands(orch):
+            assert cmd[cmd.index("--syzygy-set") + 1] == "5+"
+        with patch("sys.argv", ["orchestrate.py", "--syzygy-path", "/a", "--syzygy-set", "6"]):
+            assert TrainingConfig.from_args().syzygy_set == "6"
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

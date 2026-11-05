@@ -74,6 +74,7 @@ class ContinuousConfig:
     mate_checks: int = 5
     mate_quiet: int = 0
     syzygy_path: str = ""
+    syzygy_set: str = ""  # none, 5, 5+, 6 or 6+; "" = every table in syzygy_path
     self_play_bin: str = ""  # a built self_play binary; "" = cargo run
     inference_batch_size: int = 128
     inference_workers: int = 4

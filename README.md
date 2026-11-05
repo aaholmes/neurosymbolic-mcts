@@ -219,7 +219,8 @@ cargo build --release --features cudnn        # needs CUDA (nvcc >= 12.8 for RTX
 ./target/release/self_play 1920 200 out/ model.pt false false false none --syzygy /data/syzygy
 # --syzygy takes several directories separated by colons, e.g. /data/syzygy:/data/syzygy6
 # tables are read through memory maps (--syzygy-reads pread reads them by system call instead);
-# --no-qsearch-tables keeps the quiescence search from probing them
+# --no-qsearch-tables keeps the quiescence search from probing them; --syzygy-set none, 5, 5+, 6 or 6+
+# limits the tables used (N+ adds the N+1-piece rook and pawn endings with equal rooks, at most two pawns apart)
 python python/continuous.py --work-dir runs/c1 --replay-ratio 4 --window 200000
 cargo test                                    # fast Rust tests (~50 s)
 cd python && python -m pytest                 # training pipeline

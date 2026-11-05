@@ -174,6 +174,12 @@ class TestSelfPlayCommand:
         assert "/d/games" in cmd and "/w/cont_0.pth" in cmd and "200" in cmd
         assert cmd[cmd.index("--mate-checks") + 1] == "7"
         assert cmd[cmd.index("--syzygy") + 1] == "/tb"
+        assert "--syzygy-set" not in cmd
+
+    def test_the_table_set_reaches_self_play(self):
+        cfg = cont.ContinuousConfig(syzygy_path="/tb", syzygy_set="6+")
+        cmd = cont.self_play_command(cfg, "/w/published.txt", "/w/cont_0.pth", "/d/games")
+        assert cmd[cmd.index("--syzygy-set") + 1] == "6+"
 
 
 FAKE_SELF_PLAY = r'''

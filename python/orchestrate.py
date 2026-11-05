@@ -40,6 +40,7 @@ class TrainingConfig:
     mate_checks: int = 5
     mate_quiet: int = 0
     syzygy_path: str = ""
+    syzygy_set: str = ""  # none, 5, 5+, 6 or 6+; "" = every table in syzygy_path
 
     # Replay buffer (sliding window — old data evicted FIFO)
     buffer_capacity: int = 100_000
@@ -136,6 +137,9 @@ class TrainingConfig:
                             help="Quiet moves allowed per line in the --mate-checks search (default 0)")
         parser.add_argument("--syzygy-path", type=str, default="",
                             help="Directory of Syzygy WDL tables: covered positions get exact values and end games")
+        parser.add_argument("--syzygy-set", type=str, default="",
+                            help="Tables to use: none, 5, 5+, 6 or 6+ (N+: also the N+1-piece rook and "
+                                 "pawn endings close in material); default every table in --syzygy-path")
         parser.add_argument("--qsearch", type=str, default="extended",
                             choices=["pe", "cap1", "extended"],
                             help="Q-search variant: pe (principal exchange), cap1, extended (default)")
@@ -175,6 +179,7 @@ class TrainingConfig:
             mate_checks=args.mate_checks,
             mate_quiet=args.mate_quiet,
             syzygy_path=args.syzygy_path,
+            syzygy_set=args.syzygy_set,
             buffer_capacity=args.buffer_capacity,
             buffer_dir=args.buffer_dir,
             minibatches_per_generation=args.minibatches_per_gen,
@@ -292,7 +297,7 @@ def get_rust_env():
 
 def exact_ending_args(config):
     """The Rust flags for the mate search and Syzygy tables, from a config with
-    mate_in, mate_checks, mate_quiet and syzygy_path."""
+    mate_in, mate_checks, mate_quiet, syzygy_path and syzygy_set."""
     c = config
     if c.mate_in <= 0 and c.mate_checks <= 0:
         args = ["--no-mate-search"]
@@ -302,6 +307,8 @@ def exact_ending_args(config):
             args += ["--mate-quiet", str(c.mate_quiet)]
     if c.syzygy_path:
         args += ["--syzygy", c.syzygy_path]
+    if getattr(c, "syzygy_set", ""):
+        args += ["--syzygy-set", c.syzygy_set]
     return args
 
 
