@@ -359,7 +359,10 @@ pub fn play_evaluation_game_with_servers(
                     &PestoEval::new(),
                     qsearch_variant,
                     enable_material,
-                    exact.tablebase.as_ref().filter(|_| !enable_koth),
+                    exact
+                        .tablebase
+                        .as_ref()
+                        .filter(|_| exact.qsearch_tables && !enable_koth),
                 );
                 let (q_result, qsearch_completed) = (q.score, q.completed);
                 let material_scalar = q_result;

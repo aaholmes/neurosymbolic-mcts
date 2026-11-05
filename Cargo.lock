@@ -60,9 +60,9 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
 name = "arrayvec"
-version = "0.5.2"
+version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "ascii"
@@ -140,9 +140,9 @@ dependencies = [
 
 [[package]]
 name = "btoi"
-version = "0.4.3"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd6407f73a9b8b6162d8a2ef999fe6afd7cc15902ebf42c5cd296addf17e0ad"
+checksum = "3b5ab9db53bcda568284df0fd39f6eac24ad6f7ba7ff1168b9e76eba6576b976"
 dependencies = [
  "num-traits",
 ]
@@ -1309,6 +1309,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1515,17 +1521,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
-]
-
-[[package]]
-name = "positioned-io-preview"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aef08a4c617244dc541127a9c5dc88e4571eb78402b0355371c55bee5c540abd"
-dependencies = [
- "byteorder",
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -1964,31 +1959,32 @@ dependencies = [
 
 [[package]]
 name = "shakmaty"
-version = "0.18.0"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f580db5b2b7aa5903b997ef6309c461dd30015f0b61e748a8082f84f245889a7"
+checksum = "f8377322ffda8ac1d6c24af5d4c2cacaf6e059c5581c6082f222364ec759578c"
 dependencies = [
  "arrayvec",
- "bitflags 1.3.2",
+ "bitflags 2.13.2",
  "btoi",
+ "nohash-hasher",
+ "serde",
 ]
 
 [[package]]
 name = "shakmaty-syzygy"
-version = "0.15.0"
+version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20c23f78c84f33214e31abd5dcff00e01465a6fc9d91da1e4f9f4951f5f63f27"
+checksum = "24b16b1750dfcbbdee863037af8bebdc37e8f66fbb988e48c6e3e1576b2934fb"
 dependencies = [
  "arrayvec",
- "bitflags 1.3.2",
+ "bitflags 2.13.2",
  "byteorder",
- "itertools 0.10.5",
- "lazy_static",
- "num-integer",
+ "libc",
+ "memmap2",
  "once_cell",
- "positioned-io-preview",
- "rustc-hash 1.1.0",
+ "rustc-hash 2.1.3",
  "shakmaty",
+ "tracing",
 ]
 
 [[package]]

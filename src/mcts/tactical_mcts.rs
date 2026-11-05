@@ -172,6 +172,8 @@ pub struct TacticalMctsConfig {
     /// network evaluation. Not used in King of the Hill, where the tables'
     /// results do not hold.
     pub tablebase: Option<crate::egtb::Tablebase>,
+    /// Whether the quiescence search also probes `tablebase`.
+    pub qsearch_tables: bool,
     /// The policy-only engine: a leaf's value is the classical score alone,
     /// tanh(CLASSICAL_K·ΔM), and the network supplies only priors, requested
     /// at the time given. None = the full engine (network value and priors at
@@ -208,6 +210,13 @@ impl PolicyTiming {
 impl TacticalMctsConfig {
     /// The mate search run at a leaf: Tier 1's depths with the tiers on (the
     /// root included), otherwise `leaf_mate` below the root.
+    /// The tables the quiescence search probes, if any.
+    pub fn qsearch_tablebase(&self) -> Option<&crate::egtb::Tablebase> {
+        self.tablebase
+            .as_ref()
+            .filter(|_| self.qsearch_tables && !self.enable_koth)
+    }
+
     pub fn leaf_mate_search(&self, is_root: bool) -> crate::egtb::MateSearch {
         if self.enable_tier1_gate {
             crate::egtb::MateSearch {
@@ -250,6 +259,7 @@ impl Default for TacticalMctsConfig {
             leaf_mate: crate::egtb::MateSearch::OFF,
             policy_only: None,
             tablebase: None,
+            qsearch_tables: true,
         }
     }
 }
@@ -990,7 +1000,7 @@ fn begin_leaf_evaluation(
             &config.pesto,
             config.qsearch_variant,
             config.enable_material_value,
-            config.tablebase.as_ref().filter(|_| !config.enable_koth),
+            config.qsearch_tablebase(),
         );
         if config.enable_material_value {
             stats.qsearch_timing.record(qsearch_start.elapsed());

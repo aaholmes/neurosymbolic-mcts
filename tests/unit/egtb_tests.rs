@@ -149,6 +149,7 @@ fn a_mate_in_one_ends_the_game_as_a_win_for_the_side_to_move() {
     let e = ExactEndings {
         mate: MateSearch::exhaustive(1),
         tablebase: None,
+        ..Default::default()
     };
     // White plays Re8#.
     let white = "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1";
@@ -166,6 +167,7 @@ fn no_mate_in_one_or_the_option_off_does_not_end_the_game() {
     let on = ExactEndings {
         mate: MateSearch::exhaustive(1),
         tablebase: None,
+        ..Default::default()
     };
     let off = ExactEndings::default();
     let white_mates = "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1";
@@ -192,6 +194,7 @@ fn a_position_the_tables_cover_ends_the_game_except_in_king_of_the_hill() {
     let e = ExactEndings {
         mate: MateSearch::exhaustive(1),
         tablebase: Some(tb),
+        ..Default::default()
     };
     let krk = "8/8/8/8/8/2k5/8/R3K3 b - - 0 1";
     assert_eq!(game_end(&e, krk, false), Some((1.0, Ending::Tablebase)));
@@ -236,6 +239,7 @@ fn a_game_ends_at_a_mate_only_as_deep_as_the_search_is_asked_to_look() {
     let with = |mate| ExactEndings {
         mate,
         tablebase: None,
+        ..Default::default()
     };
     let end = |m| game_end(&with(m), QUIET_MATE_IN_TWO, false);
     assert_eq!(end(MateSearch::exhaustive(1)), None);
@@ -303,6 +307,7 @@ fn one_quiet_move_per_line_finds_a_mate_that_starts_with_a_quiet_move() {
             &ExactEndings {
                 mate,
                 tablebase: None,
+                ..Default::default()
             },
             QUIET_MATE_IN_TWO,
             false,
@@ -336,8 +341,11 @@ fn krvk_only(dir: &str) -> std::path::PathBuf {
     let tmp = std::env::temp_dir().join(format!("kf_krvk_{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let link = tmp.join("KRvK.rtbw");
-    if !link.exists() {
-        std::os::unix::fs::symlink(std::path::Path::new(dir).join("KRvK.rtbw"), &link).unwrap();
+    // Tests run in parallel, so another may have made the link first.
+    match std::os::unix::fs::symlink(std::path::Path::new(dir).join("KRvK.rtbw"), &link) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => panic!("{e}"),
     }
     tmp
 }
@@ -363,4 +371,137 @@ fn a_missing_directory_in_the_list_is_an_error() {
     let Some(_) = tables() else { return };
     let dir = std::env::var("KF_SYZYGY_PATH").unwrap_or_else(|_| "/data/syzygy".into());
     assert!(Tablebase::open(&format!("{dir}:/nonexistent/syzygy")).is_err());
+}
+
+const SAMPLE_POSITIONS: [&str; 5] = [
+    "8/8/8/4k3/8/8/8/R3K3 w - - 0 1",
+    "8/8/8/4k3/8/8/8/R3K3 b - - 0 1",
+    "8/8/8/4k3/8/8/1P6/QR2K3 w - - 0 1",
+    "8/8/8/4k3/8/8/8/4KN2 w - - 0 1",
+    "8/2k5/8/8/3pP3/8/8/4K3 b - e3 0 1",
+];
+
+#[test]
+fn memory_mapped_tables_give_the_same_values_as_reading_the_files() {
+    use kingfisher::egtb::TableReads;
+    let Some(mapped) = tables() else { return };
+    // Memory maps are the default.
+    assert_eq!(mapped.reads(), TableReads::Mmap);
+    let read = Tablebase::open_with("/data/syzygy", TableReads::Pread).unwrap();
+    assert_eq!(read.reads(), TableReads::Pread);
+    assert_eq!(mapped.reads(), TableReads::Mmap);
+    assert_eq!(mapped.max_pieces(), 5);
+    for fen in SAMPLE_POSITIONS {
+        assert_eq!(probe(&mapped, fen), probe(&read, fen), "{fen}");
+        assert!(probe(&mapped, fen).is_some(), "{fen}");
+    }
+}
+
+#[test]
+fn the_read_method_is_read_from_the_command_line() {
+    use kingfisher::egtb::{ExactEndings, TableReads};
+    assert!(ExactEndings::from_args(&args("x --syzygy-reads")).is_err());
+    assert!(ExactEndings::from_args(&args("x --syzygy-reads disk")).is_err());
+    let Some(_) = tables() else { return };
+    let tb = |s: &str| {
+        ExactEndings::from_args(&args(s))
+            .unwrap()
+            .tablebase
+            .unwrap()
+    };
+    assert_eq!(tb("x --syzygy /data/syzygy").reads(), TableReads::Mmap);
+    assert_eq!(
+        tb("x --syzygy /data/syzygy --syzygy-reads mmap").reads(),
+        TableReads::Mmap
+    );
+    assert_eq!(
+        tb("x --syzygy-reads pread --syzygy /data/syzygy").reads(),
+        TableReads::Pread
+    );
+}
+
+#[test]
+fn tables_in_the_quiescence_search_can_be_turned_off() {
+    use kingfisher::egtb::ExactEndings;
+    use kingfisher::mcts::tactical_mcts::TacticalMctsConfig;
+    assert!(TacticalMctsConfig::default().qsearch_tables);
+    assert!(ExactEndings::default().qsearch_tables);
+    let on = ExactEndings::from_args(&args("x --mate-in-1")).unwrap();
+    assert!(on.qsearch_tables);
+    assert!(on.apply(TacticalMctsConfig::default()).qsearch_tables);
+    let off = ExactEndings::from_args(&args("x --no-qsearch-tables")).unwrap();
+    assert!(!off.qsearch_tables);
+    assert!(!off.apply(TacticalMctsConfig::default()).qsearch_tables);
+}
+
+#[test]
+fn the_quiescence_search_uses_the_tables_only_when_asked_and_not_in_king_of_the_hill() {
+    use kingfisher::mcts::tactical_mcts::TacticalMctsConfig;
+    let Some(tb) = tables() else { return };
+    let config = |qsearch_tables, enable_koth| TacticalMctsConfig {
+        tablebase: Some(tb.clone()),
+        qsearch_tables,
+        enable_koth,
+        ..Default::default()
+    };
+    assert!(config(true, false).qsearch_tablebase().is_some());
+    assert!(config(false, false).qsearch_tablebase().is_none());
+    assert!(config(true, true).qsearch_tablebase().is_none());
+    assert!(TacticalMctsConfig::default().qsearch_tablebase().is_none());
+}
+
+#[test]
+fn only_positions_whose_material_has_a_table_are_covered() {
+    let Some(_) = tables() else { return };
+    let dir = std::env::var("KF_SYZYGY_PATH").unwrap_or_else(|_| "/data/syzygy".into());
+    let small = Tablebase::open(krvk_only(&dir).to_str().unwrap()).unwrap();
+    let krvk = Board::new_from_fen("8/8/8/4k3/8/8/8/R3K3 w - - 0 1");
+    let kvkr = Board::new_from_fen("r3k3/8/8/8/8/8/8/4K3 w - - 0 1");
+    let kqvk = Board::new_from_fen("8/8/8/4k3/8/8/8/Q3K3 w - - 0 1");
+    assert!(small.covers(&krvk));
+    assert!(small.covers(&kvkr), "either side may hold the rook");
+    assert!(!small.covers(&kqvk), "three pieces, but no KQvK table");
+    assert_eq!(small.probe_value(&kqvk), None);
+    assert_eq!(small.probe_value(&krvk), Some(1.0));
+    let full = tables().unwrap();
+    assert!(full.covers(&kqvk));
+    assert!(!full.covers(&Board::new()));
+}
+
+/// Two 7-piece tables, KRPPvKRP and KPPPvKPP, in KF_SYZYGY7_PATH or /data/syzygy7.
+fn seven_piece_subset() -> Option<Tablebase> {
+    let dir = std::env::var("KF_SYZYGY7_PATH").unwrap_or_else(|_| "/data/syzygy7".into());
+    let six = "/data/syzygy6";
+    let present = |d: &str, t: &str| std::path::Path::new(d).join(t).exists();
+    if !present(&dir, "KRPPvKRP.rtbw")
+        || !present(&dir, "KPPPvKPP.rtbw")
+        || !present(six, "KRPPvKR.rtbw")
+    {
+        eprintln!("skipped: the 7-piece subset or the 6-piece tables are missing");
+        return None;
+    }
+    let Some(_) = tables() else { return None };
+    Some(Tablebase::open(&format!("/data/syzygy:{six}:{dir}")).unwrap())
+}
+
+#[test]
+fn a_partial_set_of_seven_piece_tables_covers_only_its_own_material() {
+    let Some(tb) = seven_piece_subset() else {
+        return;
+    };
+    assert_eq!(tb.max_pieces(), 7);
+    // White: king, rook, two pawns; Black: king, rook, pawn.
+    let krppvkrp = Board::new_from_fen("8/5k2/6p1/8/8/1r3PP1/4R3/6K1 w - - 0 1");
+    let kpppvkpp = Board::new_from_fen("8/5k2/6p1/7p/8/5PPP/8/6K1 w - - 0 1");
+    let krrpvkrp = Board::new_from_fen("8/5k2/6p1/8/8/1r4P1/4R3/R5K1 w - - 0 1");
+    assert!(tb.covers(&krppvkrp));
+    assert!(tb.covers(&kpppvkpp));
+    assert!(!tb.covers(&krrpvkrp));
+    assert!(tb.probe_value(&krppvkrp).is_some());
+    assert!(tb.probe_value(&kpppvkpp).is_some());
+    assert_eq!(tb.probe_value(&krrpvkrp), None);
+    // Each colour can hold the extra pawn.
+    let mirrored = Board::new_from_fen("6k1/4r3/1R3pp1/8/8/6P1/5K2/8 b - - 0 1");
+    assert!(tb.covers(&mirrored));
+    assert_eq!(tb.probe_value(&mirrored), tb.probe_value(&krppvkrp));
 }

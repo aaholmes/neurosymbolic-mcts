@@ -11,11 +11,72 @@ use shakmaty::{CastlingMode, Chess, Position};
 use shakmaty_syzygy::Wdl;
 use std::sync::Arc;
 
+/// How table files are read: by a system call per block (`Pread`), or through
+/// memory maps (`Mmap`), which avoids the system calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableReads {
+    Pread,
+    #[default]
+    Mmap,
+}
+
+impl std::str::FromStr for TableReads {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "pread" => Ok(Self::Pread),
+            "mmap" => Ok(Self::Mmap),
+            _ => Err(format!("--syzygy-reads must be pread or mmap, not {s}")),
+        }
+    }
+}
+
 /// A directory of Syzygy WDL tables, shared between threads.
 #[derive(Clone)]
 pub struct Tablebase {
     tables: Arc<shakmaty_syzygy::Tablebase<Chess>>,
     max_pieces: u32,
+    reads: TableReads,
+    /// The material of every loaded table, from each side's view.
+    materials: Arc<std::collections::HashSet<Material>>,
+}
+
+/// Counts of queens, rooks, bishops, knights and pawns: the side to compare
+/// first, then the other side.
+type Material = [u8; 10];
+
+const TABLE_PIECES: [char; 5] = ['Q', 'R', 'B', 'N', 'P'];
+
+/// The material of a table named like `KRPPvKRP`, from each side's view.
+fn table_materials(name: &str) -> Option<[Material; 2]> {
+    let (a, b) = name.split_once('v')?;
+    let count = |side: &str| -> Option<[u8; 5]> {
+        let mut c = [0u8; 5];
+        for ch in side.strip_prefix('K')?.chars() {
+            c[TABLE_PIECES.iter().position(|&p| p == ch)?] += 1;
+        }
+        Some(c)
+    };
+    let (a, b) = (count(a)?, count(b)?);
+    let join = |x: [u8; 5], y: [u8; 5]| {
+        let mut m = [0u8; 10];
+        m[..5].copy_from_slice(&x);
+        m[5..].copy_from_slice(&y);
+        m
+    };
+    Some([join(a, b), join(b, a)])
+}
+
+/// White's material, then Black's.
+fn board_material(board: &Board) -> Material {
+    use crate::piece_types::{BISHOP, BLACK, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+    let mut m = [0u8; 10];
+    for (side, color) in [WHITE, BLACK].into_iter().enumerate() {
+        for (i, piece) in [QUEEN, ROOK, BISHOP, KNIGHT, PAWN].into_iter().enumerate() {
+            m[side * 5 + i] = board.get_piece_bitboard(color, piece).count_ones() as u8;
+        }
+    }
+    m
 }
 
 impl std::fmt::Debug for Tablebase {
@@ -29,23 +90,36 @@ impl Tablebase {
     /// colons (as Stockfish's SyzygyPath). An error if a directory cannot be
     /// read, or if none holds a WDL table.
     pub fn open(dirs: &str) -> Result<Self, String> {
-        let mut tables = shakmaty_syzygy::Tablebase::new();
+        Self::open_with(dirs, TableReads::default())
+    }
+
+    /// As `open`, reading the files as `reads` says.
+    pub fn open_with(dirs: &str, reads: TableReads) -> Result<Self, String> {
+        let mut tables = match reads {
+            TableReads::Pread => shakmaty_syzygy::Tablebase::new(),
+            // Safety: the table files are not modified while the program runs,
+            // and a read error on them ends the program (SIGBUS) instead of
+            // returning an error.
+            TableReads::Mmap => unsafe { shakmaty_syzygy::Tablebase::with_mmap_filesystem() },
+        };
         let mut max_pieces = 0;
+        // Bare kings are a draw without any table.
+        let mut materials = std::collections::HashSet::from([[0u8; 10]]);
         for dir in dirs.split(':').filter(|d| !d.is_empty()) {
             tables
                 .add_directory(dir)
                 .map_err(|e| format!("cannot read Syzygy tables in {dir}: {e}"))?;
             // A table's name lists its pieces, e.g. KRvK.rtbw has three.
-            let most = std::fs::read_dir(dir)
+            for name in std::fs::read_dir(dir)
                 .map_err(|e| format!("cannot read {dir}: {e}"))?
                 .filter_map(|e| e.ok()?.file_name().into_string().ok())
-                .filter_map(|n| {
-                    n.strip_suffix(".rtbw")
-                        .map(|s| s.replace('v', "").len() as u32)
-                })
-                .max()
-                .unwrap_or(0);
-            max_pieces = max_pieces.max(most);
+            {
+                let Some(table) = name.strip_suffix(".rtbw") else {
+                    continue;
+                };
+                max_pieces = max_pieces.max(table.replace('v', "").len() as u32);
+                materials.extend(table_materials(table).into_iter().flatten());
+            }
         }
         if max_pieces == 0 {
             return Err(format!("no Syzygy WDL tables (.rtbw) in {dirs}"));
@@ -53,7 +127,25 @@ impl Tablebase {
         Ok(Self {
             tables: Arc::new(tables),
             max_pieces,
+            reads,
+            materials: Arc::new(materials),
         })
+    }
+
+    /// How the table files are read.
+    pub fn reads(&self) -> TableReads {
+        self.reads
+    }
+
+    /// True if a loaded table holds `board`'s material and no castling rights
+    /// remain: a check on piece counts, much cheaper than a probe.
+    pub fn covers(&self, board: &Board) -> bool {
+        let c = &board.castling_rights;
+        let can_castle =
+            c.white_kingside || c.white_queenside || c.black_kingside || c.black_queenside;
+        board.get_all_occupancy().count_ones() <= self.max_pieces
+            && !can_castle
+            && self.materials.contains(&board_material(board))
     }
 
     /// The most pieces (kings included) of any loaded table.
@@ -65,21 +157,24 @@ impl Tablebase {
     /// loss), or None if the tables do not cover it: too many pieces, or
     /// castling rights left.
     pub fn probe_value(&self, board: &Board) -> Option<f32> {
-        let c = &board.castling_rights;
-        let can_castle =
-            c.white_kingside || c.white_queenside || c.black_kingside || c.black_queenside;
-        if board.get_all_occupancy().count_ones() > self.max_pieces || can_castle {
+        if !self.covers(board) {
             return None;
         }
         let fen: Fen = board.to_fen()?.parse().ok()?;
         let pos: Chess = fen
-            .position(CastlingMode::Standard)
+            .into_position(CastlingMode::Standard)
             .or_else(|e| e.ignore_invalid_ep_square().map_err(drop))
             .ok()?;
         if pos.is_insufficient_material() {
             return Some(0.0);
         }
-        self.tables.probe_wdl(&pos).ok().map(wdl_to_value)
+        // Self-play applies the fifty-move rule but the tables are probed as if the
+        // last move were a capture or pawn move: the WDL files alone cannot
+        // count the moves since.
+        self.tables
+            .probe_wdl_after_zeroing(&pos)
+            .ok()
+            .map(wdl_to_value)
     }
 
     /// The result of the game from White's side (+1 White wins, 0 draw, −1
@@ -168,10 +263,23 @@ impl MateSearch {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ExactEndings {
     pub mate: MateSearch,
     pub tablebase: Option<Tablebase>,
+    /// Whether the quiescence search also probes the tables, at every position
+    /// in its lines (`--no-qsearch-tables` turns this off).
+    pub qsearch_tables: bool,
+}
+
+impl Default for ExactEndings {
+    fn default() -> Self {
+        Self {
+            mate: MateSearch::OFF,
+            tablebase: None,
+            qsearch_tables: true,
+        }
+    }
 }
 
 /// The number after `flag` in `args`, if the flag is there.
@@ -195,10 +303,17 @@ impl ExactEndings {
     /// the tables. An error if a number or directory is missing, or the
     /// directory holds no tables.
     pub fn from_args(args: &[String]) -> Result<Self, String> {
+        let reads = match args.iter().position(|a| a == "--syzygy-reads") {
+            Some(i) => args
+                .get(i + 1)
+                .ok_or("--syzygy-reads needs pread or mmap")?
+                .parse()?,
+            None => TableReads::default(),
+        };
         let tablebase = match args.iter().position(|a| a == "--syzygy") {
             Some(i) => {
                 let dir = args.get(i + 1).ok_or("--syzygy needs a directory")?;
-                Some(Tablebase::open(dir)?)
+                Some(Tablebase::open_with(dir, reads)?)
             }
             None => None,
         };
@@ -224,7 +339,11 @@ impl ExactEndings {
                 quiet,
             }
         };
-        Ok(Self { mate, tablebase })
+        Ok(Self {
+            mate,
+            tablebase,
+            qsearch_tables: !has("--no-qsearch-tables"),
+        })
     }
 
     /// `config` with these options set.
@@ -235,6 +354,7 @@ impl ExactEndings {
         crate::mcts::tactical_mcts::TacticalMctsConfig {
             leaf_mate: self.mate,
             tablebase: self.tablebase.clone(),
+            qsearch_tables: self.qsearch_tables,
             ..config
         }
     }
