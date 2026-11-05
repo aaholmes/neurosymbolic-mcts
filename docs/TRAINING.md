@@ -235,11 +235,9 @@ search, which depends only on the position and the current network, not on how t
   share its result, so a run has only 45,000–78,000 independent value labels. The classical
   score also gives a head start: in the chess variant, the untrained tiered engine played about
   as well as a trained network-only baseline.
-- **Against:** strength is capped by a shallow search on a hand-tuned evaluation (PeSTO), however
+- **Costs:** strength is capped by a shallow search on a hand-tuned evaluation (PeSTO), however
   good the policy becomes, and MCTS averages leaf values rather than taking the minimax, so a
-  weak evaluation costs more than in alpha-beta search. Self-play with the full classical search
-  is limited by the CPU (about 110 moves/s, compared with 765 for the network alone) until
-  quiescence search is made cheaper.
+  weak evaluation costs more than in alpha-beta search.
 - **Related work:** training an evaluation toward search values rather than game results is
   established: TreeStrap ([Veness et al., NeurIPS 2009](https://papers.nips.cc/paper/3722-bootstrapping-from-game-tree-search))
   and TDLeaf(λ) ([Baxter et al., 2000](https://arxiv.org/abs/cs/9901001)) in classical chess, and
@@ -247,6 +245,7 @@ search, which depends only on the position and the current network, not on how t
   ([Willemsen et al., 2021](https://link.springer.com/content/pdf/10.1007/s00521-021-05928-5.pdf)).
   No published comparison of a learned policy and a fixed evaluation with full AlphaZero was
   found.
-- **Test:** matched 4-hour runs from scratch, two seeds each, of the network alone, the full
-  tiered engine and the policy-only tiered engine, rated with a fixed opponent. A 12-hour pair
-  would follow if the policy-only engine is close, since 4 hours may favour its head start.
+- **Result so far:** in matched one-hour runs (two seeds per engine, 100 games per pair, 100
+  simulations per move), the policy-only engine rated 18 Elo [6, 29] below the network-only engine,
+  although it generated three times as many positions (20.9M and 22.5M, compared with 7.5M and
+  7.6M). The full engine rated 131 Elo [116, 146] above the network-only engine.
